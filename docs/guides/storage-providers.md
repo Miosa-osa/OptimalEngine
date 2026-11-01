@@ -33,6 +33,9 @@ A provider listed without an implementing module reports `adapter_missing` regar
 Health is only claimed on evidence.
 Without `probe=true` a configured service provider reports `configured_unverified`, and with `probe=true` the adapter makes a real authenticated request.
 
+The embedded providers report `active` because the running engine uses them.
+RocksDB is the exception: it is `active` only when `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb` put the knowledge store on it, and on an ETS knowledge store it reports `available`.
+
 Provider status never returns credentials, connection strings, or secret values; only the names of the environment variables a provider reads.
 
 Today `s3` and `postgres` are the service providers with an adapter.

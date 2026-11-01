@@ -16,6 +16,11 @@ defmodule OptimalEngine.Storage.Providers do
   whether this build's `OptimalEngine.Store` uses that implementation. The
   choice is made when the engine is compiled, so an available PostgreSQL
   provider in a build that selected SQLite holds none of the engine's data.
+
+  RocksDB is `active` only when the knowledge store runs on it
+  (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`). On an ETS knowledge store it reports
+  `available`: the library is loaded and a restart with that setting moves the
+  graph onto it.
   """
 
   @providers [
@@ -64,6 +69,7 @@ defmodule OptimalEngine.Storage.Providers do
       role: "projection",
       capabilities: ~w(graph)a,
       activation: "default_local",
+      in_use: :knowledge_backend,
       probe: {:module, :rocksdb},
       required_env: [],
       optional_env: []
@@ -268,20 +274,25 @@ defmodule OptimalEngine.Storage.Providers do
     configured = Enum.all?(provider.required_env, &present_env?/1)
     missing = Enum.reject(provider.required_env, &present_env?/1)
     probe? = Keyword.get(opts, :probe, false)
+    in_use = in_use?(provider)
 
+    # A default local provider this engine does not run on (RocksDB on an ETS
+    # knowledge store) gets its local probe instead of the running engine's
+    # word for its health.
     health =
       cond do
         provider.required_env != [] and not configured -> :not_configured
         probe? -> run_probe(provider.probe)
-        provider.activation == "default_local" -> :healthy
+        provider.activation == "default_local" and in_use -> :healthy
+        provider.activation == "default_local" -> run_probe(provider.probe)
         true -> :configured
       end
 
     adapter_implemented = adapter_implemented?(provider.adapter)
-    lifecycle_state = lifecycle_state(provider, adapter_implemented, configured, health)
+    lifecycle_state = lifecycle_state(provider, adapter_implemented, configured, health, in_use)
 
     provider
-    |> Map.drop([:adapter, :store, :probe, :required_env, :optional_env])
+    |> Map.drop([:adapter, :store, :probe, :required_env, :optional_env, :in_use])
     |> put_selected(provider)
     |> Map.put(:adapter_implemented, adapter_implemented)
     |> Map.put(:adapter_module, adapter_name(provider.adapter, adapter_implemented))
@@ -304,13 +315,23 @@ defmodule OptimalEngine.Storage.Providers do
 
   defp put_selected(inspected, _provider), do: inspected
 
+  # RocksDB is in use only when the knowledge store runs on it; every other
+  # default local provider is part of every engine.
+  defp in_use?(%{in_use: :knowledge_backend}),
+    do: OptimalEngine.Knowledge.DefaultStore.backend() == OptimalEngine.Knowledge.Backend.RocksDB
+
+  defp in_use?(_provider), do: true
+
   # A missing adapter outranks every configuration or probe result.
-  defp lifecycle_state(_provider, false, _configured, _health), do: "adapter_missing"
-  defp lifecycle_state(%{activation: "default_local"}, true, true, :healthy), do: "active"
-  defp lifecycle_state(_provider, true, false, _health), do: "not_configured"
-  defp lifecycle_state(_provider, true, true, :healthy), do: "available"
-  defp lifecycle_state(_provider, true, true, :configured), do: "configured_unverified"
-  defp lifecycle_state(_provider, true, true, _health), do: "unavailable"
+  defp lifecycle_state(_provider, false, _configured, _health, _in_use), do: "adapter_missing"
+
+  defp lifecycle_state(%{activation: "default_local"}, true, true, :healthy, true),
+    do: "active"
+
+  defp lifecycle_state(_provider, true, false, _health, _in_use), do: "not_configured"
+  defp lifecycle_state(_provider, true, true, :healthy, _in_use), do: "available"
+  defp lifecycle_state(_provider, true, true, :configured, _in_use), do: "configured_unverified"
+  defp lifecycle_state(_provider, true, true, _health, _in_use), do: "unavailable"
 
   defp adapter_implemented?(nil), do: false
   defp adapter_implemented?(module) when is_atom(module), do: Code.ensure_loaded?(module)

@@ -59,6 +59,14 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
     end
   end
 
+  @doc """
+  The backend module the default store runs on, decided the same way the store
+  is started: RocksDB requested on a build without the `:rocksdb` library runs
+  on ETS.
+  """
+  @spec backend() :: module()
+  def backend, do: elem(resolve_backend(), 0)
+
   # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
@@ -71,6 +79,12 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
   end
 
   defp configured_backend do
+    {backend, backend_opts, {level, message}} = resolve_backend()
+    Logger.log(level, "[DefaultStore] " <> message)
+    {backend, backend_opts}
+  end
+
+  defp resolve_backend do
     config = Application.get_env(:optimal_engine, :knowledge, [])
 
     requested =
@@ -83,26 +97,21 @@ defmodule OptimalEngine.Knowledge.DefaultStore do
 
     cond do
       requested == "rocksdb" and not Code.ensure_loaded?(:rocksdb) ->
-        Logger.warning(
-          "[DefaultStore] OPTIMAL_KNOWLEDGE_BACKEND=rocksdb requested but :rocksdb is unavailable; falling back to ETS"
-        )
-
-        {OptimalEngine.Knowledge.Backend.ETS, []}
+        {OptimalEngine.Knowledge.Backend.ETS, [],
+         {:warning,
+          "OPTIMAL_KNOWLEDGE_BACKEND=rocksdb requested but :rocksdb is unavailable; falling back to ETS"}}
 
       requested == "rocksdb" ->
         path =
           Keyword.get(config, :rocksdb_path, Path.join(File.cwd!(), ".optimal/knowledge-rocksdb"))
 
-        Logger.info("[DefaultStore] Knowledge backend: RocksDB at #{path}")
-        {backend, path: path}
+        {backend, [path: path], {:info, "Knowledge backend: RocksDB at #{path}"}}
 
       requested == "mnesia" ->
-        Logger.info("[DefaultStore] Knowledge backend: Mnesia")
-        {backend, copies: :ram_copies}
+        {backend, [copies: :ram_copies], {:info, "Knowledge backend: Mnesia"}}
 
       true ->
-        Logger.info("[DefaultStore] Knowledge backend: ETS")
-        {backend, []}
+        {backend, [], {:info, "Knowledge backend: ETS"}}
     end
   end
 

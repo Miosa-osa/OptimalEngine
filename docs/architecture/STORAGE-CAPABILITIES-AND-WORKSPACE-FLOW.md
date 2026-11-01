@@ -144,6 +144,7 @@ It outranks configuration and probes: a reachable endpoint the engine cannot tal
 Every provider reports `adapter_implemented`, and today only the embedded local providers have adapters.
 
 `active` means a default local provider is currently part of the running engine.
+RocksDB is `active` only when the knowledge store runs on it (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`); on an ETS knowledge store it reports `available`.
 
 `not_configured` means required configuration references are absent.
 

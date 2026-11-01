@@ -29,8 +29,42 @@ defmodule OptimalEngine.Storage.ProvidersTest do
     assert ids == ~w(sqlite fts5 embedded_vectors rocksdb filesystem ets)
     assert plan.ready
     assert plan.adapter_missing == []
-    assert Enum.all?(plan.providers, &(&1.lifecycle_state == "active"))
     assert Enum.all?(plan.providers, & &1.adapter_implemented)
+
+    for provider <- plan.providers, provider.id != "rocksdb" do
+      assert provider.lifecycle_state == "active", provider.id
+    end
+  end
+
+  describe "the RocksDB provider" do
+    setup do
+      knowledge = Application.get_env(:optimal_engine, :knowledge, [])
+      on_exit(fn -> Application.put_env(:optimal_engine, :knowledge, knowledge) end)
+      {:ok, knowledge: knowledge}
+    end
+
+    test "is active when the knowledge store runs on RocksDB", %{knowledge: knowledge} do
+      Application.put_env(:optimal_engine, :knowledge, Keyword.put(knowledge, :backend, "rocksdb"))
+
+      assert {:ok, rocksdb} = Providers.get("rocksdb")
+      assert rocksdb.lifecycle_state == "active"
+      assert rocksdb.health == "healthy"
+    end
+
+    test "is available, not active, when the knowledge store runs on ETS", %{
+      knowledge: knowledge
+    } do
+      Application.put_env(:optimal_engine, :knowledge, Keyword.put(knowledge, :backend, "ets"))
+
+      for opts <- [[], [probe: true]] do
+        assert {:ok, rocksdb} = Providers.get("rocksdb", opts)
+        assert rocksdb.lifecycle_state == "available"
+        assert rocksdb.health == "healthy"
+      end
+
+      assert {:ok, plan} = Planner.plan(["desktop_local"])
+      assert plan.ready
+    end
   end
 
   test "a canonical store the build does not run on is never ready, however healthy" do
