@@ -150,7 +150,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_moved_ledger_ids(),
       migration_graph_edge_asserted_by(),
       migration_workspace_id_order_indexes(),
-      migration_key_grants_backfill()
+      migration_key_grants_backfill(),
+      migration_triple_mirror_changes()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -764,6 +765,36 @@ defmodule OptimalEngine.Store.Migrations do
                                  WHERE scope.value IN ('*', 'admin')) THEN 0
                 ELSE 1
               END = 1
+        """}
+     ]}
+  end
+
+  # The knowledge triple store (Knowledge.DefaultStore) mirrors graph_edges.
+  # Writes reach it as they happen, but an edge also leaves by paths that
+  # never tell it: an erasure, a peer's replicated delete, a context moved to
+  # another workspace, a graph rebuild. Every delete and every change of an
+  # edge's graph, subject, predicate or object is recorded here by triggers on
+  # graph_edges (Knowledge.Mirror), in the same transaction as the write, and
+  # the running store applies the rows and removes them. The triggers are
+  # installed at boot, not here: the PostgreSQL schema is derived from these
+  # migrations and has no counterpart for a trigger that writes an ordinary
+  # table. Additive. The version is provisional, like the ones above.
+  @triple_mirror_changes_version 86
+
+  defp migration_triple_mirror_changes do
+    {@triple_mirror_changes_version,
+     "knowledge mirror: graph edge changes the triple store has yet to apply",
+     [
+       {"triple_mirror_changes",
+        """
+        CREATE TABLE IF NOT EXISTS triple_mirror_changes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          op TEXT NOT NULL,
+          graph TEXT NOT NULL,
+          subject TEXT NOT NULL,
+          predicate TEXT NOT NULL,
+          object TEXT NOT NULL
+        )
         """}
      ]}
   end
