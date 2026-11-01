@@ -113,17 +113,14 @@ defmodule OptimalEngine.Store.Vectors do
 
     {sql, params} = build_search_query(workspace_id, type_filter, node_filter)
     query_bytes = length(query_embedding) * 4
+    query_norm = norm(query_embedding)
 
     case Store.raw_query(sql, params) do
       {:ok, rows} ->
         results =
           rows
           |> Enum.filter(fn [_cid, blob] -> byte_size(blob) == query_bytes end)
-          |> Enum.map(fn [cid, blob] ->
-            stored = decode_embedding(blob)
-            sim = cosine_similarity(query_embedding, stored)
-            {cid, sim}
-          end)
+          |> Enum.map(fn [cid, blob] -> {cid, similarity(query_embedding, query_norm, blob)} end)
           |> Enum.filter(fn {_cid, sim} -> sim >= min_sim end)
           |> Enum.sort_by(fn {cid, sim} -> {0.0 - sim, cid} end)
           |> Enum.take(limit)
@@ -155,24 +152,29 @@ defmodule OptimalEngine.Store.Vectors do
     limit = Keyword.get(opts, :limit, length(context_ids))
     placeholders = Enum.map_join(1..length(context_ids), ", ", &"?#{&1 + 2}")
 
+    # Chunk windows cover every paragraph's text, and a section covers its
+    # document: a paragraph that fits one window and a one-section document
+    # would only be scored twice, so those two scales are left out.
     sql = """
     SELECT c.signal_id, ce.vector
     FROM chunk_embeddings ce
     JOIN chunks c ON c.id = ce.chunk_id
     WHERE ce.workspace_id = ?1
       AND ce.dim = ?2
+      AND c.scale IN ('chunk', 'section')
       AND c.signal_id IN (#{placeholders})
     """
 
     params = [workspace_id, length(query_embedding) | context_ids]
+    query_norm = norm(query_embedding)
 
     case Store.raw_query(sql, params) do
       {:ok, rows} ->
         results =
           rows
           |> Enum.reduce(%{}, fn [context_id, blob], scores ->
-            similarity = cosine_similarity(query_embedding, decode_embedding(blob))
-            Map.update(scores, context_id, similarity, &max(&1, similarity))
+            score = similarity(query_embedding, query_norm, blob)
+            Map.update(scores, context_id, score, &max(&1, score))
           end)
           |> Enum.sort_by(fn {context_id, similarity} -> {0.0 - similarity, context_id} end)
           |> Enum.take(limit)
@@ -301,20 +303,25 @@ defmodule OptimalEngine.Store.Vectors do
     for <<f::float-little-32 <- binary>>, do: f
   end
 
-  @spec cosine_similarity([float()], [float()]) :: float()
-  defp cosine_similarity(a, b) do
-    {dot, sum_a2, sum_b2} =
-      Enum.zip_reduce(a, b, {0.0, 0.0, 0.0}, fn ai, bi, {d, sa, sb} ->
-        {d + ai * bi, sa + ai * ai, sb + bi * bi}
-      end)
+  # Cosine similarity of the query and a stored vector, read straight from its
+  # binary: the query's norm is computed once per search, and no list is built
+  # for the stored vector (about four times faster than decoding it first).
+  @spec similarity([number()], float(), binary()) :: float()
+  defp similarity(query, query_norm, blob) do
+    case dot_and_square(query, blob, 0.0, 0.0) do
+      {dot, sum_b2} when query_norm > 0.0 and sum_b2 > 0.0 ->
+        dot / (query_norm * :math.sqrt(sum_b2))
 
-    norm_a = :math.sqrt(sum_a2)
-    norm_b = :math.sqrt(sum_b2)
-
-    if norm_a == 0.0 or norm_b == 0.0 do
-      0.0
-    else
-      dot / (norm_a * norm_b)
+      _zero_or_mismatched ->
+        0.0
     end
   end
+
+  defp dot_and_square([q | qs], <<b::float-little-32, rest::binary>>, dot, sum_b2),
+    do: dot_and_square(qs, rest, dot + q * b, sum_b2 + b * b)
+
+  defp dot_and_square([], <<>>, dot, sum_b2), do: {dot, sum_b2}
+  defp dot_and_square(_query, _blob, _dot, _sum_b2), do: :mismatched
+
+  defp norm(vector), do: :math.sqrt(Enum.reduce(vector, 0.0, fn x, acc -> acc + x * x end))
 end

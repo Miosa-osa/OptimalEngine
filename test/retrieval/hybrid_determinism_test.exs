@@ -49,13 +49,13 @@ defmodule OptimalEngine.Retrieval.HybridDeterminismTest do
 
   defp uris_of(results), do: Enum.map(results, & &1.uri)
 
-  defp insert_chunk_embedding(workspace, chunk_id, context_id, vector) do
+  defp insert_chunk_embedding(workspace, chunk_id, context_id, vector, scale \\ "chunk") do
     blob = for value <- vector, into: <<>>, do: <<value::float-little-32>>
 
     {:ok, _} =
       OptimalEngine.Store.raw_query(
-        "INSERT INTO chunks (id, tenant_id, signal_id, scale, text, workspace_id) VALUES (?1, 'default', ?2, 'chunk', ?3, ?4)",
-        [chunk_id, context_id, context_id, workspace]
+        "INSERT INTO chunks (id, tenant_id, signal_id, scale, text, workspace_id) VALUES (?1, 'default', ?2, ?5, ?3, ?4)",
+        [chunk_id, context_id, context_id, workspace, scale]
       )
 
     {:ok, _} =
@@ -248,6 +248,30 @@ defmodule OptimalEngine.Retrieval.HybridDeterminismTest do
                Vectors.rerank_contexts(@vector, ids, workspace_id: ctx.ws_a, limit: 2)
 
       assert Enum.map(pairs, &elem(&1, 0)) == Enum.take(ids, 2)
+    end
+
+    test "rerank_contexts scores chunk windows and sections, not their paragraph and document copies",
+         ctx do
+      [windows, copies] = for name <- ~w(windows copies), do: "#{ctx.token}-#{name}"
+
+      for {id, n} <- [{windows, 1}, {copies, 2}] do
+        insert_context(ctx.ws_a, id, "optimal://nodes/ranking/#{ctx.token}/scale-#{n}", ctx.token)
+      end
+
+      # The best window and the section of the first context score 0.6 and 0.8.
+      insert_chunk_embedding(ctx.ws_a, "#{windows}-w", windows, [0.6, 0.8, 0.0, 0.0])
+      insert_chunk_embedding(ctx.ws_a, "#{windows}-s", windows, [0.8, 0.6, 0.0, 0.0], "section")
+      # The second matches the query exactly only in scales a window or a
+      # section already covers.
+      insert_chunk_embedding(ctx.ws_a, "#{copies}-p", copies, @vector, "paragraph")
+      insert_chunk_embedding(ctx.ws_a, "#{copies}-d", copies, @vector, "document")
+      insert_chunk_embedding(ctx.ws_a, "#{copies}-w", copies, [0.0, 1.0, 0.0, 0.0])
+
+      assert {:ok, [{^windows, best}, {^copies, other}]} =
+               Vectors.rerank_contexts(@vector, [copies, windows], workspace_id: ctx.ws_a)
+
+      assert_in_delta best, 0.8, 1.0e-6
+      assert_in_delta other, 0.0, 1.0e-6
     end
   end
 end
