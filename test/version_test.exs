@@ -7,7 +7,7 @@ defmodule OptimalEngine.VersionTest do
     info = Version.info()
 
     assert info.application == "optimal_engine"
-    assert info.version == "0.3.11"
+    assert info.version == "0.3.12"
     assert info.release_channel == "dev"
     assert "dev" in Version.release_channels()
     contract = File.read!(Path.expand("../engine-contract.json", __DIR__)) |> Jason.decode!()

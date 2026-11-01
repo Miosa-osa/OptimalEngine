@@ -21,8 +21,8 @@ Two other command surfaces exist and are not this client:
 From a release archive:
 
 ```bash
-tar -xzf optimal-0.3.11-linux-amd64.tar.gz
-optimal-0.3.11-linux-amd64/install.sh            # /usr/local/bin if writable, else ~/.local/bin
+tar -xzf optimal-0.3.12-linux-amd64.tar.gz
+optimal-0.3.12-linux-amd64/install.sh            # /usr/local/bin if writable, else ~/.local/bin
 optimal --version
 ```
 
