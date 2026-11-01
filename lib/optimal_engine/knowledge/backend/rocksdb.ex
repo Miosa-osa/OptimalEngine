@@ -204,8 +204,17 @@ defmodule OptimalEngine.Knowledge.Backend.RocksDB do
   @impl true
   def terminate(state) do
     :rocksdb.close(state.db)
-    if Process.alive?(state.dict_pid), do: GenServer.stop(state.dict_pid)
+    stop_dictionary(state.dict_pid)
     :ok
+  end
+
+  # The dictionary process can already be on its way down, for example when
+  # it is linked to a caller that exited: GenServer.stop then exits with that
+  # reason, and a dictionary that is gone is what terminate wants.
+  defp stop_dictionary(pid) do
+    GenServer.stop(pid)
+  catch
+    :exit, _gone -> :ok
   end
 
   # ---------------------------------------------------------------------------
