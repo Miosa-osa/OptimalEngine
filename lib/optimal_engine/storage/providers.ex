@@ -151,13 +151,13 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "qdrant",
-      adapter: nil,
+      adapter: OptimalEngine.Storage.Qdrant.Adapter,
       name: "Qdrant",
       kind: "service",
       role: "projection",
       capabilities: ~w(vector)a,
       activation: "high_scale_semantic",
-      probe: {:http, "OPTIMAL_QDRANT_URL", "/healthz"},
+      probe: :qdrant,
       required_env: ["OPTIMAL_QDRANT_URL"],
       optional_env: ["OPTIMAL_QDRANT_API_KEY"]
     },
@@ -265,7 +265,7 @@ defmodule OptimalEngine.Storage.Providers do
   # A service with an adapter is proved by its own round trip; the shape of the
   # answer is the same for every one of them.
   defp proof_for(%{id: id, adapter: adapter} = provider, opts)
-       when id in ~w(valkey nats_jetstream) do
+       when id in ~w(valkey nats_jetstream qdrant) do
     if Enum.all?(provider.required_env, &present_env?/1) do
       case adapter.probe(opts) do
         {:ok, evidence} -> %{provider: id, status: "pass", evidence: evidence}
@@ -372,6 +372,9 @@ defmodule OptimalEngine.Storage.Providers do
 
   # A TCP accept is not a stream. The NATS probe is a PONG and a JetStream account answer.
   defp run_probe(:nats), do: OptimalEngine.Storage.NATS.Adapter.health()
+
+  # /healthz answers anyone. The Qdrant probe lists collections with the key.
+  defp run_probe(:qdrant), do: OptimalEngine.Storage.Qdrant.Adapter.health()
 
   defp run_probe(:root_path) do
     path = Application.get_env(:optimal_engine, :root_path, ".")

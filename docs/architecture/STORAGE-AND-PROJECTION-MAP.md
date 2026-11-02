@@ -48,7 +48,7 @@ The "Wired?" column says whether a working adapter exists in this repository tod
 | Sealed connector keys | Connector and peer credentials, authority signing keys. | Yes, as ciphertext. | No. | Wired. | Stored sealed in the database. The keys (`CONNECTOR_KEY`, `OPTIMAL_AUTHORITY_KEY`) live outside it, and `OPTIMAL_BACKUP_KEY` seals offsite backups. Losing a key loses what it sealed. |
 | NATS JetStream | Replayable event, job, connector, and replication transport. | No. | Yes from the governed mutation and job ledgers. | Adapter: `OptimalEngine.Storage.NATS.Adapter` (NATS text protocol, `OPTIMAL_NATS_URL`); proved by a stream created, a message published and read back by sequence. | Transport never replaces canonical state. |
 | Valkey | Distributed cache, rate limits, locks, and coordination. | No. | Yes. | Adapter: `OptimalEngine.Storage.Valkey.Adapter` (RESP over TCP, `OPTIMAL_VALKEY_URL`); proved by a set, get and delete round trip. | Ephemeral acceleration only. |
-| Qdrant | High-scale semantic retrieval projection. | No. | Yes. | Declared, no adapter yet. | Vector results remain candidates, not truth. Embedded vectors serve every Engine today. |
+| Qdrant | High-scale semantic retrieval projection. | No. | Yes. | Adapter: `OptimalEngine.Storage.Qdrant.Adapter` (REST, `OPTIMAL_QDRANT_URL`, `api-key` from `OPTIMAL_QDRANT_API_KEY`); proved by a collection created, a point upserted, searched and read back. | Vector results remain candidates, not truth. Embedded vectors serve every Engine today. |
 | DuckDB and Parquet | Large analytical and historical projections. | No for transactional state. | Yes. | Declared, no adapter yet. | Analytics remain isolated from operational writes. |
 | OpenBao | Secret, key, PKI, and credential lifecycle. | Yes for managed secrets. | Recovery follows secret-manager policy. | Declared, no adapter yet. | Workspace policies contain references, not secret values. |
 | Fractal Computing | Enterprise synchronized digital-twin substrate. | Governed by the enterprise integration boundary. | Depends on the enterprise contract. | Declared, no adapter yet. | Cloud-only partner capability with controlled, auditable promotion to systems of record. |
@@ -257,7 +257,7 @@ Each moves one concern off the single disk without changing what the Engine stor
 | Canonical relational store | PostgreSQL, a compile-time `OPTIMAL_STORE=postgres` build | Wired, partial. It refuses full-text search, replication, and app data collections. |
 | Replayable events and jobs | NATS JetStream | Adapter wired; `available` when `OPTIMAL_NATS_URL` answers with JetStream. |
 | Distributed cache and locks | Valkey | Adapter wired; `available` when `OPTIMAL_VALKEY_URL` answers. |
-| High-scale vectors | Qdrant | Declared, no adapter yet. |
+| High-scale vectors | Qdrant | Adapter wired; `available` when `OPTIMAL_QDRANT_URL` lists collections. |
 | Analytics | DuckDB and Parquet | Declared, no adapter yet. |
 | Secrets | OpenBao | Declared, no adapter yet. |
 | Enterprise digital twin | Fractal | Declared, no adapter yet. |
