@@ -102,6 +102,41 @@ defmodule OptimalEngine.Storage.NATSAdapterTest do
              Providers.proofs() |> Enum.filter(&(&1.provider == "nats_jetstream"))
   end
 
+  test "a proof that cannot delete its stream is not a pass" do
+    {:ok, stub} = NATSStub.start(delete: :refused)
+    on_exit(fn -> NATSStub.stop(stub) end)
+
+    point_at(stub)
+    assert {:error, {:stream_not_deleted, {:error, {:jetstream, 403, _}}}} = NATS.round_trip()
+  end
+
+  test "a server that is not NATS gets its connection closed, not kept" do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, port} = :inet.port(listener)
+    test = self()
+
+    spawn_link(fn ->
+      {:ok, socket} = :gen_tcp.accept(listener, 2_000)
+      :ok = :gen_tcp.send(socket, "HELLO\r\n")
+      send(test, {:after_greeting, :gen_tcp.recv(socket, 0, 2_000)})
+    end)
+
+    System.put_env(NATS.env_name(), "nats://127.0.0.1:#{port}")
+    assert NATS.health() == :unreachable
+    assert_receive {:after_greeting, {:error, :closed}}, 3_000
+    :gen_tcp.close(listener)
+  end
+
+  test "a plus in a token stays a plus, and a malformed escape is invalid, never a raise" do
+    System.put_env(NATS.env_name(), "nats://ab+cd@127.0.0.1:4222")
+    assert {:ok, %{token: "ab+cd"}} = NATS.config()
+
+    System.put_env(NATS.env_name(), "nats://p%zz@127.0.0.1:4222")
+    assert {:error, :invalid_credentials} = NATS.config()
+    assert NATS.health() == :invalid_config
+    assert {:ok, _provider} = Providers.get("nats_jetstream", probe: true)
+  end
+
   test "a token is sent in CONNECT and a wrong one is unreachable, not healthy" do
     {:ok, stub} = NATSStub.start(token: "right")
     on_exit(fn -> NATSStub.stop(stub) end)

@@ -114,7 +114,7 @@ defmodule OptimalEngine.Storage.NATS do
             num_replicas: 1
           })
 
-        try do
+        result =
           with {:ok, %{"config" => %{"name" => ^stream}}} <-
                  js_request(conn, "STREAM.CREATE.#{stream}", create, timeout),
                {:ok, %{"stream" => ^stream, "seq" => seq}} <-
@@ -128,8 +128,20 @@ defmodule OptimalEngine.Storage.NATS do
             :error -> {:error, {:round_trip_mismatch, :undecodable_payload}}
             {:error, reason} -> {:error, reason}
           end
-        after
-          js_request(conn, "STREAM.DELETE.#{stream}", "", timeout)
+
+        # The stream goes whatever happened; a proof that cannot remove it is
+        # not a pass, because it left a stream behind with no expiry of its own.
+        deleted = js_request(conn, "STREAM.DELETE.#{stream}", "", timeout)
+
+        case {result, deleted} do
+          {{:ok, evidence}, {:ok, %{"success" => true}}} ->
+            {:ok, Map.put(evidence, :stream_deleted, true)}
+
+          {{:ok, _evidence}, other} ->
+            {:error, {:stream_not_deleted, other}}
+
+          {error, _deleted} ->
+            error
         end
       end)
     end
@@ -139,29 +151,37 @@ defmodule OptimalEngine.Storage.NATS do
   # Connection
   # ---------------------------------------------------------------------------
 
+  # The socket is closed on every path, a refused or failed handshake
+  # included: a server that answers -ERR, or is not NATS, used to keep it open.
   defp with_connection(config, timeout, fun) do
-    with {:ok, socket} <- connect(config, timeout),
-         conn = %{socket: socket, buffer: "", inbox: "_INBOX.#{random()}", sid: 1},
-         {:ok, conn} <- handshake(conn, config, timeout) do
-      try do
-        fun.(conn)
-      after
-        close(socket)
+    with {:ok, socket} <- connect(config, timeout) do
+      conn = %{socket: socket, buffer: "", inbox: "_INBOX.#{random()}", sid: 1}
+
+      case safe_handshake(conn, config, timeout) do
+        {:ok, conn} ->
+          try do
+            fun.(conn)
+          after
+            close(conn.socket)
+          end
+
+        {:error, reason, conn} ->
+          close(conn.socket)
+          {:error, reason}
       end
     end
   catch
     _kind, _reason -> {:error, :unreachable}
   end
 
-  defp connect(%{ssl: true} = config, timeout) do
-    :ssl.connect(
-      String.to_charlist(config.hostname),
-      config.port,
-      [:binary, active: false, verify: :verify_none],
-      timeout
-    )
+  defp safe_handshake(conn, config, timeout) do
+    handshake(conn, config, timeout)
+  catch
+    kind, reason -> {:error, {:handshake, kind, reason}, conn}
   end
 
+  # Always plain TCP first: a NATS server sends INFO in the clear and the
+  # client upgrades the same connection to TLS before CONNECT (`upgrade/3`).
   defp connect(config, timeout) do
     :gen_tcp.connect(
       String.to_charlist(config.hostname),
@@ -174,13 +194,40 @@ defmodule OptimalEngine.Storage.NATS do
   # The server speaks first with INFO; the client answers CONNECT and subscribes
   # its inbox, on which every reply of this connection arrives.
   defp handshake(conn, config, timeout) do
-    with {:ok, {"INFO", _json}, conn} <- read_line(conn, timeout),
-         :ok <- send_data(conn.socket, "CONNECT #{Jason.encode!(connect_options(config))}\r\n"),
+    case read_line(conn, timeout) do
+      {:ok, {"INFO", _json}, conn} ->
+        with {:ok, conn} <- upgrade(conn, config, timeout), do: introduce(conn, config)
+
+      {:ok, other, conn} ->
+        {:error, {:protocol, other}, conn}
+
+      {:error, reason} ->
+        {:error, reason, conn}
+    end
+  end
+
+  # `tls://`: the credential goes over this connection, so the server's
+  # certificate and host name are verified against the system's roots, as for
+  # every other credential the Engine sends (Connectors.HTTP).
+  defp upgrade(conn, %{ssl: true} = config, timeout) do
+    options =
+      [mode: :binary, active: false, server_name_indication: String.to_charlist(config.hostname)] ++
+        OptimalEngine.Connectors.HTTP.ssl_options("https://" <> config.hostname)
+
+    case :ssl.connect(conn.socket, options, timeout) do
+      {:ok, socket} -> {:ok, %{conn | socket: socket}}
+      {:error, reason} -> {:error, {:tls, reason}, conn}
+    end
+  end
+
+  defp upgrade(conn, _config, _timeout), do: {:ok, conn}
+
+  defp introduce(conn, config) do
+    with :ok <- send_data(conn.socket, "CONNECT #{Jason.encode!(connect_options(config))}\r\n"),
          :ok <- send_data(conn.socket, "SUB #{conn.inbox}.* 1\r\n") do
       {:ok, conn}
     else
-      {:ok, other, _conn} -> {:error, {:protocol, other}}
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> {:error, reason, conn}
     end
   end
 
@@ -364,9 +411,8 @@ defmodule OptimalEngine.Storage.NATS do
     uri = URI.parse(value)
 
     with :ok <- check_scheme(uri),
-         {:ok, host} <- check_host(uri) do
-      {username, password, token} = userinfo(uri)
-
+         {:ok, host} <- check_host(uri),
+         {:ok, {username, password, token}} <- userinfo(uri) do
       {:ok,
        %{
          hostname: host,
@@ -385,13 +431,17 @@ defmodule OptimalEngine.Storage.NATS do
   defp check_host(%URI{host: host}) when is_binary(host) and host != "", do: {:ok, host}
   defp check_host(_uri), do: {:error, :missing_host}
 
-  defp userinfo(%URI{userinfo: nil}), do: {nil, nil, nil}
+  # Percent-decoding only (a `+` stays a plus); a malformed escape is a
+  # configuration error, never a raise out of the provider inventory.
+  defp userinfo(%URI{userinfo: nil}), do: {:ok, {nil, nil, nil}}
 
   defp userinfo(%URI{userinfo: info}) do
     case String.split(info, ":", parts: 2) do
-      [token] -> {nil, nil, URI.decode_www_form(token)}
-      [username, password] -> {URI.decode_www_form(username), URI.decode_www_form(password), nil}
+      [token] -> {:ok, {nil, nil, URI.decode(token)}}
+      [username, password] -> {:ok, {URI.decode(username), URI.decode(password), nil}}
     end
+  rescue
+    ArgumentError -> {:error, :invalid_credentials}
   end
 
   defp timeout(opts), do: Keyword.get(opts, :timeout, @default_timeout)

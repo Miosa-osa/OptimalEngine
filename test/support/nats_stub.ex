@@ -19,7 +19,13 @@ defmodule OptimalEngine.TestSupport.NATSStub do
     {:ok, agent} = Agent.start_link(fn -> %{streams: %{}, commands: []} end)
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listener)
-    settings = %{jetstream: Keyword.get(opts, :jetstream, true), token: Keyword.get(opts, :token)}
+
+    settings = %{
+      jetstream: Keyword.get(opts, :jetstream, true),
+      token: Keyword.get(opts, :token),
+      delete: Keyword.get(opts, :delete, :ok)
+    }
+
     spawn_link(fn -> accept(listener, agent, settings) end)
     {:ok, %{port: port, agent: agent, listener: listener}}
   end
@@ -206,6 +212,10 @@ defmodule OptimalEngine.TestSupport.NATSStub do
         {:json, %{error: %{code: 404, description: "stream not found"}}}
     end
   end
+
+  # `delete: :refused` answers as a server whose permissions do not allow it.
+  defp answer("$JS.API.STREAM.DELETE." <> _name, _payload, _agent, %{delete: :refused}),
+    do: {:json, %{error: %{code: 403, description: "permissions violation"}}}
 
   defp answer("$JS.API.STREAM.DELETE." <> name, _payload, agent, _settings) do
     Agent.update(agent, &%{&1 | streams: Map.delete(&1.streams, name)})
