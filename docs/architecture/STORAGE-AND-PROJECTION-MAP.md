@@ -46,11 +46,11 @@ The "Wired?" column says whether a working adapter exists in this repository tod
 | Change ledger | Ordered, idempotent record of workspace changes for replication. | Yes, as the history of change. | No. | Wired, not on a Postgres build. | `sync_mutations` and `sync_cursors` in SQLite. Peers carry it over HTTP, or over the MIOSA relay for an Engine that cannot be dialed. |
 | Backups | Verified online copies of the database and the catalog that tracks them. | Copies, not truth. | Not applicable. | Wired. | `POST /api/backup` writes into `OPTIMAL_BACKUP_DIR` and records `backup_records`. An offsite copy is sealed and stored on S3. |
 | Sealed connector keys | Connector and peer credentials, authority signing keys. | Yes, as ciphertext. | No. | Wired. | Stored sealed in the database. The keys (`CONNECTOR_KEY`, `OPTIMAL_AUTHORITY_KEY`) live outside it, and `OPTIMAL_BACKUP_KEY` seals offsite backups. Losing a key loses what it sealed. |
-| NATS JetStream | Replayable event, job, connector, and replication transport. | No. | Yes from the governed mutation and job ledgers. | Declared, no adapter yet. | Transport never replaces canonical state. |
-| Valkey | Distributed cache, rate limits, locks, and coordination. | No. | Yes. | Declared, no adapter yet. | Ephemeral acceleration only. |
-| Qdrant | High-scale semantic retrieval projection. | No. | Yes. | Declared, no adapter yet. | Vector results remain candidates, not truth. Embedded vectors serve every Engine today. |
+| NATS JetStream | Replayable event, job, connector, and replication transport. | No. | Yes from the governed mutation and job ledgers. | Adapter: `OptimalEngine.Storage.NATS.Adapter` (NATS text protocol, `OPTIMAL_NATS_URL`); proved by a stream created, a message published and read back by sequence. | Transport never replaces canonical state. |
+| Valkey | Distributed cache, rate limits, locks, and coordination. | No. | Yes. | Adapter: `OptimalEngine.Storage.Valkey.Adapter` (RESP over TCP, `OPTIMAL_VALKEY_URL`); proved by a set, get and delete round trip. | Ephemeral acceleration only. |
+| Qdrant | High-scale semantic retrieval projection. | No. | Yes. | Adapter: `OptimalEngine.Storage.Qdrant.Adapter` (REST, `OPTIMAL_QDRANT_URL`, `api-key` from `OPTIMAL_QDRANT_API_KEY`); proved by a collection created, a point upserted, searched and read back. | Vector results remain candidates, not truth. Embedded vectors serve every Engine today. |
 | DuckDB and Parquet | Large analytical and historical projections. | No for transactional state. | Yes. | Declared, no adapter yet. | Analytics remain isolated from operational writes. |
-| OpenBao | Secret, key, PKI, and credential lifecycle. | Yes for managed secrets. | Recovery follows secret-manager policy. | Declared, no adapter yet. | Workspace policies contain references, not secret values. |
+| OpenBao | Secret, key, PKI, and credential lifecycle. | Yes for managed secrets. | Recovery follows secret-manager policy. | Adapter: `OptimalEngine.Storage.OpenBao.Adapter` (HTTP API, `OPTIMAL_OPENBAO_ADDR`, `OPTIMAL_OPENBAO_TOKEN`, KV v2 at `OPTIMAL_OPENBAO_KV_MOUNT`); proved by a secret written, read back and deleted. | Workspace policies contain references, not secret values. |
 | Fractal Computing | Enterprise synchronized digital-twin substrate. | Governed by the enterprise integration boundary. | Depends on the enterprise contract. | Declared, no adapter yet. | Cloud-only partner capability with controlled, auditable promotion to systems of record. |
 | Markdown workspace | Human-operable projection and editing surface. | No by default. | Yes from engine state. | Wired. | Edits re-enter as Source Packages or topology change requests. |
 | HTML, wiki, dashboard, API | Display and control projections. | No. | Yes. | Wired. | Should be regenerated from engine state. |
@@ -255,11 +255,11 @@ Each moves one concern off the single disk without changing what the Engine stor
 | --- | --- | --- |
 | Assets and offsite backups | S3-compatible storage: Garage, AWS S3, R2, MinIO, a MIOSA bucket | Wired. |
 | Canonical relational store | PostgreSQL, a compile-time `OPTIMAL_STORE=postgres` build | Wired, partial. It refuses full-text search, replication, and app data collections. |
-| Replayable events and jobs | NATS JetStream | Declared, no adapter yet. |
-| Distributed cache and locks | Valkey | Declared, no adapter yet. |
-| High-scale vectors | Qdrant | Declared, no adapter yet. |
+| Replayable events and jobs | NATS JetStream | Adapter wired; `available` when `OPTIMAL_NATS_URL` answers with JetStream. |
+| Distributed cache and locks | Valkey | Adapter wired; `available` when `OPTIMAL_VALKEY_URL` answers. |
+| High-scale vectors | Qdrant | Adapter wired; `available` when `OPTIMAL_QDRANT_URL` lists collections. |
 | Analytics | DuckDB and Parquet | Declared, no adapter yet. |
-| Secrets | OpenBao | Declared, no adapter yet. |
+| Secrets | OpenBao | Adapter wired; `available` when the server is unsealed and accepts the token. |
 | Enterprise digital twin | Fractal | Declared, no adapter yet. |
 
 `GET /api/storage/providers` reports `adapter_implemented` for each, and `POST /api/storage/plan` never marks a plan ready when it selects a provider without an adapter.

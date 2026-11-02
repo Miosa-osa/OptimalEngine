@@ -1056,7 +1056,7 @@ graph_edges in SQLite: the graph; ETS or RocksDB: a mirror of it
 S3-compatible storage: wired for assets and offsite backups
 Postgres: wired but partial, a compile-time OPTIMAL_STORE=postgres build
           that refuses full-text search, replication, and app data collections
-NATS JetStream, Valkey, Qdrant, DuckDB, OpenBao, Fractal: declared, no adapter yet
+Valkey, NATS JetStream, Qdrant, OpenBao: adapters wired, proved by a round trip; DuckDB, Fractal: declared, no adapter yet
 Markdown/files/wiki/HTML/API: export and control surfaces
 ```
 
