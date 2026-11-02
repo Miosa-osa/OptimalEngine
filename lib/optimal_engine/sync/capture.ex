@@ -66,7 +66,7 @@ defmodule OptimalEngine.Sync.Capture do
   # twice on a second Engine; `workspaces` and `workspace_handles` name this
   # Engine's workspaces; the rest is sync bookkeeping and run logs.
   @engine_state ~w(sync_capture sync_mutations sync_cursors sync_workspaces sync_peers sync_conflicts
-                   sync_local_stamp metric_samples uri_redirects federation_peers connectors
+                   sync_runs sync_local_stamp metric_samples uri_redirects federation_peers connectors
                    connector_runs processor_runs jobs dead_letter_jobs workspaces workspace_handles
                    graph_backfills)
 
