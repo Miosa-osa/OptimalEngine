@@ -44,7 +44,7 @@ The mirror is ETS, in memory, under bare `mix`, in tests, in the Docker image, a
 `scripts/run-engine.sh` defaults it to RocksDB, and `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb` with `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` selects it anywhere.
 Mnesia is an experiment with `ram_copies` tables, and Riak is in no build.
 Providers are things a deployment grows onto: S3-compatible storage is wired for assets and offsite backups, and Postgres is an optional, partial provider for scale (a compile-time `OPTIMAL_STORE=postgres` build without full-text search, replication, or app data collections).
-NATS JetStream, Valkey, Qdrant, DuckDB, OpenBao, and Fractal are declared with no adapter yet.
+NATS JetStream, Valkey, Qdrant, DuckDB, and OpenBao have adapters that are health-checked and proved by a round trip, and no Engine feature uses them yet; Fractal is declared with no adapter.
 Vectors, chunks, FTS rows, and caches are projections.
 The live logical-store catalog is available through `GET /api/stores`.
 Use `GET /api/stores/audit` to verify SQLite integrity, foreign keys, migrations, FTS parity, workspace isolation, vector validity, asset cataloging, verified backups, RLM readiness, and cache readiness.

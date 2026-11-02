@@ -39,7 +39,7 @@ RocksDB is the exception: it is `active` only when `OPTIMAL_KNOWLEDGE_BACKEND=ro
 Provider status never returns credentials, connection strings, or secret values; only the names of the environment variables a provider reads.
 
 Today `s3` and `postgres` are the service providers with an adapter.
-`valkey` and `nats_jetstream` have adapters and report `not_configured`, `available` or `unavailable` like `s3`; `qdrant` and `openbao` have one too; `duckdb` and `fractal` are declared, and they report `adapter_missing` until an adapter ships for each.
+`valkey` and `nats_jetstream` have adapters and report `not_configured`, `available` or `unavailable` like `s3`; `qdrant`, `openbao` and `duckdb` have one too; `fractal` is declared and reports `adapter_missing` until an adapter ships.
 
 `sqlite` and `postgres` are canonical stores, and an engine runs exactly one of them.
 The choice is made when the engine is compiled, so both report `selected`: `true` for the store this build runs and `false` for the other.
@@ -347,7 +347,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | `nats_jetstream` | Wired | The probe (PONG and a JetStream account answer) and the proof (a stream created, a message published and read back by sequence, the stream deleted) over `OPTIMAL_NATS_URL` | Engine events, jobs and replication do not flow through it yet |
 | `valkey` | Wired | The probe (PING) and the proof (set, get, delete) over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Engine caches, locks and rate limits do not live in it yet |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
-| `duckdb` (DuckDB and Parquet) | Declared, no adapter yet | | Everything |
+| `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`) and the proof (a Parquet file written and read back) | No Engine projection is written to it yet |
 | `openbao` | Wired | The probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` | The Engine's own secrets still come from the environment |
 | `fractal` | Declared, no adapter yet | | Everything |
 
@@ -465,7 +465,7 @@ Keep `OPTIMAL_BACKUP_KEY` away from the machine, and give a Garage bucket that h
 
 ## What Is Not Implemented
 
-The Engine has no adapter for DuckDB or Fractal, and the provider inventory says so; Valkey, NATS JetStream, Qdrant and OpenBao are reached and proved, but no Engine feature is served from them yet.
+The Engine has no adapter for Fractal, and the provider inventory says so; Valkey, NATS JetStream, Qdrant, OpenBao and DuckDB are reached and proved, but no Engine feature is served from them yet.
 PostgreSQL holds the canonical relational store but not full-text search, replication, or app data collections, and moving an existing Engine's data to it (stage 4 of [PostgreSQL Provider](postgres-provider.md)) is not implemented.
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.
 
