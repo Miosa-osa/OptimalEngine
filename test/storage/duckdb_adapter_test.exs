@@ -32,6 +32,21 @@ defmodule OptimalEngine.Storage.DuckDBAdapterTest do
     %{analytics: analytics}
   end
 
+  # `kill -0` succeeds while the process exists; the port's child reaper
+  # collects it shortly after the kill.
+  defp gone?(_pid, 0), do: false
+
+  defp gone?(pid, tries) do
+    case System.cmd("kill", ["-0", pid], stderr_to_stdout: true) do
+      {_, 0} ->
+        Process.sleep(50)
+        gone?(pid, tries - 1)
+
+      _ ->
+        true
+    end
+  end
+
   test "duckdb is an implemented provider, not adapter_missing" do
     assert {:ok, provider} = Providers.get("duckdb")
     assert provider.adapter_implemented
@@ -71,6 +86,29 @@ defmodule OptimalEngine.Storage.DuckDBAdapterTest do
 
     assert [%{provider: "duckdb", status: "pass"}] =
              Providers.proofs() |> Enum.filter(&(&1.provider == "duckdb"))
+  end
+
+  test "a query that hangs is killed at its timeout, not left running", %{analytics: analytics} do
+    pidfile = Path.join(analytics, "hang.pid")
+    System.put_env("DUCKDB_FAKE_PIDFILE", pidfile)
+    on_exit(fn -> System.delete_env("DUCKDB_FAKE_PIDFILE") end)
+    System.put_env(DuckDB.env_name(), analytics)
+
+    {:ok, config} = DuckDB.config()
+    assert {:error, :timeout} = DuckDB.query(config, "SELECT 'hang'", timeout: 1_000)
+
+    pid = pidfile |> File.read!() |> String.trim()
+    assert gone?(pid, 40), "the hung query's process #{pid} is still running"
+    refute_received {_port, {:data, _}}
+  end
+
+  test "a path with a quote in it works and cannot end the statement", %{analytics: analytics} do
+    quoted = Path.join(analytics, "o'brien")
+    File.mkdir_p!(quoted)
+    System.put_env(DuckDB.env_name(), quoted)
+
+    assert {:ok, %{read_back: true}} = DuckDB.round_trip()
+    assert File.ls!(quoted) == []
   end
 
   test "without the executable it is not installed, never healthy", %{analytics: analytics} do

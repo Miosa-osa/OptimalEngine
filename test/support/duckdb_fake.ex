@@ -3,7 +3,10 @@ defmodule OptimalEngine.TestSupport.DuckDBFake do
   A fake `duckdb` executable for tests: a shell script that answers the three
   statements the provider sends (`SELECT 1`, `COPY ... TO '<file>'`,
   `SELECT value FROM read_parquet('<file>')`) by writing and reading a plain
-  file, printing JSON rows as the real CLI does with `-json`. Tests put its
+  file, printing JSON rows as the real CLI does with `-json`. A quote doubled
+  inside a path literal is read back as one, as SQL does. `SELECT 'hang'`
+  writes its pid to `$DUCKDB_FAKE_PIDFILE` and never answers, as one process
+  (`exec sleep`), for the timeout test. Tests put its
   directory first on the PATH. No test here needs DuckDB installed.
   """
 
@@ -13,13 +16,16 @@ defmodule OptimalEngine.TestSupport.DuckDBFake do
   sql="${4:-}"
   case "$sql" in
     "SELECT 1 AS one") echo '[{"one":1}]' ;;
+    "SELECT 'hang'")
+      echo "$$" > "${DUCKDB_FAKE_PIDFILE:-/dev/null}"
+      exec sleep 30 ;;
     COPY*)
       value=$(printf '%s' "$sql" | sed -E "s/.*SELECT '([^']*)' AS value.*/\1/")
-      file=$(printf '%s' "$sql" | sed -E "s/.*TO '([^']*)'.*/\1/")
+      file=$(printf '%s' "$sql" | sed -E "s/.*TO '((''|[^'])*)'.*/\1/" | sed "s/''/'/g")
       printf '%s' "$value" > "$file"
       echo '[]' ;;
     *read_parquet*)
-      file=$(printf '%s' "$sql" | sed -E "s/.*read_parquet\('([^']*)'\).*/\1/")
+      file=$(printf '%s' "$sql" | sed -E "s/.*read_parquet\('((''|[^'])*)'\).*/\1/" | sed "s/''/'/g")
       printf '[{"value":"%s"}]\n' "$(cat "$file")" ;;
     *) echo "Parser Error: fake duckdb does not know: $sql" >&2; exit 1 ;;
   esac

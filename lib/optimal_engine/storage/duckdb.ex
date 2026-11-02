@@ -85,11 +85,11 @@ defmodule OptimalEngine.Storage.DuckDB do
         with {:ok, _} <-
                query(
                  config,
-                 "COPY (SELECT '#{value}' AS value, 1 AS n) TO '#{file}' (FORMAT PARQUET)",
+                 "COPY (SELECT '#{value}' AS value, 1 AS n) TO #{literal(file)} (FORMAT PARQUET)",
                  opts
                ),
              {:ok, [%{"value" => ^value}]} <-
-               query(config, "SELECT value FROM read_parquet('#{file}')", opts) do
+               query(config, "SELECT value FROM read_parquet(#{literal(file)})", opts) do
           {:ok, %{wrote: 1, read_back: true, format: "parquet", path: config.path}}
         else
           {:ok, other} -> {:error, {:round_trip_mismatch, other}}
@@ -101,26 +101,87 @@ defmodule OptimalEngine.Storage.DuckDB do
     end
   end
 
-  @doc "Runs one SQL statement in an in-memory database and decodes the JSON rows."
+  @doc """
+  Runs one SQL statement in an in-memory database and decodes the JSON rows.
+
+  The executable runs as a port of the calling process, read until it exits.
+  At the timeout the process is killed by its own OS pid: closing a port does
+  not stop the program behind it, so a hung query used to keep running (and a
+  late `COPY` could write its file after the proof removed it). Only standard
+  output is read; standard error goes to the Engine's log, so a warning cannot
+  break the JSON.
+  """
   @spec query(map(), String.t(), keyword()) :: {:ok, list()} | {:error, term()}
   def query(%{executable: executable}, sql, opts) when is_binary(executable) do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
 
-    task =
-      Task.async(fn ->
-        System.cmd(executable, [":memory:", "-json", "-c", sql], stderr_to_stdout: true)
-      end)
+    port =
+      Port.open({:spawn_executable, executable}, [
+        :binary,
+        :exit_status,
+        args: [":memory:", "-json", "-c", sql]
+      ])
 
-    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {out, 0}} -> decode(out)
-      {:ok, {out, status}} -> {:error, {:exit, status, String.slice(out, 0, 120)}}
-      nil -> {:error, :timeout}
-    end
+    # nil once a program that exited at once has closed its port; its output
+    # and exit status are still in the mailbox.
+    os_pid =
+      case Port.info(port, :os_pid) do
+        {:os_pid, pid} -> pid
+        nil -> nil
+      end
+
+    collect(port, os_pid, System.monotonic_time(:millisecond) + timeout, [])
+  rescue
+    error in ErlangError ->
+      if error.original == :enoent, do: {:error, :not_installed}, else: {:error, :unreachable}
   catch
     _kind, _reason -> {:error, :unreachable}
   end
 
   def query(_config, _sql, _opts), do: {:error, :not_installed}
+
+  defp collect(port, os_pid, deadline, output) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, data}} ->
+        collect(port, os_pid, deadline, [output, data])
+
+      {^port, {:exit_status, 0}} ->
+        decode(IO.iodata_to_binary(output))
+
+      {^port, {:exit_status, status}} ->
+        {:error, {:exit, status, output |> IO.iodata_to_binary() |> String.slice(0, 120)}}
+    after
+      remaining ->
+        stop(port, os_pid)
+        {:error, :timeout}
+    end
+  end
+
+  # Kills exactly the process this query started, then drops what the port
+  # still sends, so nothing of it is left in the caller's mailbox.
+  defp stop(port, os_pid) do
+    if is_integer(os_pid),
+      do: System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
+    if Port.info(port) != nil, do: Port.close(port)
+    flush(port)
+  catch
+    _kind, _reason -> flush(port)
+  end
+
+  defp flush(port) do
+    receive do
+      {^port, _message} -> flush(port)
+    after
+      0 -> :ok
+    end
+  end
+
+  # A SQL string literal: a quote in the path is doubled, so a path such as
+  # /data/o'brien works and cannot end the statement.
+  defp literal(text), do: "'" <> String.replace(text, "'", "''") <> "'"
 
   defp decode(out) do
     case String.trim(out) do
