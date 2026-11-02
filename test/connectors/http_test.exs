@@ -12,8 +12,12 @@ defmodule OptimalEngine.Connectors.HTTPTest do
     original = Application.get_env(:optimal_engine, :http_mock)
     Application.delete_env(:optimal_engine, :http_mock)
 
+    # A test here installs its own mock; with no mock before it, leaving that one
+    # behind would answer every later file's real HTTP call with its canned reply.
     on_exit(fn ->
-      if original, do: Application.put_env(:optimal_engine, :http_mock, original)
+      if original,
+        do: Application.put_env(:optimal_engine, :http_mock, original),
+        else: Application.delete_env(:optimal_engine, :http_mock)
     end)
 
     :ok
