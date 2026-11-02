@@ -82,7 +82,7 @@ This tier has no external service dependency and remains the preferred shape for
 A self-hosted team grows onto providers only when one Engine instance is no longer enough.
 Garage or another S3-compatible object store is wired for assets and offsite backups.
 PostgreSQL is wired but partial: a compile-time build that refuses full-text search, replication, and app data collections.
-OpenBao can be provisioned next to the Engine, but the Engine has no adapter for it yet, so provisioning it changes nothing. Valkey and NATS JetStream have one: with `OPTIMAL_VALKEY_URL` set the inventory reports it `available` and the storage audit proves it with a round trip.
+Valkey, NATS JetStream and OpenBao can be provisioned next to the Engine and each has an adapter: with `OPTIMAL_VALKEY_URL` set the inventory reports it `available` and the storage audit proves it with a round trip.
 
 These services are optional.
 
