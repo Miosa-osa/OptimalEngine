@@ -321,12 +321,20 @@ defmodule OptimalEngine.Storage.Valkey do
 
   defp userinfo(%URI{userinfo: info}) do
     case String.split(info, ":", parts: 2) do
-      [password] -> {:ok, {nil, URI.decode(password)}}
-      ["", password] -> {:ok, {nil, URI.decode(password)}}
-      [username, password] -> {:ok, {URI.decode(username), URI.decode(password)}}
+      [password] -> {:ok, {nil, decode_credential(password)}}
+      ["", password] -> {:ok, {nil, decode_credential(password)}}
+      [username, password] -> {:ok, {decode_credential(username), decode_credential(password)}}
     end
   rescue
     ArgumentError -> {:error, :invalid_credentials}
+  end
+
+  # URI.decode/1 passes a malformed escape such as "%zz" through unchanged, so a
+  # credential carrying one would be sent as typed instead of refused.
+  defp decode_credential(value) do
+    if Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, value),
+      do: raise(ArgumentError, "malformed percent escape"),
+      else: URI.decode(value)
   end
 
   defp timeout(opts), do: Keyword.get(opts, :timeout, @default_timeout)
