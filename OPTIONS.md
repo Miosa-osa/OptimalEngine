@@ -100,8 +100,9 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 
 The mirror is not what retrieval reads: the graph that search and assembly read is the `graph_edges` table in SQLite.
 
-Providers the Engine declares and cannot use yet (no adapter): `OPTIMAL_NATS_URL`, `OPTIMAL_VALKEY_URL`, `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`, `OPTIMAL_ANALYTICS_PATH` (DuckDB and Parquet), `OPTIMAL_OPENBAO_ADDR` with `OPTIMAL_OPENBAO_TOKEN`, and `OPTIMAL_FRACTAL_ENDPOINT` with `OPTIMAL_FRACTAL_CREDENTIAL_REF`.
-Setting them changes nothing except what `GET /api/storage/providers` reports, which is `adapter_missing`.
+Providers with an adapter that no Engine feature uses yet: `OPTIMAL_NATS_URL`, `OPTIMAL_VALKEY_URL`, `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`, `OPTIMAL_ANALYTICS_PATH` (DuckDB and Parquet), and `OPTIMAL_OPENBAO_ADDR` with `OPTIMAL_OPENBAO_TOKEN` and `OPTIMAL_OPENBAO_KV_MOUNT`.
+Setting them lets `GET /api/storage/providers?probe=true` check each service and the provider proofs prove it with a round trip; the Engine's data stays where it is.
+`OPTIMAL_FRACTAL_ENDPOINT` with `OPTIMAL_FRACTAL_CREDENTIAL_REF` is declared with no adapter, and the inventory reports it `adapter_missing` whatever is set.
 See [Storage providers](docs/guides/storage-providers.md) and [Installation and deployment](docs/guides/installation-and-deployment.md).
 
 ## Text Embeddings

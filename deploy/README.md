@@ -125,7 +125,7 @@ Replace every development credential before exposing the service.
 | --- | --- |
 | Garage (S3) | Wired. Assets and offsite backups. |
 | PostgreSQL | Wired but partial, and only for a custom engine built with `OPTIMAL_STORE=postgres` at compile time. Behind the separate `postgres` profile. The stock image keeps its data in SQLite. |
-| NATS JetStream, Valkey, Qdrant, OpenBao | No adapter yet. Commented out in the overlay. |
+| NATS JetStream, Valkey, Qdrant, OpenBao | An adapter checks and proves each one; no Engine feature uses them yet. Commented out in the overlay; uncomment one to try its probe and proof. |
 
 Garage signs requests for the region in `storage/garage.toml` (`s3_region = "garage"`).
 The overlay sets `OPTIMAL_S3_REGION` to the same value; if you change one, change the other.

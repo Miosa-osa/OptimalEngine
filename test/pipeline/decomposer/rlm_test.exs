@@ -51,6 +51,17 @@ defmodule OptimalEngine.Pipeline.Decomposer.RLMTest do
              RLM.health(script: script, runner: runner)
   end
 
+  test "reports a missing interpreter as unavailable instead of crashing the caller" do
+    script = temporary_script()
+    # What System.cmd/3 does when the interpreter is not installed: it raises :enoent.
+    runner = fn _executable, _args, _opts -> System.cmd("optimal-no-such-python", []) end
+
+    assert {:error, {:rlm_executable_missing, executable}} =
+             RLM.health(script: script, runner: runner)
+
+    assert is_binary(executable)
+  end
+
   test "bounds a stalled health probe" do
     script = temporary_script()
     runner = fn _, _, _ -> Process.sleep(:infinity) end
