@@ -60,6 +60,19 @@ defmodule OptimalEngine.Storage.ValkeyAdapterTest do
     assert %{tls: true} = Adapter.status()
   end
 
+  test "a plus in a password stays a plus, and a malformed escape is invalid, never a raise" do
+    System.put_env(Valkey.env_name(), "redis://:ab+cd@cache.example.com:6379")
+    assert {:ok, %{password: "ab+cd"}} = Valkey.config()
+
+    System.put_env(Valkey.env_name(), "redis://:p%zz@cache.example.com:6379")
+    assert {:error, :invalid_credentials} = Valkey.config()
+    refute Valkey.configured?()
+    assert Valkey.health() == :invalid_config
+    assert {:ok, provider} = Providers.get("valkey", probe: true)
+    refute provider.lifecycle_state in ["active", "available"]
+    refute provider |> Jason.encode!() =~ "p%zz"
+  end
+
   test "a server that answers PING is healthy and available; a closed port is unreachable" do
     {:ok, stub} = ValkeyStub.start()
     on_exit(fn -> ValkeyStub.stop(stub) end)

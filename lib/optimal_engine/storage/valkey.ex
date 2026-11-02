@@ -137,11 +137,15 @@ defmodule OptimalEngine.Storage.Valkey do
     _kind, _reason -> {:error, :unreachable}
   end
 
+  # The password goes over this connection, so the server's certificate and
+  # host name are verified against the system's roots, as for every other
+  # credential the Engine sends (Connectors.HTTP).
   defp connect(%{ssl: true} = config, timeout) do
     :ssl.connect(
       String.to_charlist(config.hostname),
       config.port,
-      [:binary, active: false, verify: :verify_none],
+      [:binary, active: false] ++
+        OptimalEngine.Connectors.HTTP.ssl_options("https://" <> config.hostname),
       timeout
     )
   end
@@ -281,9 +285,8 @@ defmodule OptimalEngine.Storage.Valkey do
 
     with :ok <- check_scheme(uri),
          {:ok, host} <- check_host(uri),
-         {:ok, database} <- check_database(uri) do
-      {username, password} = userinfo(uri)
-
+         {:ok, database} <- check_database(uri),
+         {:ok, {username, password}} <- userinfo(uri) do
       {:ok,
        %{
          hostname: host,
@@ -311,14 +314,19 @@ defmodule OptimalEngine.Storage.Valkey do
     end
   end
 
-  defp userinfo(%URI{userinfo: nil}), do: {nil, nil}
+  # Percent-decoding only: a `+` in a password is a plus, not a space. A
+  # malformed escape is a configuration error, never a raise, so a bad URL
+  # cannot take the provider inventory down with it.
+  defp userinfo(%URI{userinfo: nil}), do: {:ok, {nil, nil}}
 
   defp userinfo(%URI{userinfo: info}) do
     case String.split(info, ":", parts: 2) do
-      [password] -> {nil, URI.decode_www_form(password)}
-      ["", password] -> {nil, URI.decode_www_form(password)}
-      [username, password] -> {URI.decode_www_form(username), URI.decode_www_form(password)}
+      [password] -> {:ok, {nil, URI.decode(password)}}
+      ["", password] -> {:ok, {nil, URI.decode(password)}}
+      [username, password] -> {:ok, {URI.decode(username), URI.decode(password)}}
     end
+  rescue
+    ArgumentError -> {:error, :invalid_credentials}
   end
 
   defp timeout(opts), do: Keyword.get(opts, :timeout, @default_timeout)
