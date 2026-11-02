@@ -107,6 +107,8 @@ defmodule OptimalEngine.API.IntParamTest do
     {:get, "/api/rhythm/notes", :query, ~w(limit)},
     {:get, "/api/federation/search", :query, ~w(limit)},
     {:get, "/api/sync/changes", :query, ~w(since limit)},
+    {:get, "/api/sync/runs", :query, ~w(limit before)},
+    {:get, "/api/sync/ledger", :query, ~w(limit before)},
     {:get, "/api/viability/history", :query, ~w(days)},
     {:get, "/api/viability/audit", :query, ~w(limit)},
     {:get, "/api/signal-events", :query, ~w(limit)},

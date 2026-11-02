@@ -21,13 +21,14 @@ A key whose metadata grants app data access (`/api/data/keys`) is confined to `/
 
 A key's metadata may carry `allowed_security_labels` and `allowed_partitions`, the labels and partitions it may read.
 The routes that return row text in bulk (`/api/batch/export/*`, `/api/sync/conflicts`, `/api/storage/workspaces/:workspace_id/mutations`) show a key only the rows its grants cover, by the rule of governed retrieval, and say what they left out in `withheld` and `complete`.
+`GET /api/sync/ledger` lists only the changes a key's grants cover, by the same rule, and counts the rest of the page in `withheld`.
 A grant of `"*"` means all of its kind.
 The bootstrap key holds it when its scopes include `*` or `admin`; a key minted without grants holds none.
 A key without a `"*"` label grant is also not shown rows above the Engine's ceiling for what it hands out (`sync_serve_max_class`, default `confidential`) by the exports and the conflict list.
 The recommended grants for a machine key are `{"allowed_security_labels": ["public", "internal", "confidential"], "allowed_partitions": []}`.
 `docs/guides/replication.md` has the rule and the routes it does not cover yet.
 
-Routes: 305
+Routes: 307
 
 | Method | Path | Router | Grant | Workspace |
 | --- | --- | --- | --- | --- |
@@ -266,8 +267,10 @@ Routes: 305
 | GET | `/api/sync/conflicts` | Router | read | workspace |
 | POST | `/api/sync/conflicts/:id/resolve` | Router | admin | workspace |
 | POST | `/api/sync/enable` | Router | admin | workspace |
+| GET | `/api/sync/ledger` | Router | read | workspace |
 | POST | `/api/sync/peers` | Router | admin | workspace |
 | POST | `/api/sync/run` | Router | admin | workspace |
+| GET | `/api/sync/runs` | Router | read | workspace |
 | GET | `/api/sync/status` | Router | read | workspace |
 | GET | `/api/sync/tables` | Router | sync | tenant |
 | GET | `/api/topology/export` | Router | admin | tenant |

@@ -4392,6 +4392,8 @@ defmodule OptimalEngine.API.Router do
   post("/api/sync/peers", do: SyncAPI.add_peer(conn))
   post("/api/sync/run", do: SyncAPI.run(conn))
   get("/api/sync/status", do: SyncAPI.status(conn))
+  get("/api/sync/runs", do: SyncAPI.runs(conn))
+  get("/api/sync/ledger", do: SyncAPI.ledger(conn))
   get("/api/sync/conflicts", do: SyncAPI.conflicts(conn))
   post("/api/sync/conflicts/:id/resolve", do: SyncAPI.resolve(conn, id))
 

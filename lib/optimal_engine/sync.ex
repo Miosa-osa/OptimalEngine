@@ -53,7 +53,7 @@ defmodule OptimalEngine.Sync do
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.Store.Migrations
-  alias OptimalEngine.Sync.{Capture, Gate, GateCache, Lineage}
+  alias OptimalEngine.Sync.{Capture, Gate, GateCache, History, Lineage}
 
   @classes ~w(public internal confidential restricted)
   @page 500
@@ -65,6 +65,8 @@ defmodule OptimalEngine.Sync do
   @resets_a_day 2
   @version_refused "the peer refused this Engine's schema version; sync pauses until both run the same Engine version"
   @version_unreported "the relay did not report the other Engine's schema version; sync pauses until it does"
+  # The longest label a peer or this Engine may have.
+  @label_max 64
 
   # -- identity and enablement -------------------------------------------------
 
@@ -80,13 +82,53 @@ defmodule OptimalEngine.Sync do
   # changes nothing will send (`OptimalEngine.Storage.Postgres.unavailable/0`).
   @unavailable {:unsupported, "replication is not available on the PostgreSQL store"}
 
-  @doc "Enables capture for a workspace (idempotent) and installs triggers."
-  @spec enable(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
-  def enable(tenant_id, workspace_id, by) do
-    if Store.selected?(OptimalEngine.Store.SQLite),
-      do: do_enable(tenant_id, workspace_id, by),
-      else: {:error, @unavailable}
+  @doc "This Engine's own label (`enable/4` sets it), or `nil`."
+  @spec label() :: String.t() | nil
+  def label do
+    case Store.raw_query("SELECT label FROM sync_identity WHERE id = 1", []) do
+      {:ok, [[label]]} -> label
+      _ -> nil
+    end
   end
+
+  @doc """
+  Enables capture for a workspace (idempotent) and installs triggers. Options:
+  `:label`, a name for this Engine (at most #{@label_max} characters) that
+  replaces the one it had; without it the label stays as it is.
+  """
+  @spec enable(String.t(), String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def enable(tenant_id, workspace_id, by, opts \\ []) do
+    cond do
+      not Store.selected?(OptimalEngine.Store.SQLite) ->
+        {:error, @unavailable}
+
+      not valid_label?(opts[:label]) ->
+        {:error, :invalid_label}
+
+      true ->
+        if label = clean_label(opts[:label]) do
+          {:ok, _} = Store.raw_query("UPDATE sync_identity SET label = ?1 WHERE id = 1", [label])
+        end
+
+        do_enable(tenant_id, workspace_id, by)
+    end
+  end
+
+  defp valid_label?(nil), do: true
+
+  defp valid_label?(label) when is_binary(label),
+    do: String.length(String.trim(label)) <= @label_max
+
+  defp valid_label?(_label), do: false
+
+  defp clean_label(label) when is_binary(label) do
+    case String.trim(label) do
+      "" -> nil
+      text -> text
+    end
+  end
+
+  defp clean_label(_label), do: nil
 
   defp do_enable(tenant_id, workspace_id, by) do
     {:ok, _} =
@@ -505,7 +547,9 @@ defmodule OptimalEngine.Sync do
   Registers a peer Engine for a workspace. Attrs: `url`, `api_key` (a key on
   the peer scoped to the workspace with the `sync` scope), `policy`
   (default `both`), `max_class` (default `confidential`), `since` (the peer
-  ledger sequence to start pulling from, for a seeded replica).
+  ledger sequence to start pulling from, for a seeded replica), `label` (a
+  name for the peer, at most #{@label_max} characters; a peer without one is
+  named by `default_label/1`, and adding a peer again without one keeps it).
   """
   @spec add_peer(String.t(), map(), String.t()) :: {:ok, map()} | {:error, atom()}
   def add_peer(tenant_id, attrs, by) do
@@ -532,10 +576,31 @@ defmodule OptimalEngine.Sync do
       max_class not in @classes ->
         {:error, :invalid_max_class}
 
+      not valid_label?(attrs["label"]) ->
+        {:error, :invalid_label}
+
       true ->
         store_peer(tenant_id, attrs, policy, max_class, by)
     end
   end
+
+  @doc """
+  A peer's id: derived from its tenant, workspace and URL, so it is the same
+  every time the peer is added and its history (`History.runs/3`) follows it.
+  """
+  @spec peer_id(map()) :: String.t()
+  def peer_id(%{tenant_id: tenant, workspace_id: workspace, url: url}) do
+    digest = :crypto.hash(:sha256, Enum.join([tenant, workspace, url], <<0>>))
+    "peer_" <> (digest |> Base.encode16(case: :lower) |> binary_part(0, 16))
+  end
+
+  @doc """
+  The name of a peer that was given none: `"MIOSA cloud"` for a relay URL,
+  else the URL's host.
+  """
+  @spec default_label(String.t()) :: String.t()
+  def default_label("relay+" <> _url), do: "MIOSA cloud"
+  def default_label(url), do: URI.parse(url).host || url
 
   @doc "Peers, without their keys."
   @spec peers(String.t(), String.t() | nil) :: [map()]
@@ -605,10 +670,26 @@ defmodule OptimalEngine.Sync do
     end
   end
 
+  # Every cycle that ran, complete, failed or raised, leaves one run row.
   defp run_peer_locked(peer) do
+    started = utc_now_iso()
+
+    result =
+      try do
+        cycle(peer, started)
+      rescue
+        error ->
+          History.record_run(peer, started, %{status: "error"}, Exception.message(error))
+          reraise error, __STACKTRACE__
+      end
+
+    History.record_run(peer, started, result, reload_peer(peer).message)
+    result
+  end
+
+  defp cycle(peer, started) do
     budget = Application.get_env(:optimal_engine, :sync_cycle_budget_ms, @cycle_budget)
     deadline = System.monotonic_time(:millisecond) + budget
-    started = utc_now_iso()
 
     # Sealed first, so the head counts every change captured so far: it is the
     # floor the next pull judges this Engine's own changes against.
@@ -695,7 +776,10 @@ defmodule OptimalEngine.Sync do
 
   defp base_message(_pushed), do: nil
 
-  @doc "Replication state for a workspace: lag, last sync, pending, conflicts."
+  @doc """
+  Replication state for a workspace: lag, last sync, pending, conflicts, this
+  Engine's label, and each peer's id and label.
+  """
   @spec status(String.t(), String.t()) :: map()
   def status(tenant_id, workspace_id) do
     {:ok, _} = Capture.seal()
@@ -718,13 +802,16 @@ defmodule OptimalEngine.Sync do
       workspace_id: workspace_id,
       enabled: enabled?(workspace_id),
       replica_id: local,
+      label: label(),
       ledger_sequence: local_seq,
       open_conflicts: by_table |> Map.values() |> Enum.sum(),
       conflicts_by_table: by_table,
       append_only_tables: Capture.append_only_tables(),
       peers:
         Enum.map(peers(tenant_id, workspace_id), fn peer ->
-          Map.put(peer, :pending_push, pending_push(tenant_id, workspace_id, peer, local))
+          peer
+          |> Map.put(:pending_push, pending_push(tenant_id, workspace_id, peer, local))
+          |> Map.update!(:last_sync_at, &History.iso/1)
         end)
     }
   end
@@ -2788,11 +2875,11 @@ defmodule OptimalEngine.Sync do
         {:ok, _} =
           Store.raw_query(
             """
-            INSERT INTO sync_peers (tenant_id, workspace_id, url, credential, policy, max_class, last_pulled_seq)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO sync_peers (tenant_id, workspace_id, url, credential, policy, max_class, last_pulled_seq, label)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(tenant_id, workspace_id, url) DO UPDATE SET
               credential = excluded.credential, policy = excluded.policy, max_class = excluded.max_class,
-              status = 'active'
+              status = 'active', label = COALESCE(excluded.label, sync_peers.label)
             """,
             [
               tenant_id,
@@ -2801,7 +2888,8 @@ defmodule OptimalEngine.Sync do
               envelope,
               policy,
               max_class,
-              attrs["since"] || 0
+              attrs["since"] || 0,
+              clean_label(attrs["label"])
             ]
           )
 
@@ -2819,10 +2907,19 @@ defmodule OptimalEngine.Sync do
 
         {:ok, _} = enable(tenant_id, attrs["workspace_id"], by)
 
+        peer =
+          reload_peer(%{
+            tenant_id: tenant_id,
+            workspace_id: attrs["workspace_id"],
+            url: String.trim_trailing(attrs["url"], "/")
+          })
+
         {:ok,
          %{
+           id: peer.id,
            workspace_id: attrs["workspace_id"],
            url: attrs["url"],
+           label: peer.label,
            policy: policy,
            max_class: max_class
          }}
@@ -2884,6 +2981,9 @@ defmodule OptimalEngine.Sync do
       )
   end
 
+  @doc false
+  def now_iso, do: utc_now_iso()
+
   # The format SQLite's strftime('%Y-%m-%dT%H:%M:%f', 'now') gives a change's
   # `occurred_at`, so the two compare as text.
   defp utc_now_iso do
@@ -2933,7 +3033,7 @@ defmodule OptimalEngine.Sync do
   defp peer_sql do
     """
     SELECT tenant_id, workspace_id, url, credential, policy, max_class, peer_replica_id, last_pulled_seq,
-           last_pushed_seq, pulled_local_seq, last_sync_at, status, message
+           last_pushed_seq, pulled_local_seq, last_sync_at, status, message, label
     FROM sync_peers
     """
   end
@@ -2951,9 +3051,12 @@ defmodule OptimalEngine.Sync do
          floor,
          at,
          status,
-         message
+         message,
+         label
        ]) do
     %{
+      id: peer_id(%{tenant_id: tenant, workspace_id: workspace, url: url}),
+      label: label || default_label(url),
       tenant_id: tenant,
       workspace_id: workspace,
       url: url,

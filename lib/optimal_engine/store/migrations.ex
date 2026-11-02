@@ -151,7 +151,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_graph_edge_asserted_by(),
       migration_workspace_id_order_indexes(),
       migration_key_grants_backfill(),
-      migration_triple_mirror_changes()
+      migration_triple_mirror_changes(),
+      migration_sync_history()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -796,6 +797,45 @@ defmodule OptimalEngine.Store.Migrations do
           object TEXT NOT NULL
         )
         """}
+     ]}
+  end
+
+  # Sync history: what each peer cycle did, and names for the Engines. Every
+  # cycle with a peer, complete or failed, appends one `sync_runs` row (its
+  # counts, outcome and message); the newest 10_000 rows of each peer are kept.
+  # `peer_id` is `Sync.peer_id/1`, derived from the peer's tenant, workspace
+  # and URL, so a peer added again keeps its history. `sync_peers.label` names
+  # a peer and `sync_identity.label` this Engine; both are optional and stay on
+  # this Engine. Additive. The version is provisional, like the ones above.
+  @sync_history_version 87
+
+  defp migration_sync_history do
+    {@sync_history_version,
+     "sync history: a row per peer cycle, and labels for peers and this Engine",
+     [
+       {"sync_peers.label", "ALTER TABLE sync_peers ADD COLUMN label TEXT"},
+       {"sync_identity.label", "ALTER TABLE sync_identity ADD COLUMN label TEXT"},
+       {"sync_runs",
+        """
+        CREATE TABLE IF NOT EXISTS sync_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          peer_id TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          finished_at TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('ok', 'error', 'paused')),
+          pulled INTEGER NOT NULL DEFAULT 0,
+          pushed INTEGER NOT NULL DEFAULT 0,
+          conflicts INTEGER NOT NULL DEFAULT 0,
+          gated INTEGER NOT NULL DEFAULT 0,
+          message TEXT
+        )
+        """},
+       {"idx_sync_runs_peer",
+        "CREATE INDEX IF NOT EXISTS idx_sync_runs_peer ON sync_runs(peer_id, id)"},
+       {"idx_sync_runs_workspace",
+        "CREATE INDEX IF NOT EXISTS idx_sync_runs_workspace ON sync_runs(tenant_id, workspace_id, id)"}
      ]}
   end
 
