@@ -28,8 +28,8 @@ jobs:
     # "test (Elixir 1.17.3 / OTP 26.2)" did. The versions are in the matrix
     # below and in the log, not in the check name.
     name: ${{ matrix.name }}
-    # GitHub-hosted runners are billing-blocked org-wide, so the Linux jobs run on MIOSA's ephemeral self-hosted runners (Miosa-osa/miosa tasks/self-hosted-ci-runbook.md).
-    runs-on: [self-hosted, miosa-ci, optimalengine]
+    # This repository is public, so GitHub-hosted runners are free for it (the org-wide billing block covers private repositories only); MIOSA's self-hosted pool stopped taking this repo's jobs on 2026-11-01.
+    runs-on: ubuntu-24.04
     # A cold cache (any mix.lock change) compiles RocksDB from source: about
     # 12 minutes on the 1.19 / OTP 28 job before the tests start.
     timeout-minutes: 25
@@ -141,7 +141,7 @@ jobs:
 
   mcp:
     name: mcp server (build and test)
-    runs-on: [self-hosted, miosa-ci, optimalengine]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:
@@ -164,7 +164,7 @@ jobs:
     # server archive with SHA256SUMS. Built and installed on every run. This job
     # runs pull request code and npm, so it holds no write token.
     name: client CLI and MCP release files
-    runs-on: [self-hosted, miosa-ci, optimalengine]
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
