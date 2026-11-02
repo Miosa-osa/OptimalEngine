@@ -11,8 +11,8 @@ on:
 
 jobs:
   release-benchmarks:
-    # GitHub-hosted runners are billing-blocked org-wide, so the Linux jobs run on MIOSA's ephemeral self-hosted runners (Miosa-osa/miosa tasks/self-hosted-ci-runbook.md).
-    runs-on: [self-hosted, miosa-ci, optimalengine]
+    # This repository is public, so GitHub-hosted runners are free for it (the org-wide billing block covers private repositories only); MIOSA's self-hosted pool stopped taking this repo's jobs on 2026-11-01.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
