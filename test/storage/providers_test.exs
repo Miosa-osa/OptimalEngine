@@ -74,7 +74,7 @@ defmodule OptimalEngine.Storage.ProvidersTest do
     refute Planner.ready?(%{id: "s3", lifecycle_state: "configured_unverified"})
   end
 
-  @unimplemented ~w(duckdb fractal)
+  @unimplemented ~w(fractal)
 
   test "every provider declares whether an adapter is implemented" do
     for provider <- Providers.list() do
@@ -85,7 +85,7 @@ defmodule OptimalEngine.Storage.ProvidersTest do
 
     assert Enum.sort(implemented) ==
              Enum.sort(
-               ~w(sqlite fts5 embedded_vectors rocksdb filesystem ets s3 postgres valkey nats_jetstream qdrant openbao)
+               ~w(sqlite fts5 embedded_vectors rocksdb filesystem ets s3 postgres valkey nats_jetstream qdrant openbao duckdb)
              )
   end
 

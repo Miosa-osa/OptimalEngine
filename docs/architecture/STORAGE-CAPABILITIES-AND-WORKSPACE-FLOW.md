@@ -93,7 +93,7 @@ Canonical cutover requires an explicit migration, validation, and rollback plan.
 ### Tier 2: Cloud Scale
 
 Managed S3-compatible object storage (AWS S3, R2) and managed PostgreSQL (with the limits above) can replace self-hosted equivalents today.
-Analytical DuckDB or Parquet projections are the intended next provider and have no adapter yet; Valkey's, NATS JetStream's and Qdrant's adapters are wired.
+Valkey, NATS JetStream, Qdrant and DuckDB with Parquet all have adapters; no Engine projection is written to them yet.
 
 Qdrant is an optional high-scale semantic projection and never becomes accepted truth.
 
