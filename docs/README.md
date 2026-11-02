@@ -202,7 +202,8 @@ flowchart LR
 | Cache directories | Rebuildable parse, embedding, and runtime acceleration. |
 | ETS and RocksDB | Triple-store mirrors of the SQLite `graph_edges` graph, which no retrieval path reads. ETS is the config default and what the Docker image and MIOSA template run; RocksDB is the dev launcher default. Mnesia is experimental (`ram_copies`) and Riak is in no build. |
 | Postgres | Optional provider for scale, wired but partial (compile-time `OPTIMAL_STORE=postgres`, no full-text search, replication, or app data collections). |
-| NATS, Valkey, Qdrant, DuckDB, OpenBao, Fractal | Declared providers with no adapter yet. |
+| NATS, Valkey, Qdrant, DuckDB, OpenBao | Providers with an adapter, health-checked and proved by a round trip; no Engine feature uses them yet. |
+| Fractal | Declared provider with no adapter yet. |
 | Markdown/files | Human-operable projection and editing surface. |
 | HTML/wiki/API/app views | Projection and control surfaces. |
 

@@ -11,7 +11,7 @@ The profile tunes the Engine to its machine and says when to grow; the preset ap
 | `workspace` | 1 / 2 GiB | 10 GiB | 250k vectors, 500k memories, 50k memory candidates, 100k contexts | yes | one client or team workspace |
 | `business` | 2 / 4 GiB | 25 GiB | 1M vectors, 2M memories, 200k memory candidates, 500k contexts | no | a whole company in one brain |
 | `platform` | 4 / 8 GiB | 100 GiB | 5M vectors, 10M memories, 1M memory candidates, 2M contexts | no | a large customer, a product with many end users |
-| `scale` | 8 / 16 GiB or more | 250 GiB or more | beyond embedded limits | no | beyond one embedded Engine: vectors would move to a vector provider (Qdrant, no adapter yet), writers to Postgres (wired but partial, see below) |
+| `scale` | 8 / 16 GiB or more | 250 GiB or more | beyond embedded limits | no | beyond one embedded Engine: vectors would move to a vector provider (Qdrant, reached and proved, not yet serving search), writers to Postgres (wired but partial, see below) |
 
 ### Sizes on MIOSA
 
@@ -78,9 +78,9 @@ At 70 percent of any limit the recommendation is `resize` to the next profile, w
 
 | Gauge | Provider the recommendation names | Status |
 | --- | --- | --- |
-| `vectors` | `qdrant` | No adapter yet. Embedded vectors keep serving. |
+| `vectors` | `qdrant` | Reached and proved; the Engine's vector search still reads the embedded vectors. |
 | `disk_bytes` | `s3` | Wired. Moves assets and backups off the disk. |
-| `writes_per_minute` | `postgres`, `nats_jetstream` | `postgres` is wired but partial; `nats_jetstream` has no adapter yet. |
+| `writes_per_minute` | `postgres`, `nats_jetstream` | `postgres` is wired but partial; `nats_jetstream` is reached and proved, but no Engine writes flow through it yet. |
 | any other gauge | `postgres` | Wired but partial. |
 
 The recommendation names a provider whether or not the Engine can use it, so check `GET /api/storage/providers` (`adapter_implemented`) before acting on it.

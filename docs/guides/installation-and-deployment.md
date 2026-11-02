@@ -29,7 +29,8 @@ Providers are things a deployment grows onto, not the default shape:
 | --- | --- | --- |
 | S3-compatible storage (Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Assets and offsite backups |
 | PostgreSQL | Wired but partial: a compile-time `OPTIMAL_STORE=postgres` build that refuses full-text search, replication, and app data collections | The canonical relational store for engines that share one database |
-| NATS JetStream, Valkey, Qdrant, DuckDB and Parquet, OpenBao, Fractal | Declared, no adapter yet | Nothing: the Engine cannot use them |
+| NATS JetStream, Valkey, Qdrant, DuckDB and Parquet, OpenBao | Adapter, health-checked and proved | Nothing yet: no Engine feature reads or writes them |
+| Fractal | Declared, no adapter yet | Nothing: the Engine cannot use it |
 
 ## Choosing A Mode
 
@@ -216,7 +217,8 @@ Only two providers are usable today.
 | --- | --- | --- |
 | S3-compatible storage (Garage, MinIO, or another) | Wired | Assets and offsite backups |
 | PostgreSQL | Wired but partial | The canonical relational store of a Postgres build |
-| NATS JetStream, Valkey, Qdrant, DuckDB and Parquet, OpenBao, Fractal | Not wired yet | Nothing; declared with no adapter |
+| NATS JetStream, Valkey, Qdrant, DuckDB and Parquet, OpenBao | Adapter, health-checked and proved | Nothing yet; no Engine feature uses them |
+| Fractal | Not wired yet | Nothing; declared with no adapter |
 
 ### S3 with Garage
 
@@ -294,7 +296,7 @@ The Engine is still one instance on one durable disk.
 | --- | --- | --- |
 | Managed S3: AWS S3, Cloudflare R2 | Wired | Assets and offsite backups |
 | Managed PostgreSQL | Wired but partial | The Postgres build above, with the same refusals |
-| Managed Qdrant, Valkey, NATS | Not wired yet | Cannot be used |
+| Managed Qdrant, Valkey, NATS | Adapter, health-checked and proved | Reached and proved; no Engine feature uses them yet |
 
 ### Managed S3
 
