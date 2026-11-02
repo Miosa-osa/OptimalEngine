@@ -80,7 +80,7 @@ At 70 percent of any limit the recommendation is `resize` to the next profile, w
 | --- | --- | --- |
 | `vectors` | `qdrant` | No adapter yet. Embedded vectors keep serving. |
 | `disk_bytes` | `s3` | Wired. Moves assets and backups off the disk. |
-| `writes_per_minute` | `postgres`, `nats_jetstream` | `postgres` is wired but partial; `nats_jetstream` has no adapter yet. |
+| `writes_per_minute` | `postgres`, `nats_jetstream` | `postgres` is wired but partial; `nats_jetstream` is reached and proved, but no Engine writes flow through it yet. |
 | any other gauge | `postgres` | Wired but partial. |
 
 The recommendation names a provider whether or not the Engine can use it, so check `GET /api/storage/providers` (`adapter_implemented`) before acting on it.
