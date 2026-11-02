@@ -14,14 +14,22 @@ defmodule OptimalEngine.Sync.History do
     newest #{10_000} rows of each peer are kept.
   * A ledger entry names its table, row, operation and device, never its
     payload. Its `origin` is `local` when the device is this Engine's replica
-    id and `peer` otherwise, with `origin_label` the label of the peer that
-    answers under that replica id, or `"unknown peer"`.
+    id and `peer` otherwise, with `origin_label` the label of the workspace's
+    peer that answers under that replica id, or `"unknown peer"`. A keyed
+    reader sees only the changes its label and partition grants and the access
+    lists allow (`OptimalEngine.ReadScope.with_mutation_filter/3`, the rule of
+    the workspace's other ledger reader); `withheld` counts the rest of the page.
+  * Recording a run never changes the outcome of the cycle it records: a
+    failed insert or prune is logged and the cycle's result stands.
 
   Both lists are newest first, `limit` (default 50) is capped at 200, and
   `next_cursor` is the `before` that reads the next page, `nil` on the last.
   Every timestamp is ISO-8601 UTC.
   """
 
+  require Logger
+
+  alias OptimalEngine.ReadScope
   alias OptimalEngine.Store
   alias OptimalEngine.Sync
 
@@ -43,6 +51,18 @@ defmodule OptimalEngine.Sync.History do
   """
   @spec record_run(map(), String.t(), map(), String.t() | nil) :: :ok
   def record_run(peer, started_at, result, message) do
+    write_run(peer, started_at, result, message)
+  rescue
+    error ->
+      Logger.warning("[Sync.History] Could not record a run: #{Exception.message(error)}")
+      :ok
+  catch
+    :exit, reason ->
+      Logger.warning("[Sync.History] Could not record a run: #{inspect(reason)}")
+      :ok
+  end
+
+  defp write_run(peer, started_at, result, message) do
     peer_id = Sync.peer_id(peer)
     {pulled, pull_conflicts, pull_gated} = pull_counts(result[:pull])
     {pushed, push_gated} = push_counts(result[:push])
@@ -70,12 +90,14 @@ defmodule OptimalEngine.Sync.History do
         ]
       )
 
+    # Everything at or below the newest row past the kept ones; one index
+    # seek, where NOT IN (... LIMIT 10000) built the kept set on every cycle.
     {:ok, _} =
       Store.raw_query(
         """
         DELETE FROM sync_runs
-        WHERE peer_id = ?1 AND id NOT IN (
-          SELECT id FROM sync_runs WHERE peer_id = ?1 ORDER BY id DESC LIMIT ?2)
+        WHERE peer_id = ?1 AND id <= (
+          SELECT id FROM sync_runs WHERE peer_id = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2)
         """,
         [peer_id, keep_runs()]
       )
@@ -147,10 +169,11 @@ defmodule OptimalEngine.Sync.History do
   @doc """
   The changes in a workspace's ledger, newest first, this Engine's own
   included. Options: `:limit`, `:before` (a sequence), `:table`, `:origin`
-  (`"local"` or `"peer"`).
+  (`"local"` or `"peer"`), `:reader` (an `OptimalEngine.ReadScope`; nil is
+  the trusted local operator, who sees every change).
   """
   @spec ledger(String.t(), String.t(), keyword()) ::
-          %{data: [map()], next_cursor: String.t() | nil}
+          %{data: [map()], next_cursor: String.t() | nil, withheld: non_neg_integer()}
   def ledger(tenant_id, workspace_id, opts \\ []) do
     {:ok, _} = Sync.Capture.seal()
     limit = limit(opts[:limit])
@@ -173,7 +196,8 @@ defmodule OptimalEngine.Sync.History do
     {:ok, rows} =
       Store.raw_query(
         """
-        SELECT m.sequence, m.entity_type, m.entity_id, m.operation, m.device_id, m.occurred_at, m.recorded_at
+        SELECT m.sequence, m.entity_type, m.entity_id, m.operation, m.device_id, m.occurred_at,
+               m.recorded_at, m.payload
         FROM sync_mutations m
         WHERE m.tenant_id = ?1 AND m.workspace_id = ?2 AND #{Sync.change_row_sql("m")}#{where}
         ORDER BY m.sequence DESC LIMIT ?#{length(params) + 1}
@@ -183,41 +207,75 @@ defmodule OptimalEngine.Sync.History do
 
     own_label = Sync.label()
     peers = peer_labels(tenant_id, workspace_id)
+    {examined, rest} = Enum.split(rows, limit)
 
-    page(rows, limit, fn [sequence, table, entity_id, operation, device, occurred, recorded] ->
-      {origin, origin_label} =
-        if device == local,
-          do: {"local", own_label},
-          else: {"peer", Map.get(peers, device, @unknown_peer)}
+    # The payload is read only for the grant check and never served.
+    {kept, withheld} =
+      ReadScope.with_mutation_filter(opts[:reader], workspace_id, fn read_filter ->
+        examined |> Enum.map(&to_mutation/1) |> read_filter.()
+      end)
 
-      %{
-        sequence: sequence,
-        table: table,
-        entity_id: entity_id,
-        op: op(operation),
-        device_id: device,
-        origin: origin,
-        origin_label: origin_label,
-        occurred_at: iso(occurred),
-        recorded_at: iso(recorded)
-      }
-    end)
+    data =
+      Enum.map(kept, fn mutation ->
+        {origin, origin_label} =
+          if mutation.device_id == local,
+            do: {"local", own_label},
+            else: {"peer", Map.get(peers, mutation.device_id, @unknown_peer)}
+
+        %{
+          sequence: mutation.sequence,
+          table: mutation.entity_type,
+          entity_id: mutation.entity_id,
+          op: op(mutation.operation),
+          device_id: mutation.device_id,
+          origin: origin,
+          origin_label: origin_label,
+          occurred_at: iso(mutation.occurred_at),
+          recorded_at: iso(mutation.recorded_at)
+        }
+      end)
+
+    # The cursor follows the last change looked at, shown or withheld, so a
+    # page the grants empty still leads to the next.
+    cursor =
+      case {rest, List.last(examined)} do
+        {[], _} -> nil
+        {_more, [sequence | _]} -> to_string(sequence)
+      end
+
+    %{data: data, next_cursor: cursor, withheld: withheld}
   end
 
-  # The label of each peer by the replica id it answers under: the workspace's
-  # own peers first, then the tenant's other peers for a device they forwarded.
-  defp peer_labels(tenant_id, workspace_id) do
-    by_replica = fn peers ->
-      for %{peer_replica_id: replica, label: label} <- peers,
-          is_binary(replica),
-          into: %{},
-          do: {replica, label}
-    end
+  defp to_mutation([sequence, table, entity_id, operation, device, occurred, recorded, payload]) do
+    %{
+      sequence: sequence,
+      entity_type: table,
+      entity_id: entity_id,
+      operation: operation,
+      device_id: device,
+      occurred_at: occurred,
+      recorded_at: recorded,
+      payload: decode_payload(payload)
+    }
+  end
 
-    tenant_id
-    |> Sync.peers()
-    |> by_replica.()
-    |> Map.merge(by_replica.(Sync.peers(tenant_id, workspace_id)))
+  defp decode_payload(payload) when is_binary(payload) do
+    case Jason.decode(payload) do
+      {:ok, decoded} -> decoded
+      {:error, _} -> nil
+    end
+  end
+
+  defp decode_payload(_payload), do: nil
+
+  # The label of each of the workspace's peers by the replica id it answers
+  # under. A device only a peer of another workspace knows stays "unknown
+  # peer": that peer's label is not this workspace's to show.
+  defp peer_labels(tenant_id, workspace_id) do
+    for %{peer_replica_id: replica, label: label} <- Sync.peers(tenant_id, workspace_id),
+        is_binary(replica),
+        into: %{},
+        do: {replica, label}
   end
 
   defp op("create"), do: "insert"

@@ -12,8 +12,12 @@ defmodule OptimalEngine.API.SyncAPI do
   | `GET /api/sync/runs?workspace=&peer_id=&limit=&before=` | read |
   | `GET /api/sync/ledger?workspace=&limit=&before=&table=&origin=` | read |
 
-  `runs` and `ledger` read the implicit `default` workspace when the request
-  names none, as the workspace check authorizes it (see `OptimalEngine.Sync.History`).
+  `runs` and `ledger` read the workspace `OptimalEngine.API.WorkspaceAuthPlug`
+  authorized for the request (`conn.assigns[:workspace_id]`: the first one the
+  request names, or the implicit `default`), never one they work out again from
+  the query, so an empty `workspace=` cannot point them at a workspace the key
+  was not checked for. `ledger` shows a keyed reader only the changes its
+  grants allow (see `OptimalEngine.Sync.History`).
   """
 
   import Plug.Conn
@@ -133,7 +137,7 @@ defmodule OptimalEngine.API.SyncAPI do
     json(
       conn,
       200,
-      History.runs(tenant(conn), history_workspace(q),
+      History.runs(tenant(conn), history_workspace(conn),
         peer_id: text_param(q["peer_id"]),
         limit: int(q["limit"], nil),
         before: positive(q["before"])
@@ -151,11 +155,12 @@ defmodule OptimalEngine.API.SyncAPI do
         json(
           conn,
           200,
-          History.ledger(tenant(conn), history_workspace(q),
+          History.ledger(tenant(conn), history_workspace(conn),
             limit: int(q["limit"], nil),
             before: positive(q["before"]),
             table: text_param(q["table"]),
-            origin: origin
+            origin: origin,
+            reader: Reader.scope(conn, ceiling: true)
           )
         )
 
@@ -164,7 +169,7 @@ defmodule OptimalEngine.API.SyncAPI do
     end
   end
 
-  defp history_workspace(q), do: text_param(q["workspace"] || q["workspace_id"]) || "default"
+  defp history_workspace(conn), do: conn.assigns[:workspace_id] || "default"
 
   defp text_param(value) when is_binary(value) and value != "", do: value
   defp text_param(_value), do: nil

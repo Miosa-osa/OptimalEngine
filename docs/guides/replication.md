@@ -345,11 +345,13 @@ Every cycle with a peer, complete or failed, appends one row to `sync_runs` (loc
 A cycle that could not start because another one with the same peer was running records nothing.
 A peer's `id` is derived from its tenant, workspace and URL, so a peer added again keeps its history; filter with `peer_id`.
 
-`GET /api/sync/ledger` returns `{"data": [{sequence, table, entity_id, op, device_id, origin, origin_label, occurred_at, recorded_at}], "next_cursor"}` for the changes in the workspace's ledger, this Engine's own included; payloads are never returned.
+`GET /api/sync/ledger` returns `{"data": [{sequence, table, entity_id, op, device_id, origin, origin_label, occurred_at, recorded_at}], "next_cursor", "withheld"}` for the changes in the workspace's ledger, this Engine's own included; payloads are never returned.
+A key sees only the changes its label and partition grants and the access lists allow, by the rule of `GET /api/storage/workspaces/:id/mutations`, and `withheld` counts the changes of the page it left out; `next_cursor` follows the last change looked at, so a page the grants empty still leads to the next.
 `op` is `insert`, `update` or `delete`.
-`origin` is `local` when `device_id` is this Engine's replica id (`origin_label` is then this Engine's label) and `peer` otherwise, with `origin_label` the label of the peer whose `peer_replica_id` matches, else `unknown peer`; filter with `origin=local|peer` and `table=`.
+`origin` is `local` when `device_id` is this Engine's replica id (`origin_label` is then this Engine's label) and `peer` otherwise, with `origin_label` the label of the workspace's peer whose `peer_replica_id` matches, else `unknown peer` (a peer of another workspace is not named); filter with `origin=local|peer` and `table=`.
 
-Both routes need the `read` scope, as `GET /api/sync/status` does (the replication `sync` scope does not read them), and read the implicit `default` workspace when the request names none.
+Both routes need the `read` scope, as `GET /api/sync/status` does (the replication `sync` scope does not read them), and read the workspace the request's workspace check authorized: the one it names, or the implicit `default` when it names none.
+Recording a run never changes the cycle's outcome: a failed write to `sync_runs` is logged and the cycle's result stands.
 Both are newest first: `limit` defaults to 50 and is capped at 200, and `next_cursor` (a string, `null` on the last page) is the `before` that reads the next page, a run id for runs and a ledger sequence for the ledger.
 Timestamps are ISO-8601 UTC.
 

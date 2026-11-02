@@ -288,11 +288,11 @@ defmodule OptimalEngine.SyncHistoryTest do
     end
 
     test "enable sets this Engine's own label, shown by status", ctx do
-      {:ok, _} = Sync.enable(ctx.tenant, ctx.ws, "u", label: "Roberto's laptop")
-      assert Sync.status(ctx.tenant, ctx.ws).label == "Roberto's laptop"
+      {:ok, _} = Sync.enable(ctx.tenant, ctx.ws, "u", label: "Studio laptop")
+      assert Sync.status(ctx.tenant, ctx.ws).label == "Studio laptop"
 
       {:ok, _} = Sync.enable(ctx.tenant, ctx.ws, "u")
-      assert Sync.label() == "Roberto's laptop"
+      assert Sync.label() == "Studio laptop"
 
       assert {:error, :invalid_label} =
                Sync.enable(ctx.tenant, ctx.ws, "u", label: String.duplicate("b", 65))
@@ -442,7 +442,8 @@ defmodule OptimalEngine.SyncHistoryTest do
         get(path("/api/sync/runs", ctx, %{"peer_id" => "peer_none"}), ctx.reader)
 
       {200, ledger} = get(path("/api/sync/ledger", ctx, %{"limit" => "1"}), ctx.reader)
-      assert Map.keys(ledger) |> Enum.sort() == ["data", "next_cursor"]
+      assert Map.keys(ledger) |> Enum.sort() == ["data", "next_cursor", "withheld"]
+      assert ledger["withheld"] == 0
       [entry] = ledger["data"]
       assert entry |> Map.keys() |> Enum.sort() == Enum.sort(@ledger_keys)
       refute Map.has_key?(entry, "payload")
@@ -458,6 +459,55 @@ defmodule OptimalEngine.SyncHistoryTest do
 
       assert {400, %{"error" => "invalid_origin"}} =
                get(path("/api/sync/ledger", ctx, %{"origin" => "cloud"}), ctx.reader)
+    end
+
+    test "an empty workspace parameter reads the authorized workspace, never default", ctx do
+      insert_context(ctx, "scoped-#{ctx.n}")
+
+      for route <- ~w(/api/sync/runs /api/sync/ledger) do
+        query = URI.encode_query(%{"workspace" => "", "workspace_id" => ctx.ws})
+        {200, scoped} = get(route <> "?" <> query, ctx.reader)
+        {200, named} = get(path(route, ctx, %{}), ctx.reader)
+        assert scoped["data"] == named["data"], route
+      end
+
+      {200, %{"data" => entries}} =
+        get(
+          "/api/sync/ledger?" <> URI.encode_query(%{"workspace" => "", "workspace_id" => ctx.ws}),
+          ctx.reader
+        )
+
+      assert Enum.any?(entries, &(&1["entity_id"] == "scoped-#{ctx.n}"))
+    end
+
+    test "a key reads only the ledger changes its label grants cover", ctx do
+      labelled = "labelled-#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO facts (id, tenant_id, workspace_id, fact_text, security_labels) VALUES (?1, ?2, ?3, 'Wire 5521', '[\"restricted\"]')",
+          [labelled, ctx.tenant, ctx.ws]
+        )
+
+      {:ok, %{key: narrow}} =
+        ApiKey.mint(%{
+          tenant_id: ctx.tenant,
+          name: "narrow-#{ctx.n}",
+          scopes: ["read"],
+          workspace_scope: [ctx.ws],
+          metadata: %{"allowed_security_labels" => ["public"], "allowed_partitions" => []}
+        })
+
+      assert Enum.any?(
+               History.ledger(ctx.tenant, ctx.ws, table: "facts").data,
+               &(&1.entity_id == labelled)
+             )
+
+      {200, held} =
+        get(path("/api/sync/ledger", ctx, %{"limit" => "200", "table" => "facts"}), narrow)
+
+      refute Enum.any?(held["data"], &(&1["entity_id"] == labelled))
+      assert held["withheld"] >= 1
     end
 
     test "the limit is capped at 200", ctx do
