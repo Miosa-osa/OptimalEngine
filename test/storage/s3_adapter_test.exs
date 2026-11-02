@@ -107,9 +107,9 @@ defmodule OptimalEngine.Storage.S3AdapterTest do
   end
 
   test "an unimplemented provider stays adapter_missing even when its probe would pass" do
-    assert {:ok, qdrant} = Providers.get("qdrant")
-    refute qdrant.adapter_implemented
-    assert qdrant.lifecycle_state == "adapter_missing"
+    assert {:ok, fractal} = Providers.get("fractal")
+    refute fractal.adapter_implemented
+    assert fractal.lifecycle_state == "adapter_missing"
   end
 
   test "adapter status and probe describe the endpoint without secret material", %{stub: stub} do
