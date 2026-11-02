@@ -54,7 +54,11 @@ defmodule OptimalEngine.Storage.OpenBao do
         {:error, :invalid_url}
 
       true ->
-        mount = System.get_env(@mount_env) |> then(&if(present?(&1), do: &1, else: @default_mount))
+        mount =
+          System.get_env(@mount_env)
+          |> then(&if(present?(&1), do: &1, else: @default_mount))
+          |> String.trim()
+          |> String.trim("/")
 
         {:ok,
          %{
@@ -71,8 +75,10 @@ defmodule OptimalEngine.Storage.OpenBao do
   def health(opts \\ []) do
     case config(opts) do
       {:ok, config} ->
+        # A performance or HA standby answers 429 by default; standbyok asks
+        # it for 200, so a healthy standby is not reported as unreachable.
         with {:ok, 200, %{"initialized" => true, "sealed" => false}} <-
-               call(config, :get, "/v1/sys/health", nil, opts),
+               call(config, :get, "/v1/sys/health?standbyok=true", nil, opts),
              {:ok, 200, _} <- call(config, :get, "/v1/auth/token/lookup-self", nil, opts) do
           :healthy
         else
@@ -96,25 +102,54 @@ defmodule OptimalEngine.Storage.OpenBao do
       data_path = "/v1/#{config.mount}/data/optimal/proof/#{name}"
       metadata_path = "/v1/#{config.mount}/metadata/optimal/proof/#{name}"
 
-      try do
-        with {:ok, status, _} when status in [200, 204] <-
+      # KV version 2 answers a write with 200 and the version it made, and a
+      # read with that version in `metadata`. A version 1 mount answers 204 and
+      # stores the payload at the literal `data/...` path, which the delete of
+      # `metadata/...` would never remove, so it is not a pass.
+      result =
+        with {:ok, 200, %{"data" => %{"version" => version}}} when is_integer(version) <-
                call(config, :post, data_path, %{data: %{value: value}}, opts),
-             {:ok, 200, %{"data" => %{"data" => %{"value" => ^value}}}} <-
+             {:ok, 200,
+              %{"data" => %{"data" => %{"value" => ^value}, "metadata" => %{"version" => ^version}}}} <-
                call(config, :get, data_path, nil, opts) do
-          {:ok, %{wrote: 1, read_back: true, mount: config.mount}}
+          {:ok, %{wrote: 1, read_back: true, version: version, mount: config.mount}}
         else
+          {:ok, 204, _body} -> {:error, :not_kv_version_2}
           {:ok, status, body} -> {:error, {:round_trip_mismatch, status, summary(body)}}
           {:error, reason} -> {:error, reason}
         end
-      after
-        call(config, :delete, metadata_path, nil, opts)
+
+      # The secret goes whatever happened, and a proof that could not remove it
+      # is not a pass: a token without delete on metadata/ would leave one
+      # behind on every run.
+      deleted = call(config, :delete, metadata_path, nil, opts)
+
+      case {result, deleted} do
+        {{:ok, evidence}, {:ok, status, _}} when status in [200, 204] ->
+          {:ok, Map.put(evidence, :deleted, true)}
+
+        {{:ok, _evidence}, {:ok, status, _}} ->
+          {:error, {:secret_not_deleted, status}}
+
+        {{:ok, _evidence}, {:error, reason}} ->
+          {:error, {:secret_not_deleted, reason}}
+
+        {error, _deleted} ->
+          error
       end
     end
   end
 
   defp call(config, method, path, body, opts) do
+    # Sent once, and over https only to a verified certificate and host name:
+    # the token is a credential to the secrets store itself.
     request_opts =
-      [method: method, headers: headers(), timeout: Keyword.get(opts, :timeout, @default_timeout)]
+      [
+        method: method,
+        headers: headers(),
+        timeout: Keyword.get(opts, :timeout, @default_timeout),
+        single_attempt: true
+      ]
       |> then(fn o -> if body, do: Keyword.put(o, :body, body), else: o end)
 
     case HTTP.request(config.base_url <> path, request_opts) do
@@ -126,7 +161,8 @@ defmodule OptimalEngine.Storage.OpenBao do
   end
 
   defp headers do
-    [{"X-Vault-Token", System.get_env(@token_env) || ""}, {"content-type", "application/json"}]
+    token = System.get_env(@token_env) |> to_string() |> String.trim()
+    [{"X-Vault-Token", token}, {"content-type", "application/json"}]
   end
 
   defp class(reason) when is_atom(reason), do: reason

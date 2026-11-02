@@ -100,6 +100,32 @@ defmodule OptimalEngine.Storage.OpenBaoAdapterTest do
              Providers.proofs() |> Enum.filter(&(&1.provider == "openbao"))
   end
 
+  test "a KV version 1 mount is not a pass" do
+    {:ok, stub} = OpenBaoStub.start(kv: 1)
+    on_exit(fn -> OpenBaoStub.stop(stub) end)
+    point_at(stub)
+
+    assert {:error, :not_kv_version_2} = OpenBao.round_trip()
+  end
+
+  test "a proof that cannot delete its secret is not a pass" do
+    {:ok, stub} = OpenBaoStub.start(delete: :forbidden)
+    on_exit(fn -> OpenBaoStub.stop(stub) end)
+    point_at(stub)
+
+    assert {:error, {:secret_not_deleted, 403}} = OpenBao.round_trip()
+  end
+
+  test "a mount named with slashes and a token read with its newline still work" do
+    {:ok, stub} = OpenBaoStub.start(mount: "kv")
+    on_exit(fn -> OpenBaoStub.stop(stub) end)
+    point_at(stub, stub.token <> "\n")
+    System.put_env("OPTIMAL_OPENBAO_KV_MOUNT", "/kv/")
+
+    assert OpenBao.health() == :healthy
+    assert {:ok, %{read_back: true, deleted: true, mount: "kv"}} = OpenBao.round_trip()
+  end
+
   test "a closed port is unreachable" do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listener)

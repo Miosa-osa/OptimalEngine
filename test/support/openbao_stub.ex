@@ -4,7 +4,9 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
   and a KV version 2 mount (`secret` unless started otherwise), with an
   in-memory secret table and a record of every request. Options: `:token` (the
   only token accepted), `:sealed` (health reports sealed and every other call
-  is 503). No test here talks to a real OpenBao.
+  is 503), `kv: 1` (the mount answers as KV version 1: a write is 204 and a
+  read has no metadata) and `delete: :forbidden` (deleting metadata is 403).
+  No test here talks to a real OpenBao.
   """
 
   @behaviour Plug
@@ -21,7 +23,9 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
       requests: [],
       token: token,
       sealed: Keyword.get(opts, :sealed, false),
-      mount: Keyword.get(opts, :mount, "secret")
+      mount: Keyword.get(opts, :mount, "secret"),
+      kv: Keyword.get(opts, :kv, 2),
+      delete: Keyword.get(opts, :delete, :ok)
     }
 
     {:ok, agent} = Agent.start_link(fn -> state end)
@@ -73,6 +77,10 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
       {"GET", ["v1", "auth", "token", "lookup-self"]} ->
         json(conn, 200, %{data: %{policies: ["root"]}})
 
+      {"POST", ["v1", ^mount, "data" | path]} when state.kv == 1 ->
+        Agent.update(agent, &put_in(&1, [:secrets, Enum.join(path, "/")], body["data"]))
+        send_resp(conn, 204, "")
+
       {"POST", ["v1", ^mount, "data" | path]} ->
         Agent.update(agent, &put_in(&1, [:secrets, Enum.join(path, "/")], body["data"]))
         json(conn, 200, %{data: %{version: 1}})
@@ -82,6 +90,9 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
           nil -> json(conn, 404, %{errors: []})
           data -> json(conn, 200, %{data: %{data: data, metadata: %{version: 1}}})
         end
+
+      {"DELETE", ["v1", ^mount, "metadata" | _path]} when state.delete == :forbidden ->
+        json(conn, 403, %{errors: ["permission denied"]})
 
       {"DELETE", ["v1", ^mount, "metadata" | path]} ->
         Agent.update(agent, &%{&1 | secrets: Map.delete(&1.secrets, Enum.join(path, "/"))})
