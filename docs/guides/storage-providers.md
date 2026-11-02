@@ -39,7 +39,7 @@ RocksDB is the exception: it is `active` only when `OPTIMAL_KNOWLEDGE_BACKEND=ro
 Provider status never returns credentials, connection strings, or secret values; only the names of the environment variables a provider reads.
 
 Today `s3` and `postgres` are the service providers with an adapter.
-`nats_jetstream`, `valkey`, `qdrant`, `duckdb`, `openbao`, and `fractal` are declared, and they report `adapter_missing` until an adapter ships for each.
+`valkey` and `nats_jetstream` have adapters and report `not_configured`, `available` or `unavailable` like `s3`; `qdrant`, `duckdb`, `openbao`, and `fractal` are declared, and they report `adapter_missing` until an adapter ships for each.
 
 `sqlite` and `postgres` are canonical stores, and an engine runs exactly one of them.
 The choice is made when the engine is compiled, so both report `selected`: `true` for the store this build runs and `false` for the other.
@@ -344,8 +344,8 @@ Providers are what a deployment grows onto, and this table is the status of each
 | RocksDB | Wired, opt in | A persistent triple-store mirror of `graph_edges` (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`) | Falls back to ETS when the native library is missing |
 | `s3` (S3-compatible: Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Asset bytes, offsite backups, the probe and the placement reconciler | |
 | `postgres` | Wired, partial | The canonical relational store of a compile-time `OPTIMAL_STORE=postgres` build | Full-text search, replication, app data collections, and the engine's backup routes; moving an existing Engine to it |
-| `nats_jetstream` | Declared, no adapter yet | | Everything |
-| `valkey` | Declared, no adapter yet | | Everything |
+| `nats_jetstream` | Wired | The probe (PONG and a JetStream account answer) and the proof (a stream created, a message published and read back by sequence, the stream deleted) over `OPTIMAL_NATS_URL` | Engine events, jobs and replication do not flow through it yet |
+| `valkey` | Wired | The probe (PING) and the proof (set, get, delete) over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Engine caches, locks and rate limits do not live in it yet |
 | `qdrant` | Declared, no adapter yet | | Everything; embedded vectors serve every Engine |
 | `duckdb` (DuckDB and Parquet) | Declared, no adapter yet | | Everything |
 | `openbao` | Declared, no adapter yet | | Everything; secrets come from the environment |
@@ -405,7 +405,7 @@ The response has this shape:
 | `invariant` | The rule that projections and transports never become truth |
 
 An unknown use case answers 422 with `{"error": "unknown use cases", "unknown": ["..."]}`.
-A plan that selects a provider with no adapter is never `ready`, so `cloud_team` and `regulated` are not ready on any build today, because `openbao` and `nats_jetstream` have no adapter.
+A plan that selects a provider with no adapter is never `ready`, so `cloud_team` and `regulated` are not ready on any build today, because `openbao` has no adapter.
 `media_archive` is ready once the `s3` provider is configured and a plan made with `"probe": true` finds it healthy.
 
 The same is available from the shell as `mix optimal.storage use-cases` and `mix optimal.storage plan <ids>`.
@@ -465,7 +465,7 @@ Keep `OPTIMAL_BACKUP_KEY` away from the machine, and give a Garage bucket that h
 
 ## What Is Not Implemented
 
-The Engine has no adapter for NATS JetStream, Valkey, Qdrant, DuckDB, OpenBao, or Fractal, and the provider inventory says so.
+The Engine has no adapter for Qdrant, DuckDB, OpenBao, or Fractal, and the provider inventory says so; Valkey and NATS JetStream are reached and proved, but no Engine feature is served from them yet.
 PostgreSQL holds the canonical relational store but not full-text search, replication, or app data collections, and moving an existing Engine's data to it (stage 4 of [PostgreSQL Provider](postgres-provider.md)) is not implemented.
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.
 

@@ -82,7 +82,7 @@ This tier has no external service dependency and remains the preferred shape for
 A self-hosted team grows onto providers only when one Engine instance is no longer enough.
 Garage or another S3-compatible object store is wired for assets and offsite backups.
 PostgreSQL is wired but partial: a compile-time build that refuses full-text search, replication, and app data collections.
-NATS JetStream and OpenBao can be provisioned next to the Engine, but the Engine has no adapter for them yet, so provisioning them changes nothing. Valkey has one: with `OPTIMAL_VALKEY_URL` set the inventory reports it `available` and the storage audit proves it with a round trip.
+OpenBao can be provisioned next to the Engine, but the Engine has no adapter for it yet, so provisioning it changes nothing. Valkey and NATS JetStream have one: with `OPTIMAL_VALKEY_URL` set the inventory reports it `available` and the storage audit proves it with a round trip.
 
 These services are optional.
 
@@ -93,7 +93,7 @@ Canonical cutover requires an explicit migration, validation, and rollback plan.
 ### Tier 2: Cloud Scale
 
 Managed S3-compatible object storage (AWS S3, R2) and managed PostgreSQL (with the limits above) can replace self-hosted equivalents today.
-Managed NATS, Qdrant, and analytical DuckDB or Parquet projections are the intended next providers, and none has an adapter yet; Valkey's adapter is wired.
+Managed Qdrant and analytical DuckDB or Parquet projections are the intended next providers, and neither has an adapter yet; Valkey's and NATS JetStream's adapters are wired.
 
 Qdrant is an optional high-scale semantic projection and never becomes accepted truth.
 
