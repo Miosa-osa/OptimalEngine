@@ -175,13 +175,13 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "openbao",
-      adapter: nil,
+      adapter: OptimalEngine.Storage.OpenBao.Adapter,
       name: "OpenBao",
       kind: "service",
       role: "secrets",
       capabilities: ~w(secrets kms pki)a,
       activation: "cloud_team",
-      probe: {:http, "OPTIMAL_OPENBAO_ADDR", "/v1/sys/health"},
+      probe: :openbao,
       required_env: ["OPTIMAL_OPENBAO_ADDR", "OPTIMAL_OPENBAO_TOKEN"],
       optional_env: []
     },
@@ -265,7 +265,7 @@ defmodule OptimalEngine.Storage.Providers do
   # A service with an adapter is proved by its own round trip; the shape of the
   # answer is the same for every one of them.
   defp proof_for(%{id: id, adapter: adapter} = provider, opts)
-       when id in ~w(valkey nats_jetstream qdrant) do
+       when id in ~w(valkey nats_jetstream qdrant openbao) do
     if Enum.all?(provider.required_env, &present_env?/1) do
       case adapter.probe(opts) do
         {:ok, evidence} -> %{provider: id, status: "pass", evidence: evidence}
@@ -375,6 +375,9 @@ defmodule OptimalEngine.Storage.Providers do
 
   # /healthz answers anyone. The Qdrant probe lists collections with the key.
   defp run_probe(:qdrant), do: OptimalEngine.Storage.Qdrant.Adapter.health()
+
+  # /v1/sys/health answers a sealed server too. The OpenBao probe needs it unsealed and the token accepted.
+  defp run_probe(:openbao), do: OptimalEngine.Storage.OpenBao.Adapter.health()
 
   defp run_probe(:root_path) do
     path = Application.get_env(:optimal_engine, :root_path, ".")

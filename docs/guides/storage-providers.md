@@ -39,7 +39,7 @@ RocksDB is the exception: it is `active` only when `OPTIMAL_KNOWLEDGE_BACKEND=ro
 Provider status never returns credentials, connection strings, or secret values; only the names of the environment variables a provider reads.
 
 Today `s3` and `postgres` are the service providers with an adapter.
-`valkey` and `nats_jetstream` have adapters and report `not_configured`, `available` or `unavailable` like `s3`; `qdrant` has one too; `duckdb`, `openbao`, and `fractal` are declared, and they report `adapter_missing` until an adapter ships for each.
+`valkey` and `nats_jetstream` have adapters and report `not_configured`, `available` or `unavailable` like `s3`; `qdrant` and `openbao` have one too; `duckdb` and `fractal` are declared, and they report `adapter_missing` until an adapter ships for each.
 
 `sqlite` and `postgres` are canonical stores, and an engine runs exactly one of them.
 The choice is made when the engine is compiled, so both report `selected`: `true` for the store this build runs and `false` for the other.
@@ -348,7 +348,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | `valkey` | Wired | The probe (PING) and the proof (set, get, delete) over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Engine caches, locks and rate limits do not live in it yet |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
 | `duckdb` (DuckDB and Parquet) | Declared, no adapter yet | | Everything |
-| `openbao` | Declared, no adapter yet | | Everything; secrets come from the environment |
+| `openbao` | Wired | The probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` | The Engine's own secrets still come from the environment |
 | `fractal` | Declared, no adapter yet | | Everything |
 
 `GET /api/storage/providers` reports `adapter_implemented` for each entry and `adapter_missing` as the lifecycle state of the declared ones, whatever is configured.
@@ -405,7 +405,7 @@ The response has this shape:
 | `invariant` | The rule that projections and transports never become truth |
 
 An unknown use case answers 422 with `{"error": "unknown use cases", "unknown": ["..."]}`.
-A plan that selects a provider with no adapter is never `ready`, so `cloud_team` and `regulated` are not ready on any build today, because `openbao` has no adapter.
+A plan that selects a provider with no adapter is never `ready`; `cloud_team` and `regulated` are ready once every provider they select is configured and answers its probe.
 `media_archive` is ready once the `s3` provider is configured and a plan made with `"probe": true` finds it healthy.
 
 The same is available from the shell as `mix optimal.storage use-cases` and `mix optimal.storage plan <ids>`.
@@ -465,7 +465,7 @@ Keep `OPTIMAL_BACKUP_KEY` away from the machine, and give a Garage bucket that h
 
 ## What Is Not Implemented
 
-The Engine has no adapter for DuckDB, OpenBao, or Fractal, and the provider inventory says so; Valkey, NATS JetStream and Qdrant are reached and proved, but no Engine feature is served from them yet.
+The Engine has no adapter for DuckDB or Fractal, and the provider inventory says so; Valkey, NATS JetStream, Qdrant and OpenBao are reached and proved, but no Engine feature is served from them yet.
 PostgreSQL holds the canonical relational store but not full-text search, replication, or app data collections, and moving an existing Engine's data to it (stage 4 of [PostgreSQL Provider](postgres-provider.md)) is not implemented.
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.
 

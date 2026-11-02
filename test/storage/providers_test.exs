@@ -74,7 +74,7 @@ defmodule OptimalEngine.Storage.ProvidersTest do
     refute Planner.ready?(%{id: "s3", lifecycle_state: "configured_unverified"})
   end
 
-  @unimplemented ~w(duckdb openbao fractal)
+  @unimplemented ~w(duckdb fractal)
 
   test "every provider declares whether an adapter is implemented" do
     for provider <- Providers.list() do
@@ -85,7 +85,7 @@ defmodule OptimalEngine.Storage.ProvidersTest do
 
     assert Enum.sort(implemented) ==
              Enum.sort(
-               ~w(sqlite fts5 embedded_vectors rocksdb filesystem ets s3 postgres valkey nats_jetstream qdrant)
+               ~w(sqlite fts5 embedded_vectors rocksdb filesystem ets s3 postgres valkey nats_jetstream qdrant openbao)
              )
   end
 
@@ -150,7 +150,7 @@ defmodule OptimalEngine.Storage.ProvidersTest do
     assert {:ok, plan} = Planner.plan(["cloud_team"])
     refute plan.ready
 
-    assert Enum.sort(plan.adapter_missing) == Enum.sort(~w(openbao))
+    assert plan.adapter_missing == []
 
     # Every provider in this plan either has no adapter or is not configured;
     # none of them is ready to serve.
@@ -160,7 +160,7 @@ defmodule OptimalEngine.Storage.ProvidersTest do
 
     assert Enum.all?(
              plan.providers,
-             &(&1.id in ["s3", "postgres", "valkey", "nats_jetstream"] or
+             &(&1.id in ["s3", "postgres", "valkey", "nats_jetstream", "openbao"] or
                  &1.lifecycle_state == "adapter_missing")
            )
   end
