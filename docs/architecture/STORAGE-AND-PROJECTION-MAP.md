@@ -50,7 +50,7 @@ The "Wired?" column says whether a working adapter exists in this repository tod
 | Valkey | Distributed cache, rate limits, locks, and coordination. | No. | Yes. | Adapter: `OptimalEngine.Storage.Valkey.Adapter` (RESP over TCP, `OPTIMAL_VALKEY_URL`); proved by a set, get and delete round trip. | Ephemeral acceleration only. |
 | Qdrant | High-scale semantic retrieval projection. | No. | Yes. | Adapter: `OptimalEngine.Storage.Qdrant.Adapter` (REST, `OPTIMAL_QDRANT_URL`, `api-key` from `OPTIMAL_QDRANT_API_KEY`); proved by a collection created, a point upserted, searched and read back. | Vector results remain candidates, not truth. Embedded vectors serve every Engine today. |
 | DuckDB and Parquet | Large analytical and historical projections. | No for transactional state. | Yes. | Declared, no adapter yet. | Analytics remain isolated from operational writes. |
-| OpenBao | Secret, key, PKI, and credential lifecycle. | Yes for managed secrets. | Recovery follows secret-manager policy. | Declared, no adapter yet. | Workspace policies contain references, not secret values. |
+| OpenBao | Secret, key, PKI, and credential lifecycle. | Yes for managed secrets. | Recovery follows secret-manager policy. | Adapter: `OptimalEngine.Storage.OpenBao.Adapter` (HTTP API, `OPTIMAL_OPENBAO_ADDR`, `OPTIMAL_OPENBAO_TOKEN`, KV v2 at `OPTIMAL_OPENBAO_KV_MOUNT`); proved by a secret written, read back and deleted. | Workspace policies contain references, not secret values. |
 | Fractal Computing | Enterprise synchronized digital-twin substrate. | Governed by the enterprise integration boundary. | Depends on the enterprise contract. | Declared, no adapter yet. | Cloud-only partner capability with controlled, auditable promotion to systems of record. |
 | Markdown workspace | Human-operable projection and editing surface. | No by default. | Yes from engine state. | Wired. | Edits re-enter as Source Packages or topology change requests. |
 | HTML, wiki, dashboard, API | Display and control projections. | No. | Yes. | Wired. | Should be regenerated from engine state. |
@@ -259,7 +259,7 @@ Each moves one concern off the single disk without changing what the Engine stor
 | Distributed cache and locks | Valkey | Adapter wired; `available` when `OPTIMAL_VALKEY_URL` answers. |
 | High-scale vectors | Qdrant | Adapter wired; `available` when `OPTIMAL_QDRANT_URL` lists collections. |
 | Analytics | DuckDB and Parquet | Declared, no adapter yet. |
-| Secrets | OpenBao | Declared, no adapter yet. |
+| Secrets | OpenBao | Adapter wired; `available` when the server is unsealed and accepts the token. |
 | Enterprise digital twin | Fractal | Declared, no adapter yet. |
 
 `GET /api/storage/providers` reports `adapter_implemented` for each, and `POST /api/storage/plan` never marks a plan ready when it selects a provider without an adapter.
