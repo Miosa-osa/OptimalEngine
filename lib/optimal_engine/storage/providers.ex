@@ -139,13 +139,13 @@ defmodule OptimalEngine.Storage.Providers do
     },
     %{
       id: "valkey",
-      adapter: nil,
+      adapter: OptimalEngine.Storage.Valkey.Adapter,
       name: "Valkey",
       kind: "service",
       role: "ephemeral",
       capabilities: ~w(cache coordination rate_limits)a,
       activation: "distributed_runtime",
-      probe: {:tcp_url, "OPTIMAL_VALKEY_URL", 6379},
+      probe: :valkey,
       required_env: ["OPTIMAL_VALKEY_URL"],
       optional_env: []
     },
@@ -262,6 +262,19 @@ defmodule OptimalEngine.Storage.Providers do
     end
   end
 
+  # A service with an adapter is proved by its own round trip; the shape of the
+  # answer is the same for every one of them.
+  defp proof_for(%{id: id, adapter: adapter} = provider, opts) when id in ~w(valkey) do
+    if Enum.all?(provider.required_env, &present_env?/1) do
+      case adapter.probe(opts) do
+        {:ok, evidence} -> %{provider: id, status: "pass", evidence: evidence}
+        {:error, reason} -> %{provider: id, status: "fail", evidence: %{error: inspect(reason)}}
+      end
+    else
+      %{provider: id, status: "skipped", reason: "not configured"}
+    end
+  end
+
   defp proof_for(provider, _opts) do
     %{
       provider: provider.id,
@@ -352,6 +365,9 @@ defmodule OptimalEngine.Storage.Providers do
   # connection test: an endpoint that answers an unauthenticated ping with 403
   # must not be reported as healthy storage.
   defp run_probe(:s3), do: OptimalEngine.Storage.S3.Adapter.health()
+
+  # A TCP accept is not a cache. The Valkey probe is a PING the server answered.
+  defp run_probe(:valkey), do: OptimalEngine.Storage.Valkey.Adapter.health()
 
   defp run_probe(:root_path) do
     path = Application.get_env(:optimal_engine, :root_path, ".")

@@ -105,7 +105,7 @@ At 70 percent of a limit on the largest embedded profile, `GET /api/storage` rec
 | `vectors` | Qdrant | No adapter yet. Embedded vectors keep serving. |
 | anything else | Postgres | Wired but partial, as above. |
 
-Managed Qdrant, Valkey, and NATS cannot be used yet.
+Managed Qdrant and NATS cannot be used yet; managed Valkey is reached through `OPTIMAL_VALKEY_URL`.
 Until their adapters ship, the Scale size is the biggest single Engine, with S3 for assets and backups.
 
 ## Operating Model
