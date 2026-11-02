@@ -88,7 +88,7 @@ defmodule OptimalEngine.Storage.Qdrant do
       value = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
       vector = [0.1, 0.2, 0.3, 0.4]
 
-      try do
+      result =
         with {:ok, 200, _} <-
                call(
                  config,
@@ -118,8 +118,17 @@ defmodule OptimalEngine.Storage.Qdrant do
           {:ok, status, body} -> {:error, {:round_trip_mismatch, status, summary(body)}}
           {:error, reason} -> {:error, reason}
         end
-      after
-        call(config, :delete, "/collections/#{collection}", nil, opts)
+
+      # The collection goes whatever happened, and a proof that could not
+      # remove it is not a pass: a key that may create but not delete would
+      # otherwise leave one behind on every run.
+      deleted = call(config, :delete, "/collections/#{collection}", nil, opts)
+
+      case {result, deleted} do
+        {{:ok, evidence}, {:ok, 200, _}} -> {:ok, Map.put(evidence, :collection_deleted, true)}
+        {{:ok, _evidence}, {:ok, status, _}} -> {:error, {:collection_not_deleted, status}}
+        {{:ok, _evidence}, {:error, reason}} -> {:error, {:collection_not_deleted, reason}}
+        {error, _deleted} -> error
       end
     end
   end
@@ -130,7 +139,9 @@ defmodule OptimalEngine.Storage.Qdrant do
         method: method,
         headers: headers(),
         timeout: Keyword.get(opts, :timeout, @default_timeout),
-        single_attempt: false
+        # Sent once, and over https only to a verified certificate and host
+        # name, like every other request that carries a credential.
+        single_attempt: true
       ]
       |> then(fn o -> if body, do: Keyword.put(o, :body, body), else: o end)
 
@@ -142,13 +153,15 @@ defmodule OptimalEngine.Storage.Qdrant do
     _kind, _reason -> {:error, :unreachable}
   end
 
+  # Trimmed as `present?/1` reads it, so a key read from a file with its
+  # newline is sent as the key, and a blank one is not sent at all.
   defp headers do
-    case System.get_env(@key_env) do
-      key when is_binary(key) and key != "" ->
-        [{"api-key", key}, {"content-type", "application/json"}]
-
-      _ ->
+    case System.get_env(@key_env) |> to_string() |> String.trim() do
+      "" ->
         [{"content-type", "application/json"}]
+
+      key ->
+        [{"api-key", key}, {"content-type", "application/json"}]
     end
   end
 

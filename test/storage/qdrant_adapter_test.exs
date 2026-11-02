@@ -90,6 +90,32 @@ defmodule OptimalEngine.Storage.QdrantAdapterTest do
              Providers.proofs() |> Enum.filter(&(&1.provider == "qdrant"))
   end
 
+  test "a failed search still deletes the collection" do
+    {:ok, stub} = QdrantStub.start(fail: :search)
+    on_exit(fn -> QdrantStub.stop(stub) end)
+    System.put_env("OPTIMAL_QDRANT_URL", stub.endpoint)
+
+    assert {:error, {:round_trip_mismatch, 500, _}} = Qdrant.round_trip()
+    assert QdrantStub.collections(stub) == %{}
+  end
+
+  test "a proof that cannot delete its collection is not a pass" do
+    {:ok, stub} = QdrantStub.start(fail: :delete)
+    on_exit(fn -> QdrantStub.stop(stub) end)
+    System.put_env("OPTIMAL_QDRANT_URL", stub.endpoint)
+
+    assert {:error, {:collection_not_deleted, 403}} = Qdrant.round_trip()
+  end
+
+  test "a key read with a trailing newline is sent trimmed" do
+    {:ok, stub} = QdrantStub.start(api_key: "proof-key")
+    on_exit(fn -> QdrantStub.stop(stub) end)
+    System.put_env("OPTIMAL_QDRANT_URL", stub.endpoint)
+    System.put_env("OPTIMAL_QDRANT_API_KEY", "proof-key\n")
+
+    assert Qdrant.health() == :healthy
+  end
+
   test "the key is sent as api-key, and a wrong one is unreachable, not healthy" do
     {:ok, stub} = QdrantStub.start(api_key: "right")
     on_exit(fn -> QdrantStub.stop(stub) end)

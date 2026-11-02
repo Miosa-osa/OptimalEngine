@@ -11,12 +11,21 @@ defmodule OptimalEngine.TestSupport.QdrantStub do
 
   import Plug.Conn
 
-  @doc "Starts a listener on a free port. Options: `:api_key`. Returns `{:ok, %{endpoint:, ref:, agent:}}`."
+  @doc """
+  Starts a listener on a free port. Options: `:api_key`, `fail: :search` (the
+  search answers 500) and `fail: :delete` (deleting a collection answers 403,
+  as for a key without the permission). Returns `{:ok, %{endpoint:, ref:, agent:}}`.
+  """
   @spec start(keyword()) :: {:ok, map()}
   def start(opts \\ []) do
     {:ok, agent} =
       Agent.start_link(fn ->
-        %{collections: %{}, requests: [], api_key: Keyword.get(opts, :api_key)}
+        %{
+          collections: %{},
+          requests: [],
+          api_key: Keyword.get(opts, :api_key),
+          fail: Keyword.get(opts, :fail)
+        }
       end)
 
     ref = :"#{__MODULE__}.HTTP#{System.unique_integer([:positive])}"
@@ -47,6 +56,8 @@ defmodule OptimalEngine.TestSupport.QdrantStub do
     {:ok, raw, conn} = read_body(conn)
     body = if raw == "", do: %{}, else: Jason.decode!(raw)
 
+    fail = Agent.get(agent, & &1.fail)
+
     case {authorized?(conn, agent), conn.method, conn.path_info} do
       {false, _, _} ->
         json(conn, 401, %{
@@ -59,6 +70,12 @@ defmodule OptimalEngine.TestSupport.QdrantStub do
       {_, "PUT", ["collections", name]} ->
         Agent.update(agent, &put_in(&1, [:collections, name], %{config: body, points: []})) &&
           json(conn, 200, %{result: true})
+
+      {_, "DELETE", ["collections", _name]} when fail == :delete ->
+        json(conn, 403, %{status: %{error: "Forbidden"}})
+
+      {_, "POST", ["collections", _name, "points", "search"]} when fail == :search ->
+        json(conn, 500, %{status: %{error: "Service internal error"}})
 
       {_, "DELETE", ["collections", name]} ->
         Agent.update(agent, &%{&1 | collections: Map.delete(&1.collections, name)}) &&
