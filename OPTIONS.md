@@ -237,7 +237,7 @@ They should not connect to the owner's private engine unless explicitly configur
 
 ## Compatibility And API Grants
 
-The current source contract is application `0.3.13`, contract schema `1`, API `v1`, and migration `86`.
+The current source contract is application `0.3.13`, contract schema `1`, API `v1`, and migration `87`.
 The tracked [engine-contract.json](engine-contract.json) lists capabilities; [release identity](docs/guides/versioning-and-releases.md) explains the running build's SHA and version response.
 A checkout pin does not attest a separately running HTTP process.
 

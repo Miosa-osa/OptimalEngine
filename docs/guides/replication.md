@@ -94,9 +94,12 @@ A blob named for a confined column (`nodes.path`, `contexts.path`, ...) is refus
 | `GET /api/sync/changes?workspace=&since=` | `sync` | Ledger page after a sequence, never the requester's own changes (header `x-optimal-replica`); the page says `cursor`, `more`, `head` (the highest sequence of this workspace's ledger) and the `engine` envelope with the replica id |
 | `GET /api/sync/tables` | `sync` | The tables this Engine replicates and the ones it keeps local, with its schema migration |
 | `POST /api/sync/changes {workspace, engine, replica_id, base_seq, base_replica_id, mutations}` | `sync` | Apply a peer's batch; `base_seq` is this Engine's ledger sequence the sender had pulled, `base_replica_id` the replica it believed that ledger was, `replica_id` the sender (see Conflicts); the reply says which base it used (`base`) |
-| `POST /api/sync/peers {workspace, url, api_key, policy, max_class, since?}` | admin | Register a peer; its key is encrypted with `CONNECTOR_KEY` |
+| `POST /api/sync/enable {workspace, label?}` | admin | Start capturing a workspace; `label` (at most 64 characters) names this Engine and replaces the name it had |
+| `POST /api/sync/peers {workspace, url, api_key, policy, max_class, since?, label?}` | admin | Register a peer; its key is encrypted with `CONNECTOR_KEY`; `label` (at most 64 characters) names it, and a peer without one is named by its URL host (`MIOSA cloud` for a relay) |
 | `POST /api/sync/run` | admin | Run one pull and push cycle now |
-| `GET /api/sync/status?workspace=` | read | Ledger sequence, peers (status, cursors, `pulled_local_seq` (the pull floor), pending changes), open conflicts in total (`open_conflicts`) and per table (`conflicts_by_table`) |
+| `GET /api/sync/status?workspace=` | read | Ledger sequence, this Engine's `label`, peers (`id`, `label`, status, cursors, `pulled_local_seq` (the pull floor), pending changes), open conflicts in total (`open_conflicts`) and per table (`conflicts_by_table`) |
+| `GET /api/sync/runs?workspace=&peer_id=&limit=&before=` | read | The workspace's peer cycles, newest first (see Sync history) |
+| `GET /api/sync/ledger?workspace=&limit=&before=&table=&origin=` | read | The workspace's ledger changes and where each came from, newest first (see Sync history) |
 | `GET /api/sync/conflicts?workspace=`, `POST /api/sync/conflicts/:id/resolve` | read, admin | Conflicts and their resolution |
 
 A scheduler seals changes and runs every active peer every 20 seconds (`OPTIMAL_SYNC_INTERVAL_MS`), so a change reaches the other replica within a minute when both are online.
@@ -333,6 +336,22 @@ A change page that does not say which replica sent it (`engine.replica_id`) is r
 `scripts/proof-relay-client.sh` proves the relay client end to end against a managed Engine (`RELAY_BASE`, `MIOSA_API_KEY_FILE`, `WORKSPACE`), and `--stand-in` runs the same checks against a second local Engine behind a relay stand-in.
 Run it on a disposable machine, never on one that holds a live store; it removes its temporary data, keys included, when it exits (`KEEP_DATA=1` keeps it).
 Its conflict check edits a daily note on both sides; that a contested fact becomes two claims in the review queue is proven by `test/sync/sync_test.exs`, not by this script.
+
+## Sync history
+
+Every cycle with a peer, complete or failed, appends one row to `sync_runs` (local to this Engine, newest 10,000 rows per peer kept).
+`GET /api/sync/runs` returns `{"data": [{id, peer_id, peer_label, started_at, finished_at, status, pulled, pushed, conflicts, gated, message}], "next_cursor"}`.
+`status` is `ok`, `paused` (the peer runs another schema version) or `error` (a halted peer included); `pulled` counts the changes applied from the peer, `pushed` the changes sent to it, `conflicts` the conflicts recorded here while applying, and `gated` the changes the data-class gate held back either way.
+A cycle that could not start because another one with the same peer was running records nothing.
+A peer's `id` is derived from its tenant, workspace and URL, so a peer added again keeps its history; filter with `peer_id`.
+
+`GET /api/sync/ledger` returns `{"data": [{sequence, table, entity_id, op, device_id, origin, origin_label, occurred_at, recorded_at}], "next_cursor"}` for the changes in the workspace's ledger, this Engine's own included; payloads are never returned.
+`op` is `insert`, `update` or `delete`.
+`origin` is `local` when `device_id` is this Engine's replica id (`origin_label` is then this Engine's label) and `peer` otherwise, with `origin_label` the label of the peer whose `peer_replica_id` matches, else `unknown peer`; filter with `origin=local|peer` and `table=`.
+
+Both routes need the `read` scope, as `GET /api/sync/status` does (the replication `sync` scope does not read them), and read the implicit `default` workspace when the request names none.
+Both are newest first: `limit` defaults to 50 and is capped at 200, and `next_cursor` (a string, `null` on the last page) is the `before` that reads the next page, a run id for runs and a ledger sequence for the ledger.
+Timestamps are ISO-8601 UTC.
 
 ## Conflicts
 

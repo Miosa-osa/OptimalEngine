@@ -9,6 +9,11 @@ defmodule OptimalEngine.API.SyncAPI do
   | `POST /api/sync/changes` (apply a batch from a peer, with its `base_seq` and `base_replica_id`) | sync |
   | `POST /api/sync/enable`, `POST /api/sync/peers`, `POST /api/sync/run`, `POST /api/sync/conflicts/:id/resolve` | admin |
   | `GET /api/sync/status?workspace=`, `GET /api/sync/conflicts?workspace=` | read |
+  | `GET /api/sync/runs?workspace=&peer_id=&limit=&before=` | read |
+  | `GET /api/sync/ledger?workspace=&limit=&before=&table=&origin=` | read |
+
+  `runs` and `ledger` read the implicit `default` workspace when the request
+  names none, as the workspace check authorizes it (see `OptimalEngine.Sync.History`).
   """
 
   import Plug.Conn
@@ -19,6 +24,7 @@ defmodule OptimalEngine.API.SyncAPI do
   alias OptimalEngine.API.{Actor, Reader}
   alias OptimalEngine.ReadScope
   alias OptimalEngine.Sync
+  alias OptimalEngine.Sync.History
 
   def changes(conn) do
     conn = fetch_query_params(conn)
@@ -87,9 +93,10 @@ defmodule OptimalEngine.API.SyncAPI do
     workspace_id = body["workspace"] || body["workspace_id"]
 
     if is_binary(workspace_id) do
-      case Sync.enable(tenant(conn), workspace_id, Actor.of(conn, body)) do
-        {:ok, result} -> json(conn, 200, result)
+      case Sync.enable(tenant(conn), workspace_id, Actor.of(conn, body), label: body["label"]) do
+        {:ok, result} -> json(conn, 200, Map.put(result, :label, Sync.label()))
         {:error, {:unsupported, message}} -> error(conn, 501, message)
+        {:error, reason} -> error(conn, 422, reason)
       end
     else
       error(conn, 400, "workspace is required")
@@ -117,6 +124,52 @@ defmodule OptimalEngine.API.SyncAPI do
       workspace_id -> json(conn, 200, Sync.status(tenant(conn), workspace_id))
     end
   end
+
+  @doc "`GET /api/sync/runs`: a workspace's peer cycles, newest first."
+  def runs(conn) do
+    conn = fetch_query_params(conn)
+    q = conn.query_params
+
+    json(
+      conn,
+      200,
+      History.runs(tenant(conn), history_workspace(q),
+        peer_id: text_param(q["peer_id"]),
+        limit: int(q["limit"], nil),
+        before: positive(q["before"])
+      )
+    )
+  end
+
+  @doc "`GET /api/sync/ledger`: a workspace's ledger changes and their origin, newest first."
+  def ledger(conn) do
+    conn = fetch_query_params(conn)
+    q = conn.query_params
+
+    case text_param(q["origin"]) do
+      origin when origin in [nil, "local", "peer"] ->
+        json(
+          conn,
+          200,
+          History.ledger(tenant(conn), history_workspace(q),
+            limit: int(q["limit"], nil),
+            before: positive(q["before"]),
+            table: text_param(q["table"]),
+            origin: origin
+          )
+        )
+
+      _other ->
+        error(conn, 400, "invalid_origin")
+    end
+  end
+
+  defp history_workspace(q), do: text_param(q["workspace"] || q["workspace_id"]) || "default"
+
+  defp text_param(value) when is_binary(value) and value != "", do: value
+  defp text_param(_value), do: nil
+
+  defp positive(value), do: IntParam.parse(value, nil, positive: true)
 
   def conflicts(conn) do
     conn = fetch_query_params(conn)
