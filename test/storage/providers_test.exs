@@ -74,7 +74,7 @@ defmodule OptimalEngine.Storage.ProvidersTest do
     refute Planner.ready?(%{id: "s3", lifecycle_state: "configured_unverified"})
   end
 
-  @unimplemented ~w(nats_jetstream valkey qdrant duckdb openbao fractal)
+  @unimplemented ~w(nats_jetstream qdrant duckdb openbao fractal)
 
   test "every provider declares whether an adapter is implemented" do
     for provider <- Providers.list() do
@@ -84,7 +84,7 @@ defmodule OptimalEngine.Storage.ProvidersTest do
     implemented = Providers.list() |> Enum.filter(& &1.adapter_implemented) |> Enum.map(& &1.id)
 
     assert Enum.sort(implemented) ==
-             Enum.sort(~w(sqlite fts5 embedded_vectors rocksdb filesystem ets s3 postgres))
+             Enum.sort(~w(sqlite fts5 embedded_vectors rocksdb filesystem ets s3 postgres valkey))
   end
 
   test "the canonical store providers say which one this build selected" do
@@ -118,11 +118,11 @@ defmodule OptimalEngine.Storage.ProvidersTest do
   test "a passing network probe never makes a missing adapter available" do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listener)
-    System.put_env("OPTIMAL_VALKEY_URL", "redis://127.0.0.1:#{port}")
-    on_exit(fn -> System.delete_env("OPTIMAL_VALKEY_URL") end)
+    System.put_env("OPTIMAL_NATS_URL", "nats://127.0.0.1:#{port}")
+    on_exit(fn -> System.delete_env("OPTIMAL_NATS_URL") end)
 
     try do
-      assert {:ok, provider} = Providers.get("valkey", probe: true)
+      assert {:ok, provider} = Providers.get("nats_jetstream", probe: true)
       assert provider.health == "healthy"
       refute provider.adapter_implemented
       assert provider.lifecycle_state == "adapter_missing"
@@ -135,7 +135,7 @@ defmodule OptimalEngine.Storage.ProvidersTest do
     assert {:ok, plan} = Planner.plan(["cloud_team"])
     refute plan.ready
 
-    assert Enum.sort(plan.adapter_missing) == Enum.sort(~w(openbao nats_jetstream valkey))
+    assert Enum.sort(plan.adapter_missing) == Enum.sort(~w(openbao nats_jetstream))
 
     # Every provider in this plan either has no adapter or is not configured;
     # none of them is ready to serve.
@@ -145,7 +145,7 @@ defmodule OptimalEngine.Storage.ProvidersTest do
 
     assert Enum.all?(
              plan.providers,
-             &(&1.id in ["s3", "postgres"] or &1.lifecycle_state == "adapter_missing")
+             &(&1.id in ["s3", "postgres", "valkey"] or &1.lifecycle_state == "adapter_missing")
            )
   end
 
