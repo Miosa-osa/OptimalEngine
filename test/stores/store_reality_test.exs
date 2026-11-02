@@ -569,8 +569,11 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
       assert %{provider: "s3", status: "skipped", reason: "not configured"} =
                Enum.find(proofs, &(&1.provider == "s3"))
 
+      # Every other service provider is skipped when it has an adapter but no
+      # configuration, and adapter_missing when the engine ships none.
       for proof <- proofs, proof.provider not in ["s3", "postgres"] do
-        assert proof.status == "adapter_missing"
+        assert proof.status == expected_idle_status(proof.provider),
+               "#{proof.provider} is #{proof.status}"
       end
     end
 
@@ -590,8 +593,10 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
       assert s3.evidence.key =~ "health/"
 
       for proof <- proofs, proof.provider not in ["s3", "postgres"] do
-        assert proof.status == "adapter_missing", "#{proof.provider} is #{proof.status}"
-        assert proof.reason =~ "no adapter"
+        assert proof.status == expected_idle_status(proof.provider),
+               "#{proof.provider} is #{proof.status}"
+
+        if proof.status == "adapter_missing", do: assert(proof.reason =~ "no adapter")
       end
 
       # The same configuration that passes the proof is reported as available,
@@ -681,4 +686,11 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
   end
 
   defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+
+  # What an unconfigured provider's proof says: skipped when the engine ships an
+  # adapter for it, adapter_missing when it does not.
+  defp expected_idle_status(provider_id) do
+    {:ok, provider} = Providers.get(provider_id)
+    if provider.adapter_implemented, do: "skipped", else: "adapter_missing"
+  end
 end
