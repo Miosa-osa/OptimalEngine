@@ -43,12 +43,24 @@ defmodule OptimalEngine.Pipeline.Decomposer.RLM do
     timeout = Keyword.get(opts, :timeout, @default_health_timeout)
     runner = Keyword.get(opts, :runner, &System.cmd/3)
 
+    # A missing interpreter makes System.cmd/3 raise :enoent; inside a linked task
+    # that would take the caller (the storage audit, an HTTP request) down with it.
     task =
       Task.async(fn ->
-        runner.(executable, prefix_args ++ [script(opts), "--check"], stderr_to_stdout: true)
+        try do
+          runner.(executable, prefix_args ++ [script(opts), "--check"], stderr_to_stdout: true)
+        rescue
+          error in ErlangError ->
+            if error.original == :enoent,
+              do: :executable_missing,
+              else: reraise(error, __STACKTRACE__)
+        end
       end)
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, :executable_missing} ->
+        {:error, {:rlm_executable_missing, executable}}
+
       {:ok, {output, 0}} ->
         case Jason.decode(output) do
           {:ok, %{"available" => true} = status} -> {:ok, status}
