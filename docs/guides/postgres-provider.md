@@ -6,7 +6,7 @@ The PostgreSQL provider is how an engine moves its canonical relational store to
 
 This guide describes the provider's contract and the staged port.
 Stages 1 to 3 have landed: `OptimalEngine.Store.Postgres` implements the canonical store contract on PostgreSQL, and the inventory reports the adapter.
-Stage 4, moving an existing engine, has not.
+Stage 4, moving an existing engine, has too: `mix optimal.postgres.migrate` copies an SQLite Engine's store into PostgreSQL and commits only a copy it has proved.
 
 ## What The Provider Replaces
 
@@ -351,14 +351,36 @@ The backup is not made with `pg_dump`. `pg_dump` needs a client of the server's 
 ## Stage 4: Moving An Existing Engine
 
 Moving is a one-way switch with a frozen window, not dual writing.
+`OptimalEngine.Store.Postgres.Migrate.run/1` does the copy, and `mix optimal.postgres.migrate` (or `bin/optimal eval` in a release) runs it:
 
-1. Take a verified backup and record its checksum.
-2. Stop writes, export every table in dependency order, and import into PostgreSQL inside one transaction.
-3. Reconcile row counts and a checksum per table, then run the 20-query parity check.
-4. Set `OPTIMAL_POSTGRES_URL`, start the engine, and confirm the same queries through the API.
-5. Keep the SQLite file untouched for the rollback window.
+```bash
+# 1. Stop the Engine's writes (stop the engine, or put it in maintenance), then back it up.
+# 2. Prove the copy without committing it, then copy.
+OPTIMAL_POSTGRES_URL=postgres://user:secret@host:5432/database \
+  mix optimal.postgres.migrate --source .optimal/index.db --schema public --dry-run
+OPTIMAL_POSTGRES_URL=postgres://user:secret@host:5432/database \
+  mix optimal.postgres.migrate --source .optimal/index.db --schema public
+# In a release:
+bin/optimal eval 'OptimalEngine.Store.Postgres.Migrate.run(schema: "public") |> IO.inspect()'
+```
 
-The import replaces the rows a fresh PostgreSQL schema was seeded with, including the replica identity in `sync_identity`, so the moved engine keeps the identity it had on SQLite.
+What the migration does:
+
+1. It never writes the Engine's file. The source (or a backup given with `--snapshot`) is opened read-only and copied with `VACUUM INTO`, one consistent read; the report gives the snapshot's SHA-256 and size, so it can be checked against the backup taken in step 1.
+2. The snapshot is brought to this build's schema with the SQLite store's own migrations, so an Engine one release behind moves without being upgraded in place.
+3. The target schema is created and synced from the migrations, with the full-text objects. A schema that already holds tables is refused (`{:target_not_empty, schema}`) unless `--replace`, which empties it inside the copy's transaction.
+4. In one transaction, with every foreign key deferred to the commit, every table is emptied of the rows a fresh schema is seeded with and every row of the snapshot is inserted, each value converted to its column's type with SQLite's affinity rules; BLOBs are `BYTEA`, byte for byte. The replica identity in `sync_identity` is the one the Engine had on SQLite. Identity sequences move past the largest id and past SQLite's `AUTOINCREMENT` high-water mark, so an id SQLite would never reuse is not handed out again.
+5. Still in that transaction, each table's row count and an order-independent checksum (the sum, modulo 2^256, of the SHA-256 of each row's values as the PostgreSQL column holds them) are computed from the snapshot and read back from PostgreSQL, and 20 parity queries (`OptimalEngine.Store.Postgres.Migrate.parity_queries/1`) run against both for every workspace. Any difference rolls the whole copy back with `{:verification_failed, ...}` or `{:parity_failed, ...}`; nothing is committed.
+6. After the commit, `contexts_fts` and `memories_fts` are rebuilt from the copied rows, so search ranks as FTS5 ranked on the source.
+
+A table or column this build does not know is refused (`{:unknown_tables, ...}`, `{:unknown_columns, ...}`) unless `--ignore-unknown`, which leaves it behind and lists it in the report.
+An Engine that uses replication or app data collections is refused (`{:unsupported_in_use, features}`), because the PostgreSQL store does not start with them.
+The connection URL is never printed; the report names tables, row counts and checksums.
+
+Then switch:
+
+1. Build the engine with `OPTIMAL_STORE=postgres`, set `OPTIMAL_POSTGRES_URL` (and `OPTIMAL_POSTGRES_SCHEMA` when it is not `public`), start it, and confirm the same queries through the API.
+2. Keep the SQLite file and the backup untouched for the rollback window.
 
 Rollback is restoring the backup, because writes accepted by PostgreSQL after the switch do not exist in SQLite.
 That is why the window stays short and the parity check runs before the switch.
