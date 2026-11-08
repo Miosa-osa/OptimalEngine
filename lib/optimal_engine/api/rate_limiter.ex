@@ -100,14 +100,14 @@ defmodule OptimalEngine.API.RateLimiter do
       :ok ->
         :ok
 
-      {:limited, tokens_now, elapsed_ms} ->
-        # A denied check leaves the refill stamp where it was and reports the wait.
+      {:limited, tokens_now, _elapsed_ms} ->
+        # A denied check leaves the bucket as it was and reports the wait.
         needed = 1.0 - tokens_now
         retry_after_ms = ceil(needed / refill_rate_per_ms)
 
-        # When the bucket will next have ≥1 token (monotonic ms).
-        last_refill_at = System.monotonic_time(:millisecond) - elapsed_ms
-        reset_at = last_refill_at + retry_after_ms
+        # When the bucket will next have ≥1 token (monotonic ms): the wait
+        # runs from now, since `tokens_now` already counts the time elapsed.
+        reset_at = System.monotonic_time(:millisecond) + retry_after_ms
 
         {:rate_limited, retry_after_ms, remaining: 0, reset_at: reset_at}
     end

@@ -89,7 +89,8 @@ defmodule OptimalEngine.Storage.Shared do
         return 0
         """,
     # The bucket of Shared.Local.take_token/6, on the server's clock. A
-    # denied step answers the tokens it found and the time since the stamp.
+    # denied step answers the tokens it found and the time since the stamp;
+    # with 'keep' it writes nothing, so no elapsed time is credited twice.
     bucket:
       "-- optimal:bucket\n" <>
         @resolve <>
@@ -113,12 +114,10 @@ defmodule OptimalEngine.Storage.Shared do
           redis.call('PEXPIRE', k, ttl)
           return {1}
         end
-        if ARGV[5] == 'keep' then
-          redis.call('HSET', k, 'tokens', string.format('%.17g', current))
-        else
+        if ARGV[5] ~= 'keep' then
           redis.call('HSET', k, 'tokens', string.format('%.17g', current), 'at', string.format('%d', now))
+          redis.call('PEXPIRE', k, ttl)
         end
-        redis.call('PEXPIRE', k, ttl)
         return {0, string.format('%.17g', current), elapsed}
         """
   }

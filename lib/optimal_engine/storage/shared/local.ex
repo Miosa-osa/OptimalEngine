@@ -125,9 +125,12 @@ defmodule OptimalEngine.Storage.Shared.Local do
   @doc """
   One token-bucket step: `:ok` when a token was taken, otherwise
   `{:limited, tokens_now, elapsed_ms}` where `elapsed_ms` is the time since the
-  bucket's refill stamp. `deny` decides what a denied step does to that stamp:
-  `:keep` leaves it (the HTTP API limiter), `:advance` moves it to now (the
-  connector limiter). The bucket row expires `ttl_ms` after its last step.
+  bucket's refill stamp. `deny` decides what a denied step writes: `:keep`
+  writes nothing, so the bucket keeps its tokens and its stamp and the next
+  step credits the time since that stamp once (the HTTP API limiter);
+  `:advance` stores the refilled tokens with the stamp moved to now (the
+  connector limiter). Either way a denied step never credits the same
+  elapsed time twice. The bucket row expires `ttl_ms` after its last write.
   """
   @spec take_token(atom(), term(), number(), float(), :keep | :advance, pos_integer()) ::
           :ok | {:limited, float(), non_neg_integer()}
@@ -144,8 +147,12 @@ defmodule OptimalEngine.Storage.Shared.Local do
           :ets.insert(table, {key, {current - 1.0, now}, now + ttl_ms})
           :ok
         else
-          stamp = if deny == :keep, do: stamp, else: now
-          :ets.insert(table, {key, {current, stamp}, now + ttl_ms})
+          # Storing `current` under the old stamp would credit `elapsed`
+          # again on the next step, letting a client that keeps asking
+          # through before the rate allows.
+          if deny == :advance,
+            do: :ets.insert(table, {key, {current, now}, now + ttl_ms})
+
           {:limited, current, elapsed}
         end
 

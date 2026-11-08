@@ -99,6 +99,18 @@ defmodule OptimalEngine.Storage.ValkeyIntegrationTest do
     assert :ok = Shared.take_token(@ns, "fast", 1, 1.0, :keep, 60_000)
   end
 
+  test "denied API checks do not refill the bucket faster than its rate" do
+    RateLimiter.reset()
+    key = "it-hammer:#{System.unique_integer([:positive])}"
+    assert :ok = RateLimiter.check(key, 1, 60)
+    Process.sleep(600)
+    assert {:rate_limited, _, remaining: 0, reset_at: _} = RateLimiter.check(key, 1, 60)
+    Process.sleep(300)
+    assert {:rate_limited, _, remaining: 0, reset_at: _} = RateLimiter.check(key, 1, 60)
+    Process.sleep(200)
+    assert :ok = RateLimiter.check(key, 1, 60)
+  end
+
   test "the API limiter and the key cache answer as on ETS" do
     RateLimiter.reset()
     key = "it:#{System.unique_integer([:positive])}"

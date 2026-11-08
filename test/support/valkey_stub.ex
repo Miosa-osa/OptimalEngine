@@ -286,9 +286,9 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
           current >= 1 ->
             {[1], save_bucket(state, k, current - 1, now, ttl)}
 
+          # As the script: a kept denial writes nothing.
           deny == "keep" ->
-            {[0, format(current), elapsed],
-             save_bucket(state, k, current, String.to_integer(at), ttl)}
+            {[0, format(current), elapsed], state}
 
           true ->
             {[0, format(current), elapsed], save_bucket(state, k, current, now, ttl)}

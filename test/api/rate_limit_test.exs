@@ -73,6 +73,34 @@ defmodule OptimalEngine.API.RateLimitTest do
       assert :ok = RateLimiter.check(key, 2, 120)
     end
 
+    test "denied checks do not refill the bucket faster than its rate" do
+      key = "hammer_key_#{System.unique_integer([:positive])}"
+
+      # One token a second. The bucket is empty after the first check.
+      assert :ok = RateLimiter.check(key, 1, 60)
+
+      # 600 ms in: 0.6 of a token, denied.
+      Process.sleep(600)
+
+      assert {:rate_limited, wait_ms, remaining: 0, reset_at: reset_at} =
+               RateLimiter.check(key, 1, 60)
+
+      assert wait_ms in 300..450
+
+      # The next token is due about 1,000 ms after the first check, so
+      # reset_at is now plus the wait, not the old refill stamp plus it.
+      assert (reset_at - System.monotonic_time(:millisecond)) in 250..450
+
+      # 900 ms in: still 0.9 of a token. Counting the 600 ms already credited
+      # again would give 1.5 and let the request through early.
+      Process.sleep(300)
+      assert {:rate_limited, _, remaining: 0, reset_at: _} = RateLimiter.check(key, 1, 60)
+
+      # Past 1,000 ms the token is there.
+      Process.sleep(200)
+      assert :ok = RateLimiter.check(key, 1, 60)
+    end
+
     test "different keys are independent buckets" do
       key_a = "key_a_#{System.unique_integer([:positive])}"
       key_b = "key_b_#{System.unique_integer([:positive])}"

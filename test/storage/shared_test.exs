@@ -342,6 +342,17 @@ defmodule OptimalEngine.Storage.SharedTest do
       assert :ets.info(:optimal_api_rate_limit_buckets, :size) == 0
     end
 
+    test "denied API checks on Valkey do not refill the bucket faster than its rate" do
+      key = "key:hammer-#{System.unique_integer([:positive])}"
+      assert :ok = RateLimiter.check(key, 1, 60)
+      Process.sleep(600)
+      assert {:rate_limited, _, remaining: 0, reset_at: _} = RateLimiter.check(key, 1, 60)
+      Process.sleep(300)
+      assert {:rate_limited, _, remaining: 0, reset_at: _} = RateLimiter.check(key, 1, 60)
+      Process.sleep(200)
+      assert :ok = RateLimiter.check(key, 1, 60)
+    end
+
     test "the connector limiter's bucket lives in Valkey with the same answers" do
       for _ <- 1..3, do: :ok = RateLimit.check({:slack, "t1"}, 1, 3)
       Local.clear(:optimal_connector_ratelimit)
