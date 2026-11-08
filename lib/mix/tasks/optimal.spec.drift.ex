@@ -30,7 +30,7 @@ defmodule Mix.Tasks.Optimal.Spec.Drift do
 
     unless File.dir?(spec_dir) do
       IO.puts("  No .spec/specs/ directory found. Run `mix optimal.spec.init` first.")
-      System.halt(1)
+      exit({:shutdown, 1})
     end
 
     case Diffcheck.check(spec_dir, root, opts) do
@@ -48,7 +48,7 @@ defmodule Mix.Tasks.Optimal.Spec.Drift do
         end)
 
         IO.puts("  Update the spec files above to match code changes.\n")
-        System.halt(1)
+        exit({:shutdown, 1})
 
       {:error, reason} ->
         IO.puts("  [spec.drift] Error: #{inspect(reason)}\n")

@@ -12,6 +12,10 @@ defmodule OptimalEngine.Store.PlannerStatisticsTest do
 
   use ExUnit.Case, async: false
 
+  # SQLite's planner and its statistics. The search on PostgreSQL reads the
+  # full-text index through optimal_fts_match (Postgres.FullTextTest).
+  @moduletag :sqlite_store
+
   alias Exqlite.Sqlite3
   alias OptimalEngine.Retrieval.Search
   alias OptimalEngine.Store.SQLite

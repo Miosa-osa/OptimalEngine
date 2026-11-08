@@ -472,7 +472,9 @@ defmodule OptimalEngine.DataSteward do
 
       Store.transaction(
         fn txn ->
-          with {:ok, workspace} <- read_source(txn, tenant, source_workspace_id),
+          # Updates of the workspace wait for the rename rather than starve it.
+          with :ok <- Store.txn_lock_row(txn, "workspaces", "id", source_workspace_id),
+               {:ok, workspace} <- read_source(txn, tenant, source_workspace_id),
                :ok <- check_rename_target(txn, workspace, tenant, target_workspace_id),
                :ok <- target_free_of_rows(txn, tables, target_workspace_id),
                :ok <- check_id_not_shared(txn, tables, source_workspace_id, tenant),
@@ -1273,10 +1275,11 @@ defmodule OptimalEngine.DataSteward do
   defp foreign_rows(_name), do: "tenant_id<>?3"
 
   # `:ok` when none of the queries finds a row, `{:error, reason}` when one
-  # does, and the error itself when one fails.
+  # does, and the error itself when one fails. A query that fails leaves the
+  # transaction usable, on PostgreSQL as on SQLite, so the caller decides.
   defp any_row?(txn, queries, params, reason) do
     Enum.reduce_while(queries, :ok, fn sql, :ok ->
-      case Store.txn_query(txn, "SELECT EXISTS (#{sql})", params) do
+      case Store.txn_query(txn, "SELECT EXISTS (#{sql})", params, recoverable: true) do
         {:ok, [[0]]} -> {:cont, :ok}
         {:ok, [[1]]} -> {:halt, {:error, reason}}
         {:error, _} = error -> {:halt, error}

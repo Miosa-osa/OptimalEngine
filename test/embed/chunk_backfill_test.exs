@@ -99,11 +99,13 @@ defmodule OptimalEngine.Embed.ChunkBackfillTest do
 
   test "a window reads the workspace through its (workspace_id, id) index", ctx do
     for {sql, params} <- ChunkBackfill.window_statements(ctx.ws) do
-      {:ok, plan} = Store.raw_query("EXPLAIN QUERY PLAN " <> sql, params)
-      details = Enum.map_join(plan, "\n", &List.last/1)
-
-      assert details =~ ~r/SEARCH (c|chunks) USING (COVERING )?INDEX idx_chunks_workspace_id/,
-             details
+      OptimalEngine.Test.IndexReads.assert_uses_index(
+        sql,
+        params,
+        "idx_chunks_workspace_id",
+        ~r/SEARCH (c|chunks) USING (COVERING )?INDEX idx_chunks_workspace_id/,
+        "workspace_id"
+      )
     end
   end
 

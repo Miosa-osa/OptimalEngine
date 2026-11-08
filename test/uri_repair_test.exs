@@ -1130,10 +1130,10 @@ defmodule OptimalEngine.UriRepairTest do
     test "a transaction that fails changes no row, and the next run finishes", ctx do
       %{c1: c1, c2: c2, c3: c3, path: path} = seed_collision(ctx)
 
-      on_exit(fn -> Store.raw_execute("DROP TRIGGER IF EXISTS fail_c3", []) end)
+      on_exit(fn -> OptimalEngine.Test.StoreDDL.execute("DROP TRIGGER IF EXISTS fail_c3", []) end)
 
       :ok =
-        Store.raw_execute(
+        OptimalEngine.Test.StoreDDL.execute(
           "CREATE TRIGGER fail_c3 BEFORE UPDATE ON contexts WHEN NEW.id = '#{c3.id}' AND NEW.workspace_id = '#{ctx.ws}' BEGIN SELECT RAISE(ABORT, 'boom'); END",
           []
         )
@@ -1151,7 +1151,7 @@ defmodule OptimalEngine.UriRepairTest do
       assert File.read!(String.replace_suffix(path, ".md", "-#{id8(c2.id)}.md")) == render_of(c2.id)
       assert File.read!(String.replace_suffix(path, ".md", "-#{id8(c3.id)}.md")) == render_of(c3.id)
 
-      :ok = Store.raw_execute("DROP TRIGGER fail_c3", [])
+      :ok = OptimalEngine.Test.StoreDDL.execute("DROP TRIGGER fail_c3", [])
 
       assert {:ok, report} = UriRepair.run(workspace_id: ctx.ws)
       assert report.errors == []

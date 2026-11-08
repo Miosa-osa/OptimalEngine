@@ -54,7 +54,22 @@ defmodule OptimalEngine.Store.TransactionControlContractTest do
     "ABORT"
   ]
 
+  describe "the Engine's store" do
+    test "refuses transaction control sent as a raw statement" do
+      refuses_outside(OptimalEngine.Store.adapter())
+    end
+
+    test "allows only savepoints inside a transaction" do
+      savepoints_only_inside(OptimalEngine.Store.adapter())
+    end
+  end
+
+  # The two below name their adapter, so each runs where the Engine's store is
+  # SQLite: the PostgreSQL store is started beside it. On a PostgreSQL build
+  # the Engine's store above is the PostgreSQL one.
   describe "the SQLite store" do
+    @describetag :sqlite_store
+
     test "refuses transaction control sent as a raw statement" do
       refuses_outside(OptimalEngine.Store.SQLite)
     end
@@ -66,6 +81,7 @@ defmodule OptimalEngine.Store.TransactionControlContractTest do
 
   describe "the PostgreSQL store" do
     @describetag :postgres
+    @describetag :sqlite_store
 
     setup do
       schema = PostgresStore.unique_schema()

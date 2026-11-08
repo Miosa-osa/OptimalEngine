@@ -84,7 +84,7 @@ defmodule Mix.Tasks.Optimal.Cluster do
 
       {:error, reason} ->
         IO.puts("  ✗ #{inspect(reason)}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
 
     IO.puts("")

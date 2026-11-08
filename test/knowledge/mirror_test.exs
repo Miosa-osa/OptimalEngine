@@ -104,13 +104,10 @@ defmodule OptimalEngine.Knowledge.MirrorTest do
     assert :ok = Mirror.install()
     assert :ok = Mirror.install()
 
-    {:ok, rows} =
-      Store.raw_query(
-        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'triple_mirror_%' ORDER BY name",
-        []
-      )
+    {:ok, triggers} = OptimalEngine.Store.Catalog.triggers()
 
-    assert rows == [["triple_mirror_edge_deleted"], ["triple_mirror_edge_moved"]]
+    assert Enum.filter(triggers, &String.starts_with?(&1, "triple_mirror_")) ==
+             ["triple_mirror_edge_deleted", "triple_mirror_edge_moved"]
   end
 
   defp store_with_stale_triple(opts, n) do

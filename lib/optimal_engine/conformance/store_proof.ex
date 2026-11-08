@@ -8,7 +8,8 @@ defmodule OptimalEngine.Conformance.StoreProof do
   an HTTP one: it writes fixture rows, so it must run against a disposable store.
 
   This module runs that script as a separate process with a temporary store
-  under the system temp directory, never the configured one, and maps its report
+  under the system temp directory, never the configured one (on a PostgreSQL
+  build, a schema of its own, dropped afterwards), and maps its report
   onto one conformance check. The HTTP client is untouched: the proof answers
   for the code in this checkout, and the other checks answer for the Engine the
   caller pointed the suite at.
@@ -57,11 +58,50 @@ defmodule OptimalEngine.Conformance.StoreProof do
 
   defp execute(script, root, report_path) do
     File.mkdir_p!(root)
+    schema = disposable_schema()
 
+    try do
+      execute(script, root, report_path, schema)
+    after
+      drop_schema(schema)
+    end
+  end
+
+  # The PostgreSQL store is a schema in a database the Engine shares, so the
+  # proof's disposable store is a schema of its own.
+  defp disposable_schema do
+    if OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres),
+      do:
+        "oe_store_proof_#{System.system_time(:millisecond)}_#{System.unique_integer([:positive])}",
+      else: nil
+  end
+
+  defp drop_schema(nil), do: :ok
+
+  defp drop_schema(schema) do
+    with true <- Regex.match?(~r/\Aoe_store_proof_[0-9_]+\z/, schema),
+         {:ok, config} <- OptimalEngine.Storage.Postgres.config(),
+         {:ok, conn} <-
+           config
+           |> Map.take([:hostname, :port, :database, :username, :password, :ssl])
+           |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+           |> Keyword.put(:pool_size, 1)
+           |> Postgrex.start_link() do
+      try do
+        _ = Postgrex.query(conn, ~s(DROP SCHEMA IF EXISTS "#{schema}" CASCADE), [])
+      after
+        GenServer.stop(conn)
+      end
+    end
+
+    :ok
+  end
+
+  defp execute(script, root, report_path, schema) do
     task =
       Task.async(fn ->
         System.cmd("mix", ["run", script],
-          env: environment(root, report_path),
+          env: environment(root, report_path, schema),
           cd: File.cwd!(),
           stderr_to_stdout: false
         )
@@ -160,20 +200,21 @@ defmodule OptimalEngine.Conformance.StoreProof do
     _ -> {:error, "the store proof report is not JSON"}
   end
 
-  defp environment(root, report_path) do
-    [
-      {"MIX_ENV", "test"},
-      {"OPTIMAL_API_ENABLED", "false"},
-      {"OPTIMAL_ENGINE_ROOT", Path.join(root, "root")},
-      {"OPTIMAL_ENGINE_DB", Path.join(root, "engine.db")},
-      {"OPTIMAL_ENGINE_CACHE", Path.join(root, "cache")},
-      {"OPTIMAL_ENGINE_TOPOLOGY", Path.join(root, "config.yaml")},
-      {"OPTIMAL_ENGINE_TOPOLOGY_FULL", Path.join(root, "topology.yaml")},
-      {"OPTIMAL_BACKUP_DIR", Path.join(root, "backups")},
-      {"OPTIMAL_KNOWLEDGE_BACKEND", "ets"},
-      {"OPTIMAL_KNOWLEDGE_ROCKSDB_PATH", Path.join(root, "knowledge-rocksdb")},
-      {"STORE_PROOF_OUT", report_path}
-    ]
+  defp environment(root, report_path, schema) do
+    if(schema, do: [{"OPTIMAL_POSTGRES_SCHEMA", schema}], else: []) ++
+      [
+        {"MIX_ENV", "test"},
+        {"OPTIMAL_API_ENABLED", "false"},
+        {"OPTIMAL_ENGINE_ROOT", Path.join(root, "root")},
+        {"OPTIMAL_ENGINE_DB", Path.join(root, "engine.db")},
+        {"OPTIMAL_ENGINE_CACHE", Path.join(root, "cache")},
+        {"OPTIMAL_ENGINE_TOPOLOGY", Path.join(root, "config.yaml")},
+        {"OPTIMAL_ENGINE_TOPOLOGY_FULL", Path.join(root, "topology.yaml")},
+        {"OPTIMAL_BACKUP_DIR", Path.join(root, "backups")},
+        {"OPTIMAL_KNOWLEDGE_BACKEND", "ets"},
+        {"OPTIMAL_KNOWLEDGE_ROCKSDB_PATH", Path.join(root, "knowledge-rocksdb")},
+        {"STORE_PROOF_OUT", report_path}
+      ]
   end
 
   defp shown(script), do: Path.relative_to_cwd(script)

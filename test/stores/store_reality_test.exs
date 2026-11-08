@@ -22,7 +22,7 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
   alias OptimalEngine.Pipeline.DecompositionRuns
   alias OptimalEngine.Storage.{PolicyStore, Providers}
   alias OptimalEngine.TestSupport.S3Stub
-  alias OptimalEngine.Store.{FileCache, Vectors}
+  alias OptimalEngine.Store.{FileCache, FullText, Vectors}
   alias OptimalEngine.Telemetry.History
   alias OptimalEngine.WorkspaceTopology
 
@@ -81,28 +81,27 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
       token = "zyqvortex#{suffix}"
       id = context!(ws, "fts-#{suffix}", "Launch note mentioning #{token}")
 
-      assert {:ok, [[^id]]} =
-               Store.raw_query("SELECT id FROM contexts_fts WHERE contexts_fts MATCH ?1", [token])
+      phrase = ~s("#{token}")
+      assert {:ok, [{^id, _score}]} = FullText.match("contexts_fts", phrase)
 
       {:ok, memory} = Memory.create(%{content: "Durable memory about #{token}", workspace_id: ws})
       assert memory.id
 
-      assert {:ok, [[1]]} =
-               Store.raw_query("SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?1", [
-                 token
-               ])
+      assert {:ok, [{memory_id, _score}]} = FullText.match("memories_fts", phrase)
+      assert memory_id == memory.id
 
-      assert [[^id]] = on_disk("SELECT id FROM contexts_fts WHERE contexts_fts MATCH ?1", [token])
+      # The index rows are in the database, not in a process: SQLite's file, or
+      # PostgreSQL's posting lists, read on a connection of their own.
+      assert [[^id]] =
+               if(FullText.postgres?(),
+                 do: on_disk("SELECT id FROM contexts_fts WHERE id = ?1", [id]),
+                 else: on_disk("SELECT id FROM contexts_fts WHERE contexts_fts MATCH ?1", [token])
+               )
 
       :ok = Store.delete_context(id)
 
-      assert {:ok, []} =
-               Store.raw_query("SELECT id FROM contexts_fts WHERE contexts_fts MATCH ?1", [token])
-
-      assert {:error, _} =
-               Store.raw_query("SELECT id FROM contexts_fts WHERE contexts_fts MATCH ?1", [
-                 "\"unbalanced"
-               ])
+      assert {:ok, []} = FullText.match("contexts_fts", phrase)
+      assert {:error, _} = FullText.match("contexts_fts", "\"unbalanced")
     end
   end
 
@@ -241,6 +240,10 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
   end
 
   describe "cache" do
+    # The SQLite store's hot cache. The PostgreSQL store keeps none, by decision
+    # (docs/guides/postgres-provider.md, What Is On PostgreSQL), and its reads
+    # come from the database (Postgres.StoreReadsTest).
+    @tag :sqlite_store
     test "the ETS hot cache serves reads and is rebuilt from SQLite", %{ws: ws, suffix: s} do
       id = context!(ws, "cache-#{s}", "cached context")
 
@@ -650,7 +653,32 @@ defmodule OptimalEngine.Stores.StoreRealityTest do
   # Reads through a separate read-only SQLite connection, so a passing
   # assertion proves the row is in the database file, not in a process.
   defp on_disk(sql, params) do
-    read_db(Application.fetch_env!(:optimal_engine, :db_path), sql, params)
+    if Store.selected?(OptimalEngine.Store.Postgres),
+      do: read_postgres(sql, params),
+      else: read_db(Application.fetch_env!(:optimal_engine, :db_path), sql, params)
+  end
+
+  # A connection of its own to the store's schema, outside the store's pool.
+  defp read_postgres(sql, params) do
+    {:ok, config} = OptimalEngine.Storage.Postgres.config()
+
+    schema =
+      Keyword.get(Application.get_env(:optimal_engine, :postgres_store, []), :schema, "public")
+
+    options =
+      config
+      |> Map.take([:hostname, :port, :database, :username, :password, :ssl])
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Keyword.merge(pool_size: 1, parameters: [search_path: schema])
+
+    {:ok, conn} = Postgrex.start_link(options)
+
+    try do
+      {:ok, translated} = OptimalEngine.Store.Dialect.to_postgres(sql)
+      Postgrex.query!(conn, translated, params).rows
+    after
+      GenServer.stop(conn)
+    end
   end
 
   defp read_db(path, sql, params) do

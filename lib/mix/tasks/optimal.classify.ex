@@ -47,7 +47,7 @@ defmodule Mix.Tasks.Optimal.Classify do
     else
       {:error, reason} ->
         Mix.shell().error("Classify failed: #{inspect(reason)}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 

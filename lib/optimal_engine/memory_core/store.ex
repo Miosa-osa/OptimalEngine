@@ -2355,7 +2355,7 @@ defmodule OptimalEngine.MemoryCore.Store do
            {:ok, _} <-
              Store.txn_execute(
                txn,
-               "INSERT INTO memory_path_priors (tenant_id, workspace_id, intent, path_fingerprint, positive_credit, negative_credit, observations) VALUES (?1,?2,?3,?4,?5,?6,1) ON CONFLICT(tenant_id, workspace_id, intent, path_fingerprint, policy_version) DO UPDATE SET positive_credit = positive_credit + excluded.positive_credit, negative_credit = negative_credit + excluded.negative_credit, observations = observations + 1, updated_at = datetime('now')",
+               "INSERT INTO memory_path_priors (tenant_id, workspace_id, intent, path_fingerprint, positive_credit, negative_credit, observations) VALUES (?1,?2,?3,?4,?5,?6,1) ON CONFLICT(tenant_id, workspace_id, intent, path_fingerprint, policy_version) DO UPDATE SET positive_credit = memory_path_priors.positive_credit + excluded.positive_credit, negative_credit = memory_path_priors.negative_credit + excluded.negative_credit, observations = memory_path_priors.observations + 1, updated_at = datetime('now')",
                [run.tenant_id, run.workspace_id, intent, fingerprint, positive, negative]
              ) do
         {:cont, :ok}

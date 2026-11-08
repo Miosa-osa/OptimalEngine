@@ -16,6 +16,10 @@ defmodule Mix.Tasks.Optimal.Migrate do
       mix optimal.migrate           # apply pending
       mix optimal.migrate --status  # show version state, no writes
 
+  On a PostgreSQL store (`OPTIMAL_STORE=postgres`) the schema is derived from
+  the same migrations: applying syncs it, as starting the store does, and the
+  status reads the versions the store records.
+
   """
 
   use Mix.Task
@@ -44,27 +48,39 @@ defmodule Mix.Tasks.Optimal.Migrate do
   # ── Apply ────────────────────────────────────────────────────────────────
 
   defp apply_pending do
-    db = open_db!()
+    applied =
+      if postgres?() do
+        {:ok, _report} = OptimalEngine.Store.Postgres.sync_schema()
+        postgres_applied()
+      else
+        db = open_db!()
+        Migrations.run(db)
+        applied = Migrations.applied_versions(db)
+        Exqlite.Sqlite3.close(db)
+        applied
+      end
 
-    Migrations.run(db)
-
-    applied = Migrations.applied_versions(db) |> MapSet.to_list() |> Enum.sort()
+    applied = applied |> MapSet.to_list() |> Enum.sort()
 
     IO.puts("")
     IO.puts("  Migration state")
     IO.puts("  " <> String.duplicate("─", 40))
     IO.puts("  Applied versions: #{Enum.join(applied, ", ")}")
     IO.puts("")
-
-    Exqlite.Sqlite3.close(db)
   end
 
   # ── Status ───────────────────────────────────────────────────────────────
 
   defp status do
-    db = open_db!()
-
-    applied = Migrations.applied_versions(db)
+    applied =
+      if postgres?() do
+        postgres_applied()
+      else
+        db = open_db!()
+        applied = Migrations.applied_versions(db)
+        Exqlite.Sqlite3.close(db)
+        applied
+      end
 
     all =
       Migrations.all()
@@ -90,11 +106,16 @@ defmodule Mix.Tasks.Optimal.Migrate do
     end
 
     IO.puts("")
-
-    Exqlite.Sqlite3.close(db)
   end
 
   # ── Helpers ──────────────────────────────────────────────────────────────
+
+  defp postgres?, do: OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres)
+
+  defp postgres_applied do
+    {:ok, rows} = OptimalEngine.Store.raw_query("SELECT version FROM schema_migrations", [])
+    MapSet.new(rows, fn [version] -> version end)
+  end
 
   defp open_db! do
     db_path = Application.fetch_env!(:optimal_engine, :db_path)

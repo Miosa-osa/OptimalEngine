@@ -117,6 +117,34 @@ defmodule OptimalEngine.Store.Postgres.Affinity do
   def normalize(%Decimal{coef: coef} = decimal) when is_integer(coef), do: Decimal.to_float(decimal)
   def normalize(value), do: value
 
+  @doc """
+  A `json_extract` of a select list as SQLite returns it, from the JSON text
+  PostgreSQL returns: a string as text, a number as a number, `true` and
+  `false` as 1 and 0, JSON `null` as NULL, an object or array as minified JSON
+  text with its members in PostgreSQL's order.
+  """
+  @spec json_value(binary() | nil) :: term()
+  def json_value(nil), do: nil
+
+  def json_value(text) when is_binary(text) do
+    case Jason.decode!(text, objects: :ordered_objects) do
+      true -> 1
+      false -> 0
+      value when is_binary(value) or is_number(value) or is_nil(value) -> value
+      value -> Jason.encode!(value)
+    end
+  end
+
+  @doc "The rows with the `json_extract` columns at `positions` read as SQLite's values."
+  @spec json_columns([[term()]], [non_neg_integer()]) :: [[term()]]
+  def json_columns(rows, []), do: rows
+
+  def json_columns(rows, positions) do
+    Enum.map(rows, fn row ->
+      Enum.reduce(positions, row, &List.update_at(&2, &1, fn value -> json_value(value) end))
+    end)
+  end
+
   @doc "Every value of every row, as SQLite returns it."
   @spec normalize_rows([[term()]] | nil) :: [[term()]]
   def normalize_rows(nil), do: []

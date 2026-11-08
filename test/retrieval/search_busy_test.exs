@@ -8,15 +8,10 @@ defmodule OptimalEngine.Retrieval.SearchBusyTest do
 
   use ExUnit.Case, async: false
 
-  # Holds SQLite's single writer; a PostgreSQL store has no writer to hold, so
-  # a search beside an open transaction is not busy there.
-  @moduletag :sqlite_store
-
   import Plug.Test
 
   alias OptimalEngine.API.Router
   alias OptimalEngine.Retrieval.Search
-  alias OptimalEngine.Store
 
   setup do
     previous = Application.get_env(:optimal_engine, :store_call_timeout_ms)
@@ -29,25 +24,8 @@ defmodule OptimalEngine.Retrieval.SearchBusyTest do
     end)
   end
 
-  # Holds the single-writer Store for `ms` inside one transaction.
-  defp hold_store(ms) do
-    parent = self()
-
-    task =
-      Task.async(fn ->
-        Store.transaction(
-          fn _txn ->
-            send(parent, :holding)
-            Process.sleep(ms)
-            {:ok, :released}
-          end,
-          ms + 5_000
-        )
-      end)
-
-    assert_receive :holding, 2_000
-    task
-  end
+  # Stalls the Store for `ms`: no statement is answered until it ends.
+  defp hold_store(ms), do: OptimalEngine.Test.StoreStall.hold(ms)
 
   test "a search while the Store is busy answers busy, and the search process lives on" do
     pid = Process.whereis(Search)
@@ -63,11 +41,19 @@ defmodule OptimalEngine.Retrieval.SearchBusyTest do
   test "the search route answers 503 with Retry-After while the Store is busy" do
     task = hold_store(1_500)
 
-    # Workspace authorization reads the Store before the search runs, so the
-    # request fails there; the error handler still answers 503, then
-    # re-raises (Plug.ErrorHandler), and sent_resp/1 reads what was sent.
+    # Workspace authorization reads the Store before the search runs. A call
+    # to SQLite's store exits when it is not answered in time, and the error
+    # handler still answers 503, then re-raises (Plug.ErrorHandler); the
+    # PostgreSQL store returns busy and the route answers 503 itself. Either
+    # way sent_resp/1 reads what was sent.
     conn = conn(:get, "/api/search?q=anything")
-    catch_exit(Router.call(conn, Router.init([])))
+
+    try do
+      Router.call(conn, Router.init([]))
+    catch
+      :exit, _reason -> :exited
+    end
+
     {status, headers, body} = sent_resp(conn)
 
     assert status == 503

@@ -244,6 +244,41 @@ defmodule OptimalEngine.Store.Catalog do
   end
 
   @doc """
+  The columns of each index of `table` (its keys' indexes included), each in
+  index order, sorted. Index names differ between the stores (PostgreSQL's
+  are named for their definition), so a check of an index reads its columns.
+  """
+  @spec index_columns(String.t(), term()) :: {:ok, [[String.t()]]} | {:error, term()}
+  def index_columns(table, txn \\ nil) when is_binary(table) do
+    sql =
+      if postgres?() do
+        """
+        SELECT i.indexrelid::text, a.attname::text, k.ord FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+        WHERE n.nspname = current_schema() AND c.relname::text = ?1
+        """
+      else
+        """
+        SELECT il.name, ii.name, ii.seqno FROM pragma_index_list(?1) il
+        JOIN pragma_index_info(il.name) ii
+        """
+      end
+
+    with {:ok, rows} <- query(txn, sql, [table]) do
+      columns =
+        rows
+        |> Enum.group_by(&Enum.at(&1, 0), &{Enum.at(&1, 2), Enum.at(&1, 1)})
+        |> Enum.map(fn {_index, cols} -> cols |> Enum.sort() |> Enum.map(&elem(&1, 1)) end)
+        |> Enum.sort()
+
+      {:ok, columns}
+    end
+  end
+
+  @doc """
   SQLite's `PRAGMA integrity_check` result: `"ok"` or the problems it found.
   PostgreSQL checks its pages and constraints as it writes them and has no
   such pass, so a store that answers a query answers `"ok"`.
@@ -267,6 +302,28 @@ defmodule OptimalEngine.Store.Catalog do
   @spec foreign_key_violations() :: {:ok, [[term()]]} | {:error, term()}
   def foreign_key_violations do
     if postgres?(), do: {:ok, []}, else: store().raw_query("PRAGMA foreign_key_check", [])
+  end
+
+  @doc """
+  The names of the store's triggers (each named once, whatever tables it is
+  on), sorted. PostgreSQL's internal triggers (foreign keys) are left out.
+  """
+  @spec triggers(term()) :: {:ok, [String.t()]} | {:error, term()}
+  def triggers(txn \\ nil) do
+    sql =
+      if postgres?() do
+        """
+        SELECT DISTINCT t.tgname::text FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema() AND NOT t.tgisinternal
+        ORDER BY 1
+        """
+      else
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name"
+      end
+
+    with {:ok, rows} <- query(txn, sql, []), do: {:ok, List.flatten(rows)}
   end
 
   @doc """

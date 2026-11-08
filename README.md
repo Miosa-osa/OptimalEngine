@@ -470,8 +470,8 @@ and displayed.
 
 ```text
 Storage substrate   -> SQLite (default), raw artifact storage, indexes, caches,
-                       graph/knowledge backends; S3 and a partial Postgres
-                       build as optional providers.
+                       graph/knowledge backends; S3 and a Postgres store
+                       as optional providers.
 Domain ownership    -> topology, intake, signal, memory, retrieval, active work,
                        workflow, skill, governance, evaluation.
 Projection surface  -> markdown, wiki, HTML, app UI, API, MCP/tools, reports,
@@ -1054,8 +1054,8 @@ SQLite: canonical runtime store, with FTS5 and vectors in the same file
 Files: assets and objects, caches, backups
 graph_edges in SQLite: the graph; ETS or RocksDB: a mirror of it
 S3-compatible storage: wired for assets and offsite backups
-Postgres: wired but partial, an OPTIMAL_STORE=postgres Engine
-          that refuses replication
+Postgres: wired, an OPTIMAL_STORE=postgres Engine with every
+          feature of the SQLite store, replication included
 Valkey, NATS JetStream, Qdrant, OpenBao, DuckDB: adapters wired, proved by a round trip; Fractal: declared, no adapter yet
 Markdown/files/wiki/HTML/API: export and control surfaces
 ```

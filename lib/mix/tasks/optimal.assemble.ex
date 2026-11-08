@@ -25,7 +25,7 @@ defmodule Mix.Tasks.Optimal.Assemble do
 
     if query == "" do
       Mix.shell().error("Usage: mix optimal.assemble \"query\" [--tier l0|l1|l2] [--limit N]")
-      System.halt(1)
+      exit({:shutdown, 1})
     end
 
     tier = Keyword.get(parsed, :tier)

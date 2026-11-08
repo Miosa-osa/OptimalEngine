@@ -704,21 +704,26 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
   # The tables of the store, each with the columns a secret could sit in. A table
   # the store cannot read (a virtual table's shadow, say) has none.
   defp store_columns do
-    {:ok, tables} =
-      Store.raw_query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name", [])
+    {:ok, tables} = OptimalEngine.Store.Catalog.tables()
 
-    Enum.map(tables, fn [table] ->
-      case Store.raw_query("SELECT name FROM pragma_table_info(?1) ORDER BY cid", [table]) do
-        {:ok, columns} -> {table, Enum.map(columns, fn [column] -> column end)}
+    Enum.map(tables, fn table ->
+      case OptimalEngine.Store.Catalog.columns(table) do
+        {:ok, columns} -> {table, Enum.map(columns, &{elem(&1, 0), elem(&1, 1)})}
         _unreadable -> {table, []}
       end
     end)
   end
 
   # The `table.column` places where any of `secrets` is stored, found by the
-  # store itself: one byte-wise `instr` pass per column, so no row is copied out
-  # and rendered. Numbers and blobs compare by their bytes too.
+  # store itself: one byte-wise pass per column, so no row is copied out and
+  # rendered. Numbers and blobs compare by their bytes too.
   defp stored_in(secrets, columns) do
+    if Store.selected?(OptimalEngine.Store.Postgres),
+      do: stored_in_postgres(secrets, columns),
+      else: stored_in_sqlite(secrets, columns)
+  end
+
+  defp stored_in_sqlite(secrets, columns) do
     matches =
       secrets
       |> Enum.with_index(1)
@@ -727,13 +732,44 @@ defmodule OptimalEngine.Connectors.GmailBrokerTest do
       end)
 
     for {table, names} <- columns,
-        column <- names,
+        {column, _type} <- names,
         {:ok, [[1]]} ==
           Store.raw_query(
             ~s|SELECT 1 FROM (SELECT "#{column}" AS c FROM "#{table}") WHERE #{matches} LIMIT 1|,
             secrets
           ),
         do: "#{table}.#{column}"
+  end
+
+  # A bytea column is searched as its bytes; any other as its text's UTF-8 bytes.
+  defp stored_in_postgres(secrets, columns) do
+    for {table, names} <- columns,
+        {column, type} <- names,
+        found_in?(table, column, type, secrets) do
+      "#{table}.#{column}"
+    end
+  end
+
+  defp found_in?(table, column, type, secrets) do
+    bytes = if type == "BLOB", do: ~s|"#{column}"|, else: ~s|convert_to("#{column}"::text, 'UTF8')|
+
+    matches =
+      secrets
+      |> Enum.with_index(1)
+      |> Enum.map_join(" OR ", fn {_secret, n} ->
+        "position(convert_to($#{n}, 'UTF8') IN #{bytes}) > 0"
+      end)
+
+    {:ok, rows} =
+      OptimalEngine.Store.Postgres.transaction(fn txn ->
+        OptimalEngine.Store.Postgres.txn_query_native(
+          txn,
+          ~s|SELECT 1 FROM "#{table}" WHERE #{matches} LIMIT 1|,
+          secrets
+        )
+      end)
+
+    rows == [[1]]
   end
 
   defp insert_workspace(id, tenant, slug) do

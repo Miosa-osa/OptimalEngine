@@ -108,7 +108,7 @@ defmodule OptimalEngine.MemoryCore.ContextPackageSweep do
     FROM context_packages
     WHERE id > ?1
       AND metadata LIKE '%refreshed_from_context_package_id%'
-      AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.scrubbed') IS NULL ELSE 1 END
+      AND (NOT json_valid(metadata) OR json_extract(metadata, '$.scrubbed') IS NULL)
       #{Enum.join(clauses, "\n  ")}
     ORDER BY id
     LIMIT #{@page}

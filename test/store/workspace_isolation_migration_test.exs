@@ -14,8 +14,8 @@ defmodule OptimalEngine.Store.WorkspaceIsolationMigrationTest do
   alias OptimalEngine.Store
 
   defp column_names(table) do
-    {:ok, rows} = Store.raw_query("PRAGMA table_info(#{table})", [])
-    Enum.map(rows, fn [_cid, name | _] -> name end)
+    {:ok, names} = OptimalEngine.Store.Catalog.column_names(table)
+    names
   end
 
   test "connectors and connector_runs have a workspace_id column" do

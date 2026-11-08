@@ -13,7 +13,6 @@ defmodule OptimalEngine.API.ViabilityBusyTest do
 
   alias OptimalEngine.API.ViabilityAPI
   alias OptimalEngine.Signal.Reclassifier
-  alias OptimalEngine.Store
 
   setup do
     previous = Application.get_env(:optimal_engine, :store_call_timeout_ms)
@@ -26,25 +25,8 @@ defmodule OptimalEngine.API.ViabilityBusyTest do
     end)
   end
 
-  # Holds the single-writer Store for `ms` inside one transaction.
-  defp hold_store(ms) do
-    parent = self()
-
-    task =
-      Task.async(fn ->
-        Store.transaction(
-          fn _txn ->
-            send(parent, :holding)
-            Process.sleep(ms)
-            {:ok, :released}
-          end,
-          ms + 5_000
-        )
-      end)
-
-    assert_receive :holding, 2_000
-    task
-  end
+  # Stalls the Store for `ms`: no statement is answered until it ends.
+  defp hold_store(ms), do: OptimalEngine.Test.StoreStall.hold(ms)
 
   defp classification(query),
     do: ViabilityAPI.classification(conn(:get, "/api/signals/classification?" <> query))

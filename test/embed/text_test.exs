@@ -426,7 +426,16 @@ defmodule OptimalEngine.Embed.TextTest do
                  Embedder.embed_tree(tree("down-#{tag}", ~w(one two)), workspace_id: workspace)
       end)
 
-      assert [[_input, output, metadata] | _] = model_runs(workspace, "embedder.embed_text_batch")
+      # Two batch calls, one second apart at most: which comes first in a
+      # second is the store's to say, so the failed one is found by its output.
+      runs = model_runs(workspace, "embedder.embed_text_batch")
+      assert length(runs) == 2
+
+      assert [_input, output, metadata] =
+               Enum.find(runs, fn [_input, output, _metadata] ->
+                 Jason.decode!(output)["ok"] == false
+               end)
+
       assert %{"ok" => false, "embedded" => 0, "failed" => 2} = Jason.decode!(output)
       assert %{"call_status" => "failed"} = Jason.decode!(metadata)
     end
@@ -1237,7 +1246,7 @@ defmodule OptimalEngine.Embed.TextTest do
       Store.raw_query(
         """
         SELECT input_payload, output_payload, metadata FROM model_call_runs
-        WHERE workspace_id = ?1 AND function_name = ?2 ORDER BY rowid DESC
+        WHERE workspace_id = ?1 AND function_name = ?2 ORDER BY created_at DESC, #{OptimalEngine.Store.Catalog.insertion_order("id")} DESC
         """,
         [workspace, function_name]
       )

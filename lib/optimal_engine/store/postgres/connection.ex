@@ -73,6 +73,9 @@ defmodule OptimalEngine.Store.Postgres.Connection do
 
   @default_timeout 15_000
   @max_attempts 25
+  @unique_violation {__MODULE__, :unique_violation}
+  @rollback_to ~r/\A\s*ROLLBACK\s+(TRANSACTION\s+)?TO\b/i
+  @dollar ~r/\$(\d+)(?!\d)/
   # A retry starts only with at least this much of the call's time left, and a
   # checked-out connection is held this much longer than the call's time, so a
   # rollback can always finish without the pool closing the connection.
@@ -249,19 +252,17 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   def query(pool, sql, params \\ [], opts \\ []) do
     timeout = timeout!(Keyword.get(opts, :timeout, @default_timeout))
 
-    with {:ok, statement, bound, identity} <- prepare(sql, params, opts, :outside) do
+    with {:ok, statement, bound, identity, json} <- prepare(sql, params, opts, :outside) do
       if identity do
         transaction(pool, &txn_query(&1, sql, params, opts), timeout)
       else
         deadline = deadline(timeout)
 
-        retrying(
-          fn remaining ->
-            execute(pool, statement, bound, Keyword.put(opts, :timeout, remaining))
-          end,
-          1,
-          deadline
-        )
+        fn remaining ->
+          execute(pool, statement, bound, Keyword.put(opts, :timeout, remaining))
+        end
+        |> retrying(1, deadline)
+        |> json_columns(json)
       end
     end
   end
@@ -289,19 +290,48 @@ defmodule OptimalEngine.Store.Postgres.Connection do
     remaining = min(Keyword.get(opts, :timeout, remaining(deadline)), remaining(deadline))
     mode = if Keyword.get(opts, :recoverable, false), do: [mode: :savepoint], else: []
 
-    with {:ok, statement, bound, identity} <- prepare(sql, params, opts, :inside) do
-      case execute(conn, statement, bound, [timeout: max(remaining, @min_attempt)] ++ mode) do
+    with {:ok, statement, bound, identity, json} <- prepare(sql, params, opts, :inside) do
+      case execute(conn, statement, bound, [timeout: max(remaining, @min_attempt)] ++ mode)
+           |> json_columns(json) do
         {:ok, result} ->
+          # The caller's own savepoint undid the violation: the transaction goes on.
+          if Regex.match?(@rollback_to, statement) and
+               :atomics.compare_exchange(doomed, 1, 2, 0) == :ok,
+             do: Process.delete(@unique_violation)
+
           with :ok <- advance_identity(txn, identity, max(remaining(deadline), @min_attempt)) do
             {:ok, result}
           end
 
         {:error, error} ->
-          if Errors.retryable?(error), do: :atomics.put(doomed, 1, 1)
-          {:error, Errors.message(error)}
+          cond do
+            Errors.retryable?(error) -> :atomics.put(doomed, 1, 1)
+            mode == [] and unique_violation?(error) -> unique_met(doomed, error)
+            true -> :ok
+          end
+
+          {:error, Errors.failure(error)}
       end
     end
   end
+
+  # SQLite has one writer, so a fun that reads MAX(seq) or checks for an
+  # absent key and then inserts never meets a concurrent insert of the same
+  # key. At SERIALIZABLE PostgreSQL reports that interleaving as a unique
+  # violation, not always a serialization failure, when the read was not an
+  # equality probe of the key. A transaction that met one is run again: a key
+  # a concurrent writer took is visible to the next attempt, which picks
+  # another (the next sequence number) or none. A run that meets the same
+  # violation, the same key, as the one before it repeats the key itself, and
+  # its answer is the fun's.
+  defp unique_met(doomed, error) do
+    if :atomics.compare_exchange(doomed, 1, 0, 2) == :ok do
+      Process.put(@unique_violation, {error.postgres[:constraint], error.postgres[:detail]})
+    end
+  end
+
+  defp unique_violation?(%Postgrex.Error{postgres: %{code: :unique_violation}}), do: true
+  defp unique_violation?(_error), do: false
 
   # ---------------------------------------------------------------------------
   # Statements
@@ -313,16 +343,48 @@ defmodule OptimalEngine.Store.Postgres.Connection do
 
     case Keyword.get(opts, :dialect, :sqlite) do
       :postgres ->
-        {:ok, sql, params, nil}
+        # A native statement may bind arrays; a map or a tuple is no value
+        # either store stores.
+        if Enum.any?(params, &unbindable_native?/1),
+          do: {:error, :invalid_parameter},
+          else: {:ok, sql, params, nil, {[], []}}
 
       :sqlite ->
         with :ok <- refuse_schema_change(sql),
              {:ok, statement, requirements} <- Dialect.translate(sql),
+             :ok <- bindable(params, statement, requirements.params),
              bound = bound(params, requirements.params),
-             :ok <- check_text_params(requirements.text_params, bound) do
-          {:ok, statement, bound, identity_insert(statement)}
+             :ok <- check_text_params(requirements.text_params, bound),
+             :ok <- check_number_params(requirements.number_params, bound) do
+          {:ok, statement, bound, identity_insert(statement),
+           {requirements.json_columns, selected_values(requirements.param_columns, bound)}}
         end
     end
+  end
+
+  # Result columns SQLite returns differently than PostgreSQL types them: a
+  # selected json_extract (SQLite's value, from the JSON text) and a selected
+  # placeholder (the value bound).
+  defp json_columns({:ok, result}, {json, values}) when json != [] or values != [] do
+    rows =
+      result.rows
+      |> Affinity.json_columns(json)
+      |> Enum.map(fn row ->
+        Enum.reduce(values, row, fn {position, value}, row ->
+          List.replace_at(row, position, value)
+        end)
+      end)
+
+    {:ok, %{result | rows: rows}}
+  end
+
+  defp json_columns(outcome, _columns), do: outcome
+
+  defp selected_values(columns, bound) do
+    for {position, n} <- columns,
+        value <- [Enum.at(bound, n - 1)],
+        is_integer(value) or is_float(value) or is_binary(value) or is_nil(value),
+        do: {position, value}
   end
 
   # The schema comes from the migrations; a schema change written as a
@@ -332,6 +394,41 @@ defmodule OptimalEngine.Store.Postgres.Connection do
       do: {:error, {:unsupported, "schema change outside the migrations"}},
       else: :ok
   end
+
+  # What SQLite cannot bind is refused as SQLite refuses it
+  # (`OptimalEngine.Store.SQLite.bind/3`): an integer past 64 bits, a map, a
+  # list or a tuple other than {:blob, data}, and fewer parameters than the
+  # statement names.
+  @int64 -9_223_372_036_854_775_808..9_223_372_036_854_775_807
+
+  defp bindable(params, statement, used) do
+    named =
+      case used do
+        :all ->
+          @dollar
+          |> Regex.scan(statement, capture: :all_but_first)
+          |> Enum.map(fn [n] -> String.to_integer(n) end)
+
+        used ->
+          used
+      end
+
+    cond do
+      Enum.max(named, fn -> 0 end) > length(params) -> {:error, :invalid_parameter}
+      Enum.all?(params, &bindable_value?/1) -> :ok
+      true -> {:error, :invalid_parameter}
+    end
+  end
+
+  defp bindable_value?(value) when is_integer(value), do: value in @int64
+  defp bindable_value?({:blob, data}), do: is_binary(data)
+  defp bindable_value?(value) when is_struct(value), do: true
+  defp bindable_value?(value) when is_map(value) or is_list(value) or is_tuple(value), do: false
+  defp bindable_value?(_value), do: true
+
+  defp unbindable_native?({:blob, data}), do: not is_binary(data)
+  defp unbindable_native?(value) when is_struct(value), do: false
+  defp unbindable_native?(value), do: is_map(value) or is_tuple(value)
 
   # The parameters the translated statement names, in its numbering.
   defp bound(params, :all), do: params
@@ -344,6 +441,16 @@ defmodule OptimalEngine.Store.Postgres.Connection do
       do: :ok,
       else: {:error, {:unsupported, "json_extract compared to a non-text value"}}
   end
+
+  # A placeholder a json_extract is ordered against is a number; text would
+  # be ordered as text on SQLite.
+  defp check_number_params(indexes, params) do
+    if Enum.all?(indexes, &(Enum.at(params, &1 - 1) |> number_or_nil?())),
+      do: :ok,
+      else: {:error, {:unsupported, "json_extract ordered against a non-number value"}}
+  end
+
+  defp number_or_nil?(value), do: is_number(value) or is_nil(value)
 
   defp text_or_nil?(value), do: is_binary(value) or is_nil(value)
 
@@ -376,7 +483,7 @@ defmodule OptimalEngine.Store.Postgres.Connection do
       {:error, error} ->
         cond do
           not Errors.retryable?(error) ->
-            {:error, Errors.message(error)}
+            {:error, Errors.failure(error)}
 
           attempt < @max_attempts and retry_after_backoff?(attempt, deadline) ->
             retried(:statement, error.postgres.code, attempt)
@@ -507,7 +614,8 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   # Transactions
   # ---------------------------------------------------------------------------
 
-  defp attempt_transaction(pool, fun, attempt, deadline) do
+  defp attempt_transaction(pool, fun, attempt, deadline, last_unique \\ nil) do
+    Process.delete(@unique_violation)
     doomed = :atomics.new(1, [])
     timeout = remaining(deadline) + @rollback_grace
 
@@ -531,6 +639,15 @@ defmodule OptimalEngine.Store.Postgres.Connection do
       :retry ->
         retry_transaction(pool, fun, {attempt, deadline}, :serialization_failure)
 
+      {:unique_retry, fallback} ->
+        case Process.delete(@unique_violation) do
+          violation when violation != last_unique ->
+            retry_transaction(pool, fun, {attempt, deadline}, :unique_violation, violation)
+
+          _same ->
+            unique_answer(fallback)
+        end
+
       {:commit, error} ->
         if Errors.retryable?(error) do
           retry_transaction(pool, fun, {attempt, deadline}, error.postgres.code)
@@ -543,13 +660,20 @@ defmodule OptimalEngine.Store.Postgres.Connection do
     end
   end
 
+  defp unique_answer({:fun, reason}), do: {:error, reason}
+
+  defp unique_answer({:raised, kind, reason, stacktrace}),
+    do: :erlang.raise(kind, reason, stacktrace)
+
+  defp unique_answer(_other), do: {:error, {:commit_failed, :rollback}}
+
   defp commit_reason({:rolled_back, _command}), do: :rollback
   defp commit_reason(error), do: Errors.message(error)
 
-  defp retry_transaction(pool, fun, {attempt, deadline}, reason) do
+  defp retry_transaction(pool, fun, {attempt, deadline}, reason, last_unique \\ nil) do
     if attempt < @max_attempts and retry_after_backoff?(attempt, deadline) do
       retried(:transaction, reason, attempt)
-      attempt_transaction(pool, fun, attempt + 1, deadline)
+      attempt_transaction(pool, fun, attempt + 1, deadline, last_unique)
     else
       {:error, {:serialization_failure, "#{reason}; gave up after #{attempt} attempts"}}
     end
@@ -580,19 +704,54 @@ defmodule OptimalEngine.Store.Postgres.Connection do
            timeout: max(remaining(deadline), @min_attempt)
          ) do
       {:ok, _} ->
-        returned =
-          try do
-            {:returned, fun.({__MODULE__, conn, doomed, deadline})}
-          catch
-            kind, reason -> {:raised, kind, reason, __STACKTRACE__}
-          end
-
-        conclude(conn, :atomics.get(doomed, 1) == 1, returned, deadline)
+        case bound_waits(conn, deadline) do
+          :ok -> run_fun(conn, doomed, fun, deadline)
+          {:error, error} -> rollback(conn, {:begin, error}, deadline)
+        end
 
       {:error, error} ->
         {:begin, error}
     end
   end
+
+  defp run_fun(conn, doomed, fun, deadline) do
+    returned =
+      try do
+        {:returned, fun.({__MODULE__, conn, doomed, deadline})}
+      catch
+        kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+      end
+
+    case :atomics.get(doomed, 1) do
+      2 -> rollback(conn, {:unique_retry, unique_fallback(returned)}, deadline)
+      doomed -> conclude(conn, doomed == 1, returned, deadline)
+    end
+  end
+
+  # A statement inside a transaction waits as long as the connection is held,
+  # not its own timeout, so a transaction shorter than the session's lock and
+  # statement timeouts takes its own: a statement that waits for a lock past
+  # the transaction's time is cancelled, and the store answers busy, as
+  # SQLite's store answers a call it cannot serve in time. SET LOCAL takes no
+  # snapshot, so the fun may still set the transaction's isolation first.
+  defp bound_waits(conn, deadline) do
+    ms = max(remaining(deadline), @min_attempt)
+
+    if ms < @session_timeouts[:lock_timeout] do
+      Enum.reduce_while(["lock_timeout", "statement_timeout"], :ok, fn setting, :ok ->
+        case Postgrex.query(conn, "SET LOCAL #{setting} = #{ms}", [], timeout: ms + @rollback_grace) do
+          {:ok, _} -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    else
+      :ok
+    end
+  end
+
+  defp unique_fallback({:returned, {:error, reason}}), do: {:fun, reason}
+  defp unique_fallback({:raised, _kind, _reason, _stacktrace} = raised), do: raised
+  defp unique_fallback(other), do: other
 
   defp conclude(conn, true = _doomed, _returned, deadline), do: rollback(conn, :retry, deadline)
 

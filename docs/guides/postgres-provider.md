@@ -142,7 +142,12 @@ Engine code keeps writing SQLite statements.
 - `ORDER BY` terms get `NULLS FIRST` ascending and `NULLS LAST` descending, SQLite's order.
 - `datetime('now')` is the statement's time, as on SQLite, not the transaction's.
 - `json_extract` compared to a value compares JSON values, so a JSON number never equals text; its placeholder must be bound to text.
-  Selected, it is the value as text, so a JSON number comes back as its text; an ordered comparison or an `ORDER BY` on it is refused.
+  Ordered against a number it orders as SQLite does, and compared with a column or another `json_extract` it compares as SQLite does.
+  Selected as a whole item of a query's own select list it is SQLite's value: a number as a number, `true` and `false` as 1 and 0, an object or array as JSON text. Anywhere else it is its text; `BETWEEN` and an `ORDER BY` on it are refused.
+- A selected placeholder (`SELECT ?1`) is the value bound, as on SQLite; PostgreSQL would type it as text.
+- A statement that waits past its call's time for a lock, or runs past it, is `{:error, :busy}`, as SQLite's store answers a call it cannot serve in time; a transaction shorter than the session's lock timeout takes its own. An API key or workspace check that meets a busy store answers 503 with `Retry-After`.
+- SQLite runs one writer, so a transaction that reads `MAX(seq)` and inserts the next never meets a concurrent insert of that key. At SERIALIZABLE PostgreSQL can report that interleaving as a unique violation; the transaction is run again, and the next attempt reads the key the other writer took. When the same violation comes back the key is the transaction's own, and its answer is returned.
+- A long transaction that rewrites a row others keep updating holds it first (`Store.txn_lock_row/4`); a bulk write over many tables of rows that are its own runs at READ COMMITTED (`Store.txn_read_committed/1`). Both do nothing on SQLite.
 - An `INSERT` that writes an identity column explicitly moves the column's sequence past the largest id, as SQLite's rowid does.
 - A construct the dialect refuses and a schema change outside the migrations return `{:error, {:unsupported, name}}` and never reach the database.
 - A transaction statement sent as a statement (`BEGIN`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, and PostgreSQL's `START` and `ABORT`) raises `ArgumentError` before it reaches the database, as it does on SQLite (`OptimalEngine.Store.TransactionControl`).
@@ -151,13 +156,12 @@ Engine code keeps writing SQLite statements.
 
 ### What Does Not Work On PostgreSQL
 
-These features are not on the PostgreSQL store yet.
-`OptimalEngine.Storage.Postgres.unavailable/0` lists them, `GET /api/storage/providers/postgres` and `mix optimal.postgres.check` report them, and each is refused by name when it is used, never answered as if it worked:
+Every feature of the SQLite store works on the PostgreSQL store. One kind of statement does not, by design.
+`OptimalEngine.Storage.Postgres.unavailable/0` lists it, `GET /api/storage/providers/postgres` and `mix optimal.postgres.check` report it, and it is refused by name when it is used, never answered as if it worked:
 
 | Feature | On a PostgreSQL store |
 | --- | --- |
-| The SQLite catalog | `PRAGMA`, `sqlite_master` and the `pragma_*` functions are refused (workspace bundles, the data steward's table list, a workspace slug change). |
-| Schema and transaction statements | The schema comes from the migrations, so a schema change and SQLite-only table options (`AUTOINCREMENT`, `WITHOUT ROWID`) are refused. A transaction statement sent as a statement raises `ArgumentError` on both stores. |
+| Schema and transaction statements | The schema comes from the migrations, so a schema change and SQLite-only table options (`AUTOINCREMENT`, `WITHOUT ROWID`) sent as statements are refused; the schema PostgreSQL needs of its own (full-text indexes, app data collections, capture triggers) runs through its own DDL. A transaction statement sent as a statement raises `ArgumentError` on both stores. |
 
 `OptimalEngine.Store.Dialect.refusals/0` lists every refused construct with its reason, and `test/store/postgres/unavailable_test.exs` checks both ways: every refusal of the dialect is under a feature here or under a ported feature (`OptimalEngine.Storage.Postgres.ported/0`, a feature that works on PostgreSQL through statements of its own while the SQLite statements behind it stay refused), and every name a feature lists is one the dialect or the store refuses with.
 
@@ -175,9 +179,11 @@ The dialect renames each call (`json_set` to `sqlite_json_set`, `datetime` to `s
 | `json_group_array` | An aggregate with the same array, `DISTINCT` included. |
 | `datetime`, `date`, `time`, `julianday`, `unixepoch`, `strftime` | A time is held as SQLite holds it, in milliseconds since the Julian epoch, from any SQLite time value, with SQLite's modifiers: `±N days`, `hours`, `minutes`, `seconds`, `months`, `years` (months by the calendar fields, so January 31 plus one month is March 3, as on SQLite), `start of day`, `month`, `year`, `unixepoch`, `subsec`, and `utc` and `localtime`, which leave a UTC time as it is. `now` is the statement's start, to the millisecond. A modifier or `strftime` format the functions do not have raises an error rather than answer. |
 | `group_concat`, `instr`, `char` | `string_agg`, `strpos`, `chr`. |
-| `x GLOB p` | A regular expression match, when `x` is a column or a placeholder and `p` a literal or a placeholder. |
+| `x GLOB p` | A regular expression match, when `x` is a column, a placeholder or a `json_extract` of a column and `p` a literal or a placeholder. |
 
-Still refused by name: the `json_extract` forms that order or compare by SQLite's types, `json_tree`, `json_patch` and the other JSON functions no call site uses, `typeof`, `printf` and SQLite's other functions without a counterpart, a `GLOB` of an expression, SQLite's collations, and a `LIKE` with a computed pattern.
+`json_extract` ordered against a number (`<`, `<=`, `>`, `>=`, a literal or a placeholder bound to a number) orders as SQLite orders values: a JSON number or boolean compares as a number, and text sorts after every number.
+
+Still refused by name: the other `json_extract` forms that order or compare by SQLite's types (`BETWEEN`, an ordering against text or a column, `ORDER BY`), `json_tree`, `json_patch` and the other JSON functions no call site uses, `typeof`, `printf` and SQLite's other functions without a counterpart, a `GLOB` of an expression, SQLite's collations, and a `LIKE` with a computed pattern.
 ### Replication
 Replication works on a PostgreSQL store with the ledger a SQLite Engine keeps, so SQLite and PostgreSQL Engines replicate with each other (`OptimalEngine.Sync.Postgres`, `docs/guides/replication.md`).
 - Capture is a PL/pgSQL row trigger on each replicated table, calling `optimal_sync_capture()` with the table's key columns, its `BYTEA` columns and whether it is append-only. It records in `sync_capture` what SQLite's capture triggers record: the whole row on an insert or an update, the key on a delete, bytes as upper-case hex in `blob_data`, the key as text or a compact JSON array, nothing while `sync_identity.applying` is set or for a workspace that does not sync. `test/sync/postgres_capture_test.exs` makes the same writes on both stores and compares what each captured.
@@ -186,6 +192,7 @@ Replication works on a PostgreSQL store with the ledger a SQLite Engine keeps, s
 - The gate reads JSON as SQLite's JSON functions do, through `oe_json_valid`, `oe_json_type`, `oe_json_extract`, `oe_json_each` and `oe_json_raw` on PostgreSQL's `json` type, which keeps a key that appears twice (`OptimalEngine.Store.Postgres.SqliteJson`).
 - The gate cache's stamp is the largest key a committed row of `sync_capture`, `sync_local_stamp` and `sync_mutations` holds; PostgreSQL's sequences move before a writer commits, so they cannot be the stamp. The local stamp triggers of the tables the gate scans have SQLite's conditions, translated by the dialect.
 - `test/sync/cross_store_apply_test.exs` applies a page a SQLite Engine served and a page a PostgreSQL Engine served, recorded on each build, and checks the rows that result; CI runs it on both builds.
+- `scripts/proof-postgres-replication.sh` starts two Engines over HTTP, each on a PostgreSQL schema of its own, pairs them as each other's peer, and checks that a memory written on either reaches the other in one sync cycle, with healthy peers and no conflicts after.
 
 ### Full-Text Search
 
@@ -334,7 +341,8 @@ _build/prod/rel/optimal/bin/optimal start
 `GET /api/storage/providers` reports `selected: true` for the store the Engine runs and `selected: false` for the other, and `mix optimal.postgres.check` prints the same.
 
 An Engine started this way boots its whole supervision tree on PostgreSQL, and the two-engine proof runs on it.
-The features listed under What Does Not Work On PostgreSQL are refused by name, so a PostgreSQL build is the canonical relational store for engines that share one database, not yet a replacement for every feature of an embedded engine.
+With every feature of the embedded store on it, a PostgreSQL build replaces an embedded engine's store; only schema and transaction statements sent as statements are refused (What Does Not Work On PostgreSQL).
+CI's `test-postgres-store` job runs the whole test suite with the Engine on PostgreSQL. Tests of SQLite itself (its planner, its migrations on a file, its one connection) are tagged `:sqlite_store` and left out there; each names the PostgreSQL test that covers the same behaviour.
 Replication works on a PostgreSQL build (see Replication below).
 
 ## Backups And Restore

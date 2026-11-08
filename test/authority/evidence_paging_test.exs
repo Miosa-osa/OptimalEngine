@@ -230,7 +230,7 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
   test "an after or until beyond a signed 64-bit integer answers 400, and the Store keeps running",
        ctx do
     chain_of(ctx.tenant, 5)
-    store = Process.whereis(OptimalEngine.Store.SQLite)
+    store = Process.whereis(OptimalEngine.Store.adapter())
     max = "9223372036854775807"
     huge = String.duplicate("9", 40)
 
@@ -255,7 +255,7 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     assert {:error, :after_out_of_range} = Evidence.head(ctx.tenant, after: too_big)
     assert {:error, :until_out_of_range} = Evidence.head(ctx.tenant, until: too_big)
 
-    assert Process.whereis(OptimalEngine.Store.SQLite) == store
+    assert Process.whereis(OptimalEngine.Store.adapter()) == store
     assert {:ok, %{"total" => 5, "complete" => true}} = Evidence.export(ctx.tenant)
   end
 
@@ -350,6 +350,8 @@ defmodule OptimalEngine.Authority.EvidencePagingTest do
     assert {:error, %{reason: :count_mismatch}} = Evidence.verify_export(forged)
   end
 
+  # 10,050 appends, each a read and a write: on PostgreSQL, a round trip each.
+  @tag timeout: 180_000
   test "past 10,000 entries the CLI export is complete and the integrity scan sees every one",
        ctx do
     append_many(ctx.tenant, 10_050)

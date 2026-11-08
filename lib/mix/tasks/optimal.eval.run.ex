@@ -59,15 +59,15 @@ defmodule Mix.Tasks.Optimal.Eval.Run do
 
       {[], _} ->
         Mix.shell().error("Usage: mix optimal.eval.run path/to/dataset.json[l] --workspace default")
-        System.halt(1)
+        exit({:shutdown, 1})
 
       {_paths, invalid} when invalid != [] ->
         Mix.shell().error("Invalid option(s): #{inspect(invalid)}")
-        System.halt(1)
+        exit({:shutdown, 1})
 
       {paths, _} ->
         Mix.shell().error("Expected one dataset path, got: #{Enum.join(paths, ", ")}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 
@@ -114,7 +114,7 @@ defmodule Mix.Tasks.Optimal.Eval.Run do
 
       {:error, reason} ->
         Mix.shell().error("Evaluation run failed: #{inspect(reason)}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 

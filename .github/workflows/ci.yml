@@ -5,8 +5,8 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Every pull request, so a PR stacked on another runs CI too.
   pull_request:
-    branches: [main]
 
 # Cancel any in-progress CI run for the same branch when a new push lands.
 # Saves Actions minutes on rapid-fire commits.
@@ -140,28 +140,13 @@ jobs:
         run: cat /tmp/sql-census.txt || true
 
   # The same engine started with the PostgreSQL store (OPTIMAL_STORE=postgres):
-  # the test files listed in test/support/postgres_store_suite.txt run with
-  # the whole Engine on PostgreSQL, so code paths that only a PostgreSQL build
-  # compiles (full-text search on posting lists, app data DDL, ...) are tested.
-  # The list grows with each feature ported until it is the whole suite.
+  # the whole suite runs with the Engine on PostgreSQL, so the two stores stay
+  # at parity and code paths only the PostgreSQL store takes (full-text search
+  # on posting lists, app data DDL, ...) are tested.
   test-postgres-store:
     name: test-postgres-store
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: optimal_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+    timeout-minutes: 45
 
     env:
       MIX_ENV: test
@@ -172,6 +157,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # Started here rather than as a service so it takes server settings: the
+      # whole suite runs serializable transactions side by side, which needs
+      # more predicate locks and connections than the defaults.
+      - name: Start PostgreSQL 16
+        run: |
+          docker run --detach --name postgres -p 5432:5432 \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=optimal_test \
+            postgres:16 -c max_connections=300 -c max_pred_locks_per_transaction=512
+          for _ in $(seq 60); do
+            docker exec postgres pg_isready -U postgres -d optimal_test && exit 0
+            sleep 2
+          done
+          exit 1
 
       - name: Set up Erlang/OTP and Elixir
         uses: erlef/setup-beam@v1
@@ -206,8 +205,11 @@ jobs:
       - name: Compile
         run: mix compile --warnings-as-errors
 
-      - name: Run the PostgreSQL store suite
-        run: mix test --warnings-as-errors $(grep -v '^#' test/support/postgres_store_suite.txt)
+      # The whole suite, as the SQLite job runs it, with the Engine's store on
+      # PostgreSQL. Tests of SQLite itself are tagged :sqlite_store and left
+      # out (test/test_helper.exs); each names its PostgreSQL counterpart.
+      - name: Run the suite on the PostgreSQL store
+        run: mix test --warnings-as-errors
 
   mcp:
     name: mcp server (build and test)

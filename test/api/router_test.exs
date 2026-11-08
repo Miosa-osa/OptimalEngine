@@ -149,8 +149,14 @@ defmodule OptimalEngine.API.RouterTest do
 
   describe "physical storage providers" do
     test "lists providers without exposing connection values" do
+      previous_url = System.get_env("OPTIMAL_POSTGRES_URL")
       System.put_env("OPTIMAL_POSTGRES_URL", "postgres://private-user:private-pass@localhost/db")
-      on_exit(fn -> System.delete_env("OPTIMAL_POSTGRES_URL") end)
+
+      on_exit(fn ->
+        if previous_url,
+          do: System.put_env("OPTIMAL_POSTGRES_URL", previous_url),
+          else: System.delete_env("OPTIMAL_POSTGRES_URL")
+      end)
 
       conn = request(:get, "/api/storage/providers")
       assert conn.status == 200
@@ -766,6 +772,8 @@ defmodule OptimalEngine.API.RouterTest do
       assert {:ok, retrieve_body} = Jason.decode(retrieve_conn.resp_body)
       package = retrieve_body["context_package"]
       loaded_pool = retrieve_body["active_memory_pool"]
+      # The depth a body leaves out is the default number, as the column holds.
+      assert package["detail_depth"] == 1
       assert package["filtered_object_summary"]["returned_facts"] == 1
 
       assert %{"type" => "context_package", "id" => package["id"]} in loaded_pool[

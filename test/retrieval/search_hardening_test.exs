@@ -154,17 +154,19 @@ defmodule OptimalEngine.Retrieval.SearchHardeningTest do
 
   describe "min_score" do
     test "compares the exact score, not the one rounded for display", ctx do
-      # One instant for every search: the time decay measures age in whole
-      # seconds, so a search after a second boundary scores a little lower.
-      opts = [workspace_id: ctx.workspace, as_of: DateTime.utc_now()]
+      # One instant for the three searches: freshness decays with the clock,
+      # so a later search would score the same context a little lower.
+      as_of = DateTime.utc_now()
+      opts = [workspace_id: ctx.workspace, as_of: as_of]
+
       assert {:ok, [top | _]} = Search.search(ctx.token, opts)
       exact = top.rank_score
 
-      assert {:ok, kept} = Search.search(ctx.token, [min_score: exact] ++ opts)
+      assert {:ok, kept} = Search.search(ctx.token, Keyword.put(opts, :min_score, exact))
 
       assert top.uri in Enum.map(kept, & &1.uri)
 
-      assert {:ok, []} = Search.search(ctx.token, [min_score: exact * 2 + 1] ++ opts)
+      assert {:ok, []} = Search.search(ctx.token, Keyword.put(opts, :min_score, exact * 2 + 1))
     end
   end
 end

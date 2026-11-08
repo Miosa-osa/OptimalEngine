@@ -98,6 +98,7 @@ defmodule OptimalEngine.Release.MaintenanceTest do
   test "migrate --status reports the schema" do
     out = capture_io(fn -> assert Maintenance.run(["migrate", "--status"], stopped()) == 0 end)
     assert out =~ "Migration status"
+    assert out =~ "All migrations applied."
   end
 
   test "a task that opens the store refuses while an Engine is up, and starts nothing", ctx do

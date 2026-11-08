@@ -197,22 +197,70 @@ defmodule OptimalEngine.Store.DialectTest do
     end
   end
 
-  describe "json_extract" do
-    test "selected or passed to a function, it is the value's text in the C collation" do
-      assert {:ok, "SELECT ((metadata::jsonb #>> '{routing_review,state}') COLLATE \"C\") FROM t"} =
-               Dialect.to_postgres("SELECT json_extract(metadata, '$.routing_review.state') FROM t")
+  describe "ORDER BY ending at ON CONFLICT" do
+    test "an INSERT OR IGNORE of an ordered SELECT ends its ORDER BY at ON CONFLICT" do
+      assert {:ok,
+              "INSERT INTO h (a, b)\nSELECT a, b FROM w\nORDER BY c NULLS FIRST, a NULLS FIRST ON CONFLICT DO NOTHING"} =
+               Dialect.to_postgres(
+                 "INSERT OR IGNORE INTO h (a, b)\nSELECT a, b FROM w\nORDER BY c, a"
+               )
+    end
+  end
 
+  describe "json_extract" do
+    test "a whole item of a query's select list is the JSON value, for the store to read" do
+      assert {:ok,
+              "SELECT a, NULLIF((metadata::jsonb #> '{routing_review,state}'), 'null'::jsonb) AS s, b FROM t",
+              %{json_columns: [1]}} =
+               Dialect.translate(
+                 "SELECT a, json_extract(metadata, '$.routing_review.state') AS s, b FROM t"
+               )
+
+      # Grouped by the same value it selects.
+      assert {:ok, sql, %{json_columns: [0]}} =
+               Dialect.translate(
+                 "SELECT json_extract(d, '$.id'), MIN(n) FROM t GROUP BY json_extract(d, '$.id')"
+               )
+
+      assert sql =~ "GROUP BY NULLIF((d::jsonb #> '{id}'), 'null'::jsonb)"
+
+      # A subquery's item, an INSERT's, an item after `*`, and an expression stay text.
+      for sql <- [
+            "SELECT a FROM t WHERE b IN (SELECT json_extract(m, '$.k') FROM u)",
+            "INSERT INTO t (a) SELECT json_extract(m, '$.k') FROM u",
+            "SELECT *, json_extract(m, '$.k') FROM t",
+            "SELECT json_extract(m, '$.k') || 'x' FROM t",
+            "SELECT CASE WHEN a THEN json_extract(m, '$.k') END FROM t"
+          ] do
+        assert {:ok, translated, %{json_columns: []}} = Dialect.translate(sql), sql
+        assert translated =~ "#>> '{k}'", sql
+      end
+    end
+
+    test "passed to a function, it is the value's text in the C collation" do
       assert {:ok, "SELECT COALESCE(((meta::jsonb #>> '{kind}') COLLATE \"C\"), 'memory') FROM t"} =
                Dialect.to_postgres("SELECT COALESCE(json_extract(meta, '$.kind'), 'memory') FROM t")
     end
 
     test "compared to a placeholder, it compares JSON values and the placeholder must be text" do
       assert {:ok, "SELECT a FROM t WHERE #{@jsonb_kind} = to_jsonb($1::text)",
-              %{text_params: [1], params: :all}} ==
+              %{
+                text_params: [1],
+                number_params: [],
+                json_columns: [],
+                param_columns: [],
+                params: :all
+              }} ==
                Dialect.translate("SELECT a FROM t WHERE json_extract(meta, '$.kind') = ?1")
 
       assert {:ok, "SELECT a FROM t WHERE #{@jsonb_kind} IS DISTINCT FROM to_jsonb($1::text)",
-              %{text_params: [1], params: :all}} ==
+              %{
+                text_params: [1],
+                number_params: [],
+                json_columns: [],
+                param_columns: [],
+                params: :all
+              }} ==
                Dialect.translate("SELECT a FROM t WHERE json_extract(meta, '$.kind') IS NOT ?1")
     end
 
@@ -222,7 +270,13 @@ defmodule OptimalEngine.Store.DialectTest do
 
       assert {:ok,
               "SELECT a FROM t WHERE #{@jsonb_kind} IN (to_jsonb('review'::text), to_jsonb($1::text))",
-              %{text_params: [1], params: [2]}} ==
+              %{
+                text_params: [1],
+                number_params: [],
+                json_columns: [],
+                param_columns: [],
+                params: [2]
+              }} ==
                Dialect.translate(
                  "SELECT a FROM t WHERE json_extract(meta, '$.kind') IN ('review', ?2)"
                )
@@ -241,14 +295,47 @@ defmodule OptimalEngine.Store.DialectTest do
                Dialect.to_postgres("SELECT a FROM t WHERE json_extract(meta, '$.n') <> 7")
     end
 
+    test "a column compared to it, or two of them compared, keep SQLite's comparison" do
+      assert {:ok, "SELECT 1 FROM w WHERE o.ext = ((w.meta::jsonb #>> '{ext}') COLLATE \"C\")"} ==
+               Dialect.to_postgres("SELECT 1 FROM w WHERE o.ext = json_extract(w.meta, '$.ext')")
+
+      assert {:ok,
+              "SELECT 1 FROM w WHERE NULLIF((o.meta::jsonb #> '{ext}'), 'null'::jsonb) = NULLIF((w.meta::jsonb #> '{ext}'), 'null'::jsonb)"} ==
+               Dialect.to_postgres(
+                 "SELECT 1 FROM w WHERE json_extract(o.meta, '$.ext') = json_extract(w.meta, '$.ext')"
+               )
+
+      assert {:ok, "UPDATE w SET ext = ((meta::jsonb #>> '{ext}') COLLATE \"C\") WHERE ext IS NULL"} ==
+               Dialect.to_postgres(
+                 "UPDATE w SET ext = json_extract(meta, '$.ext') WHERE ext IS NULL"
+               )
+    end
+
     test "compared to a column, it compares text" do
       assert {:ok, "SELECT 1 FROM c, l WHERE ((c.meta::jsonb #>> '{ref}') COLLATE \"C\") = l.ref"} ==
                Dialect.to_postgres("SELECT 1 FROM c, l WHERE json_extract(c.meta, '$.ref') = l.ref")
     end
 
+    test "ordered against a number, it orders as SQLite orders its values" do
+      assert {:ok, sql, %{text_params: [], number_params: [1], params: :all}} =
+               Dialect.translate("SELECT a FROM t WHERE json_extract(meta, '$.n') > ?1")
+
+      assert sql =~ "jsonb_typeof"
+      assert sql =~ "::numeric > ($1::text)::numeric"
+      assert sql =~ "ELSE TRUE END"
+
+      assert {:ok, sql} =
+               Dialect.to_postgres("SELECT a FROM t WHERE json_extract(meta, '$.n') <= 5")
+
+      assert sql =~ "::numeric <= 5"
+      assert sql =~ "ELSE FALSE END"
+    end
+
     test "a form that would compare or order by SQLite's types is refused" do
       for {sql, reason} <- [
-            {"SELECT a FROM t WHERE json_extract(meta, '$.n') < ?1",
+            {"SELECT a FROM t WHERE json_extract(meta, '$.n') < 'x'",
+             "json_extract ordered comparison"},
+            {"SELECT a FROM t WHERE json_extract(meta, '$.n') < b",
              "json_extract ordered comparison"},
             {"SELECT a FROM t WHERE json_extract(meta, '$.n') BETWEEN 1 AND 2",
              "json_extract ordered comparison"},

@@ -85,7 +85,7 @@ defmodule OptimalEngine.Storage.BackupScheduleTest do
         SELECT id, storage_uri, status, offsite, encrypted, metadata
         FROM backup_records
         WHERE json_extract(metadata, '$.scheduled') = 1
-        ORDER BY created_at ASC, rowid ASC
+        ORDER BY created_at ASC, #{OptimalEngine.Store.Catalog.insertion_order("id")} ASC
         """,
         []
       )

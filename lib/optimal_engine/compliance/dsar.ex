@@ -130,7 +130,7 @@ defmodule OptimalEngine.Compliance.DSAR do
 
   defp list_memberships(principal_id, tenant_id) do
     case Store.raw_query(
-           "SELECT node_id, membership_type, added_at FROM node_members WHERE tenant_id = ?1 AND principal_id = ?2",
+           "SELECT node_id, membership, started_at FROM node_members WHERE tenant_id = ?1 AND principal_id = ?2 ORDER BY node_id, membership",
            [tenant_id, principal_id]
          ) do
       {:ok, rows} ->
@@ -147,7 +147,7 @@ defmodule OptimalEngine.Compliance.DSAR do
 
   defp list_skills(principal_id, tenant_id) do
     case Store.raw_query(
-           "SELECT skill_id, level, granted_at FROM principal_skills WHERE tenant_id = ?1 AND principal_id = ?2",
+           "SELECT skill_id, level, acquired_at FROM principal_skills WHERE tenant_id = ?1 AND principal_id = ?2 ORDER BY skill_id",
            [tenant_id, principal_id]
          ) do
       {:ok, rows} ->

@@ -105,6 +105,42 @@ defmodule OptimalEngine.Store do
   def txn_execute(txn, sql, params \\ [], opts \\ []),
     do: adapter().txn_execute(txn, sql, params, opts)
 
+  @doc """
+  Runs the rest of the transaction at READ COMMITTED on PostgreSQL: each
+  statement sees what was committed before it, not one snapshot. For a bulk
+  write across many tables (a workspace's rows deleted at once) that at
+  SERIALIZABLE meets every concurrent writer of those tables, and its rows
+  are its own: it still commits or rolls back whole, and deferred foreign keys
+  are still checked at the commit. SQLite's store runs one writer at a time,
+  so there it does nothing. Call it first in the transaction.
+  """
+  @spec txn_read_committed(term()) :: :ok | {:error, term()}
+  def txn_read_committed(txn) do
+    if selected?(OptimalEngine.Store.Postgres) do
+      sql = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+      with {:ok, _} <- OptimalEngine.Store.Postgres.txn_execute_native(txn, sql, []), do: :ok
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  Holds the row of `table` whose `column` is `key` until the transaction ends,
+  so a long transaction that rewrites it is not starved by writers of that row:
+  they wait for it instead of committing under it. SQLite's store runs one
+  writer at a time, so there it does nothing. Call it first in the transaction.
+  """
+  @spec txn_lock_row(term(), String.t(), String.t(), term()) :: :ok | {:error, term()}
+  def txn_lock_row(txn, table, column, key) do
+    if selected?(OptimalEngine.Store.Postgres) do
+      sql = ~s|SELECT 1 FROM "#{table}" WHERE "#{column}" = $1 FOR UPDATE|
+
+      with {:ok, _rows} <- OptimalEngine.Store.Postgres.txn_query_native(txn, sql, [key]), do: :ok
+    else
+      :ok
+    end
+  end
+
   def insert_chunks(chunks), do: adapter().insert_chunks(chunks)
 
   def insert_classifications(rows), do: adapter().insert_classifications(rows)

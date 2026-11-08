@@ -229,8 +229,8 @@ defmodule OptimalEngine.Store.CacheErasureTest do
       embed!("default", home.id, "#{ctx.doomed} embedded before the erasure")
       assert length(cache_files(ctx.dir)) == 1
 
-      {:ok, _} =
-        Store.raw_query(
+      :ok =
+        OptimalEngine.Test.StoreDDL.execute(
           """
           CREATE TRIGGER IF NOT EXISTS cache_erasure_test_poison BEFORE DELETE ON contexts
           WHEN old.id = 'failing-#{ctx.n}-#{count}'
@@ -239,7 +239,9 @@ defmodule OptimalEngine.Store.CacheErasureTest do
           []
         )
 
-      on_exit(fn -> Store.raw_query("DROP TRIGGER IF EXISTS cache_erasure_test_poison", []) end)
+      on_exit(fn ->
+        OptimalEngine.Test.StoreDDL.execute("DROP TRIGGER IF EXISTS cache_erasure_test_poison", [])
+      end)
 
       assert {:error, _} = Erasure.erase(principal)
 

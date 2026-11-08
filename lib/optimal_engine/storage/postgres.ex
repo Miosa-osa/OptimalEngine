@@ -69,9 +69,11 @@ defmodule OptimalEngine.Storage.Postgres do
             "json_type, json_array_length, json_each, json_group_array and json_valid run as " <>
             "PostgreSQL functions with SQLite's results (OptimalEngine.Store.Postgres." <>
             "SQLiteFunctions), the dialect renaming each call; json_each's value is text, and " <>
-            "a value bound to a parameter is a JSON string (bind JSON with json(?)). The " <>
-            "json_extract forms that order or compare by SQLite's types, and json_tree, " <>
-            "json_patch and the other functions no call site uses, stay refused",
+            "a value bound to a parameter is a JSON string (bind JSON with json(?)). " <>
+            "json_extract is SQLite's value when selected, orders against a number and " <>
+            "compares with a column or another json_extract as SQLite does; its other forms " <>
+            "that order or compare by SQLite's types, and json_tree, json_patch and the other " <>
+            "functions no call site uses, stay refused",
         refused_as:
           refused_by("a SQLite JSON function with no translation") ++
             [
@@ -81,6 +83,7 @@ defmodule OptimalEngine.Storage.Postgres do
               "json_extract ordered comparison",
               "json_extract compared to an expression",
               "json_extract compared to a non-text value",
+              "json_extract ordered against a non-number value",
               "json_extract in ORDER BY",
               "json_extract IN with an expression",
               "json_extract IN with a subquery"

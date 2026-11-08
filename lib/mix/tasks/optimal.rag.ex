@@ -82,7 +82,7 @@ defmodule Mix.Tasks.Optimal.Rag do
 
     if query == "" do
       Mix.shell().error(~s(Usage: mix optimal.rag "<query>" [options]))
-      System.halt(1)
+      exit({:shutdown, 1})
     end
 
     receiver = build_receiver(parsed)

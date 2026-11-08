@@ -4247,6 +4247,22 @@ defmodule OptimalEngine.SyncTest do
 
     def between_pages(_event, _measurements, _metadata, _config), do: :ok
 
+    defp replace_context(id, tenant, ws) do
+      insert =
+        "INTO contexts (id, tenant_id, workspace_id, title, content, created_at) " <>
+          "VALUES (?1, ?2, ?3, 'Paged 1 again', 'body', '2026-10-14T10:00:00Z')"
+
+      if Store.selected?(OptimalEngine.Store.Postgres) do
+        {:ok, _} =
+          Store.transaction(fn txn ->
+            {:ok, _} = Store.txn_execute(txn, "DELETE FROM contexts WHERE id = ?1", [id])
+            Store.txn_execute(txn, "INSERT " <> insert, [id, tenant, ws])
+          end)
+      else
+        {:ok, _} = Store.raw_query("INSERT OR REPLACE " <> insert, [id, tenant, ws])
+      end
+    end
+
     defp bundle_rows(path, table) do
       {:ok, [{_name, jsonl}]} =
         :erl_tar.extract(String.to_charlist(path), [
@@ -4277,13 +4293,10 @@ defmodule OptimalEngine.SyncTest do
         export_while_writing(
           "contexts",
           fn ->
-            # A re-ingest replaces the row, which gives it a new rowid after
-            # every row the export has read so far.
-            {:ok, _} =
-              Store.raw_query(
-                "INSERT OR REPLACE INTO contexts (id, tenant_id, workspace_id, title, content, created_at) VALUES (?1, ?2, ?3, 'Paged 1 again', 'body', '2026-10-14T10:00:00Z')",
-                [first, ctx.tenant, ctx.ws]
-              )
+            # A re-ingest replaces the row, which puts it after every row the
+            # export has read so far: SQLite's store writes INSERT OR REPLACE,
+            # PostgreSQL's a DELETE and an INSERT in one transaction.
+            replace_context(first, ctx.tenant, ctx.ws)
           end,
           fn -> WorkspaceBundle.export(ctx.tenant, ctx.ws, path) end
         )

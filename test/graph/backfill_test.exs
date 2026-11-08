@@ -68,11 +68,16 @@ defmodule OptimalEngine.Graph.BackfillTest do
              Backfill.run(workspace_id: ctx.ws, count: false)
 
     for {phase, sql, params} <- Backfill.page_statements(ctx.ws) do
-      {:ok, plan} = Store.raw_query("EXPLAIN QUERY PLAN " <> sql, params)
-      details = Enum.map_join(plan, "\n", &List.last/1)
       ref = if phase == :contexts, do: "c", else: "cl"
       table = if phase == :contexts, do: "contexts", else: "claims"
-      assert details =~ ~r/SEARCH #{ref} USING (COVERING )?INDEX idx_#{table}_workspace_id/, details
+
+      OptimalEngine.Test.IndexReads.assert_uses_index(
+        sql,
+        params,
+        "idx_#{table}_workspace_id",
+        ~r/SEARCH #{ref} USING (COVERING )?INDEX idx_#{table}_workspace_id/,
+        "workspace_id"
+      )
     end
   end
 

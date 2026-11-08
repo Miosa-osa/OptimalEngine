@@ -59,7 +59,7 @@ defmodule Mix.Tasks.Optimal.Decompose do
     else
       {:error, reason} ->
         Mix.shell().error("Decompose failed: #{inspect(reason)}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 

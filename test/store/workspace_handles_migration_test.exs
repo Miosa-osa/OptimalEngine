@@ -25,9 +25,7 @@ defmodule OptimalEngine.Store.WorkspaceHandlesMigrationTest do
 
     {71, _description, statements} = Enum.find(Migrations.all(), &(elem(&1, 0) == 71))
 
-    for _run <- 1..2, {_label, sql} <- statements do
-      {:ok, _} = Store.raw_query(sql, [])
-    end
+    for _run <- 1..2, do: OptimalEngine.Test.MigrationReplay.run!(statements)
 
     assert Enum.sort(Workspace.handles(id)) == ["handles-new-#{n}", "handles-old-#{n}"]
     assert {:ok, %{id: ^id}} = Workspace.get_by_handle("handles-old-#{n}", "default")

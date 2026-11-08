@@ -473,25 +473,8 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
       end)
     end
 
-    # Holds the single-writer Store for `ms` inside one transaction.
-    defp hold_store(ms) do
-      parent = self()
-
-      task =
-        Task.async(fn ->
-          Store.transaction(
-            fn _txn ->
-              send(parent, :holding)
-              Process.sleep(ms)
-              {:ok, :released}
-            end,
-            ms + 5_000
-          )
-        end)
-
-      assert_receive :holding, 2_000
-      task
-    end
+    # Stalls the Store for `ms`: no statement is answered until it ends.
+    defp hold_store(ms), do: OptimalEngine.Test.StoreStall.hold(ms)
 
     test "status and cancel answer busy, and a job that is not there is still not found", ctx do
       {:ok, view, :queued} = BundleJobs.submit_export(ctx.tenant, ctx.ws, %{})
@@ -620,7 +603,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
 
       {:ok, done} = BundleJobs.drain()
 
-      assert done.status == "cancelled"
+      assert done.status == "cancelled", inspect(done)
       assert context_ids(target) == [foreign]
       assert {:ok, _workspace} = Workspace.get(target)
       refute done.partial

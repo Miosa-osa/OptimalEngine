@@ -3182,7 +3182,9 @@ defmodule OptimalEngine.API.Router do
           active_memory_pool_id: id,
           request_intent: Map.get(body, "request_intent", "recall"),
           time_mode: Map.get(body, "time_mode", "current_valid"),
-          detail_depth: Map.get(body, "detail_depth", "summary"),
+          # The package's depth is a number (`ContextPackage.detail_depth`);
+          # anything else is the default depth, 1.
+          detail_depth: IntParam.parse(Map.get(body, "detail_depth"), 1, positive: true),
           limit: parse_optional_positive_int(Map.get(body, "limit"))
         ]
         |> put_governed_grant(conn, body, "allowed_partitions", :allowed_partitions)
@@ -6045,7 +6047,7 @@ defmodule OptimalEngine.API.Router do
     JOIN contexts c ON c.id = e1.context_id AND c.workspace_id = ?1 AND c.tenant_id = ?2
     WHERE e1.name IS NOT NULL AND e2.name IS NOT NULL
     GROUP BY e1.name, e2.name
-    HAVING shared >= 1
+    HAVING COUNT(*) >= 1
     ORDER BY shared DESC, e1.name, e2.name
     LIMIT 800
     """

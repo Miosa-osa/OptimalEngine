@@ -649,13 +649,13 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
       without_authority_key()
 
       :ok =
-        Store.raw_execute(
+        OptimalEngine.Test.StoreDDL.execute(
           "ALTER TABLE authority_action_steps RENAME TO authority_action_steps_hidden",
           []
         )
 
       on_exit(fn ->
-        Store.raw_execute(
+        OptimalEngine.Test.StoreDDL.execute(
           "ALTER TABLE authority_action_steps_hidden RENAME TO authority_action_steps",
           []
         )
@@ -695,7 +695,7 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
   describe "atomicity" do
     defp refuse_evidence(kind) do
       :ok =
-        Store.raw_execute(
+        OptimalEngine.Test.StoreDDL.execute(
           """
           CREATE TRIGGER rekey_test_refuses
           BEFORE INSERT ON authority_evidence
@@ -705,7 +705,9 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
           []
         )
 
-      on_exit(fn -> Store.raw_execute("DROP TRIGGER IF EXISTS rekey_test_refuses", []) end)
+      on_exit(fn ->
+        OptimalEngine.Test.StoreDDL.execute("DROP TRIGGER IF EXISTS rekey_test_refuses", [])
+      end)
     end
 
     test "if the record cannot be written, no row moves and no re-key exists",

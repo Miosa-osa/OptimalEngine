@@ -28,7 +28,7 @@ defmodule Mix.Tasks.Optimal.Health do
   @impl Mix.Task
   def run(args) do
     Mix.Task.run("app.start")
-    if main(args) != :ok, do: System.halt(1)
+    if main(args) != :ok, do: exit({:shutdown, 1})
   end
 
   # The task without Mix: `bin/optimal maintenance` runs it in a release

@@ -181,12 +181,12 @@ defmodule Mix.Tasks.Optimal.Grep do
 
         {:error, reason} ->
           Mix.shell().error("grep failed: #{inspect(reason)}")
-          System.halt(1)
+          exit({:shutdown, 1})
       end
     else
       {:error, msg} ->
         Mix.shell().error(msg)
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 

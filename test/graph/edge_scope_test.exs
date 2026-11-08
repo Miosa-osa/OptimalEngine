@@ -417,7 +417,7 @@ defmodule OptimalEngine.Graph.EdgeScopeTest do
 
     defp migrate! do
       {_version, _description, statements} = migration()
-      for {_label, sql} <- statements, do: {:ok, _} = Store.raw_query(sql, [])
+      OptimalEngine.Test.MigrationReplay.run!(statements)
     end
 
     defp graph_rows(ids) do
@@ -801,10 +801,13 @@ defmodule OptimalEngine.Graph.EdgeScopeTest do
       # Every write of an edge from this entity fails, as a full disk or a
       # locked store would make it.
       trigger = "edge_scope_fail_#{ctx.n}"
-      on_exit(fn -> Store.raw_query("DROP TRIGGER IF EXISTS #{trigger}", []) end)
 
-      {:ok, _} =
-        Store.raw_query(
+      on_exit(fn ->
+        OptimalEngine.Test.StoreDDL.execute("DROP TRIGGER IF EXISTS #{trigger}", [])
+      end)
+
+      :ok =
+        OptimalEngine.Test.StoreDDL.execute(
           """
           CREATE TRIGGER #{trigger} BEFORE INSERT ON graph_edges
           WHEN NEW.source_id = 'Boom#{ctx.n}'
@@ -819,7 +822,7 @@ defmodule OptimalEngine.Graph.EdgeScopeTest do
       assert failed > 0
       assert {:ok, %{backfill_needed: true}} = Graph.backfill_status(ctx.own)
 
-      {:ok, _} = Store.raw_query("DROP TRIGGER #{trigger}", [])
+      :ok = OptimalEngine.Test.StoreDDL.execute("DROP TRIGGER #{trigger}", [])
 
       assert {:ok, %{failed_edges: 0, recorded: true}} = Graph.backfill(workspace_id: ctx.own)
       assert {:ok, %{backfill_needed: false}} = Graph.backfill_status(ctx.own)

@@ -57,17 +57,26 @@ defmodule OptimalEngine.Store.Dialect do
   - Compared to an integer literal, it matches the JSON number, and for 1 and 0
     also `true` and `false`, as SQLite does.
   - `IS NULL` and `IS NOT NULL` treat a JSON `null` as NULL.
-  - Compared to a column, the comparison runs on text, as SQLite's text
-    affinity does.
-  - Anywhere else (a select list, `COALESCE`, a `CASE` branch, `ILIKE`) it is
-    the value as text in the `C` collation: exact for JSON strings and nulls;
-    a JSON number or boolean comes back as its text.
+  - Compared to a column, on either side of `=`, `!=` or `<>`, the comparison
+    runs on text, as SQLite's text affinity does.
+  - Compared to another `json_extract`, both are `jsonb`: by type and value,
+    as SQLite compares two values without affinity.
+  - Ordered (`<`, `<=`, `>`, `>=`) against a number literal or a placeholder,
+    which must be bound to a number, a JSON number or boolean compares as a
+    number and any text sorts after it, as on SQLite.
+  - A whole item of a query's own select list (or of its `GROUP BY`) is the
+    JSON value, and the store returns SQLite's value from it: a number as a
+    number, `true` and `false` as 1 and 0, an object or array as JSON text
+    (`translate/1` names those columns).
+  - Anywhere else (a subquery's select list, `COALESCE`, a `CASE` branch,
+    `ILIKE`, `GLOB`) it is the value as text in the `C` collation: exact for
+    JSON strings and nulls; a JSON number or boolean comes back as its text.
 
-  An ordered comparison (`<`, `>`, `BETWEEN`), an `ORDER BY` term, a
-  comparison to another expression, and `json_extract` on the right of a
-  comparison are refused: each orders or compares by SQLite's types, which the
-  text does not keep. An object or array comes back as PostgreSQL's JSON text,
-  which decodes to the same value as SQLite's.
+  `BETWEEN`, an ordered comparison to anything but a number, an `ORDER BY` term, a
+  comparison to another expression, and `json_extract` on the right of any
+  other comparison are refused: each orders or compares by SQLite's types,
+  which the text does not keep. An object or array comes back as PostgreSQL's
+  JSON text, which decodes to the same value as SQLite's.
 
   ## What is refused
 
@@ -96,7 +105,13 @@ defmodule OptimalEngine.Store.Dialect do
            | :unterminated_literal}
 
   @typedoc "What a translated statement needs from its parameters."
-  @type requirements :: %{text_params: [pos_integer()], params: :all | [pos_integer()]}
+  @type requirements :: %{
+          text_params: [pos_integer()],
+          number_params: [pos_integer()],
+          json_columns: [non_neg_integer()],
+          param_columns: [{non_neg_integer(), pos_integer()}],
+          params: :all | [pos_integer()]
+        }
 
   # SQLite functions with no PostgreSQL counterpart in
   # OptimalEngine.Store.Postgres.SQLiteFunctions; the rest are renamed to it.
@@ -164,7 +179,7 @@ defmodule OptimalEngine.Store.Dialect do
   @placeholder "\\$\\d+"
   @identifier ~S'(?:[A-Za-z_][A-Za-z0-9_]*|"[^"]+")(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|"[^"]+"))?'
 
-  @order_by_end ~r/\A(LIMIT|OFFSET|FETCH|FOR|UNION|EXCEPT|INTERSECT|ROWS|RANGE|GROUPS|WINDOW|RETURNING)\b/i
+  @order_by_end ~r/\A(LIMIT|OFFSET|FETCH|FOR|UNION|EXCEPT|INTERSECT|ROWS|RANGE|GROUPS|WINDOW|RETURNING|ON\s+CONFLICT)\b/i
 
   # PRAGMA defer_foreign_keys holds every foreign key check until the commit,
   # for the rest of the transaction; the store's foreign keys are deferrable,
@@ -184,8 +199,13 @@ defmodule OptimalEngine.Store.Dialect do
 
   @doc """
   Translates one SQLite statement and says what its parameters must be:
-  `text_params` lists the placeholders a `json_extract` is compared to, which
-  must be bound to text.
+  `text_params` lists the placeholders a `json_extract` is compared to for
+  equality, which must be bound to text; `number_params` those it is ordered
+  against (`<`, `>`, `<=`, `>=`), which must be bound to a number;
+  `json_columns` the result columns (from 0) that are a `json_extract` of the
+  query's own select list, which hold JSON text for the store to read as
+  SQLite's value; `param_columns` the result columns that are a placeholder
+  itself, `{position, placeholder}`, which SQLite returns as the value bound.
 
   SQLite ignores a numbered parameter the statement never names, and
   PostgreSQL cannot type one, so the placeholders are renumbered without
@@ -195,8 +215,12 @@ defmodule OptimalEngine.Store.Dialect do
   @spec translate(String.t()) :: {:ok, String.t(), requirements()} | refusal()
   def translate(sql) when is_binary(sql) do
     case Regex.run(@defer_foreign_keys, sql) do
-      [_, setting] -> {:ok, deferred(setting), %{text_params: [], params: :all}}
-      nil -> translate_statement(sql)
+      [_, setting] ->
+        {:ok, deferred(setting),
+         %{text_params: [], number_params: [], json_columns: [], param_columns: [], params: :all}}
+
+      nil ->
+        translate_statement(sql)
     end
   end
 
@@ -224,14 +248,26 @@ defmodule OptimalEngine.Store.Dialect do
          {:ok, masked} <- rewrite_placeholders(masked, rewritten),
          {:ok, masked, text_params} <- rewrite_json_extract(masked, literals),
          :ok <- reject_leftover_json_extract(masked) do
-      {masked, requirements} = without_gaps(masked, Enum.sort(Enum.uniq(text_params)))
+      {marked, text_params} = Enum.split_with(Enum.uniq(text_params), &is_tuple/1)
+      number_params = for {:number, index} <- marked, do: index
+      json_columns = Enum.sort(for {:json_column, position} <- marked, do: position)
+
+      {masked, requirements} =
+        without_gaps(masked, Enum.sort(text_params), Enum.sort(number_params))
+
+      requirements =
+        Map.merge(requirements, %{
+          json_columns: json_columns,
+          param_columns: selected_params(masked)
+        })
+
       {:ok, unmask(masked, literals), requirements}
     end
   end
 
   @dollar ~r/\$(\d+)(?!\d)/
 
-  defp without_gaps(masked, text_params) do
+  defp without_gaps(masked, text_params, number_params) do
     used =
       @dollar
       |> Regex.scan(masked, capture: :all_but_first)
@@ -240,7 +276,7 @@ defmodule OptimalEngine.Store.Dialect do
       |> Enum.sort()
 
     if used == Enum.to_list(1..length(used)//1) do
-      {masked, %{text_params: text_params, params: :all}}
+      {masked, %{text_params: text_params, number_params: number_params, params: :all}}
     else
       numbers = used |> Enum.with_index(1) |> Map.new()
 
@@ -249,7 +285,12 @@ defmodule OptimalEngine.Store.Dialect do
           "$#{Map.fetch!(numbers, String.to_integer(n))}"
         end)
 
-      {renumbered, %{text_params: Enum.map(text_params, &Map.fetch!(numbers, &1)), params: used}}
+      {renumbered,
+       %{
+         text_params: Enum.map(text_params, &Map.fetch!(numbers, &1)),
+         number_params: Enum.map(number_params, &Map.fetch!(numbers, &1)),
+         params: used
+       }}
     end
   end
 
@@ -425,7 +466,7 @@ defmodule OptimalEngine.Store.Dialect do
                  "(?<![\\w.\"$])(" <>
                    Enum.join(
                      ~w(json_set json_insert json_replace json_remove json_object json_array
-                        json_group_array json_valid group_concat char) ++ Map.keys(@renamed),
+                        json_group_array json_valid group_concat char max min) ++ Map.keys(@renamed),
                      "|"
                    ) <> ")\\s*\\(",
                  "i"
@@ -583,6 +624,17 @@ defmodule OptimalEngine.Store.Dialect do
   defp sqlite_call("strftime", [format], _raw),
     do: {:ok, "sqlite_strftime(#{as_text(format)}, 'now')"}
 
+  # max and min of one argument are the aggregates. Of several, SQLite's
+  # scalar max and min: NULL when any argument is NULL, which PostgreSQL's
+  # GREATEST and LEAST, which skip NULLs, are not.
+  defp sqlite_call(name, [arg], _raw) when name in ~w(max min), do: {:ok, "#{name}(#{arg})"}
+
+  defp sqlite_call(name, [_, _ | _] = args, _raw) when name in ~w(max min) do
+    any_null = Enum.map_join(args, " OR ", &"(#{&1}) IS NULL")
+    function = if name == "max", do: "GREATEST", else: "LEAST"
+    {:ok, "(CASE WHEN #{any_null} THEN NULL ELSE #{function}(#{Enum.join(args, ", ")}) END)"}
+  end
+
   defp sqlite_call(name, args, _raw) when is_map_key(@renamed, name) and args != [],
     do: {:ok, "#{@renamed[name]}(#{Enum.map_join(args, ", ", &as_text/1)})"}
 
@@ -620,9 +672,11 @@ defmodule OptimalEngine.Store.Dialect do
   # regular expression: * is any text, ? one character, [...] a class, and
   # [^...] its complement.
   @glob_operand "(?:#{@sentinel}|\\?\\d*|#{@identifier})"
+  # The value GLOB matches may also be a json_extract of a column: its text.
+  @glob_value "(?:json_extract\\(\\s*#{@identifier}\\s*,\\s*#{@sentinel}\\s*\\)|#{@glob_operand})"
   defp rewrite_glob(masked) do
     Regex.replace(
-      ~r/(?<![\w."])(#{@glob_operand})\s+(NOT\s+)?GLOB\s+(#{@glob_operand})(?![\w(.])/i,
+      ~r/(?<![\w."])(#{@glob_value})\s+(NOT\s+)?GLOB\s+(#{@glob_operand})(?![\w(.])/i,
       masked,
       fn _whole, value, negated, pattern ->
         match = "(CAST((#{value}) AS text) ~ sqlite_glob_regex(CAST((#{pattern}) AS text)))"
@@ -636,8 +690,19 @@ defmodule OptimalEngine.Store.Dialect do
   # REAL are eight bytes, PostgreSQL's BIGINT and DOUBLE PRECISION. SQLite's
   # INDEXED BY and NOT INDEXED pin a plan; PostgreSQL has no index hints and
   # plans on its own, so the clause is dropped.
+  # SQLite's LIMIT -1 is no limit (PostgreSQL's LIMIT ALL), and its CROSS JOIN
+  # with an ON clause is an inner join that keeps the join order, which
+  # PostgreSQL spells JOIN.
   defp rewrite_simple(masked) do
     masked
+    |> then(&Regex.replace(~r/\bLIMIT\s+-\s*1\b/i, &1, "LIMIT ALL"))
+    |> then(
+      &Regex.replace(
+        ~r/\bCROSS\s+JOIN\s+(#{@identifier}(?:\s+(?:AS\s+)?(?!ON\b)[A-Za-z_][A-Za-z0-9_]*)?)\s+ON\b/i,
+        &1,
+        "JOIN \\1 ON"
+      )
+    )
     |> then(&Regex.replace(~r/\s+(?:INDEXED\s+BY\s+#{@identifier}|NOT\s+INDEXED)\b/i, &1, ""))
     |> then(&Regex.replace(~r/\bIFNULL\s*\(/i, &1, "COALESCE("))
     |> then(&Regex.replace(~r/\bAS\s+INTEGER\s*\)/i, &1, "AS BIGINT)"))
@@ -730,7 +795,7 @@ defmodule OptimalEngine.Store.Dialect do
   # PostgreSQL spells that IS [NOT] DISTINCT FROM for a placeholder, a string
   # or a number. IS NULL, IS TRUE and IS FALSE mean the same on both.
   @is_value Regex.compile!(
-              "\\bIS\\s+(NOT\\s+)?(\\?\\d*|#{@sentinel}|[+-]?\\d+(?:\\.\\d+)?(?![\\w.]))",
+              "\\bIS\\s+(NOT\\s+)?(\\?\\d*|#{@sentinel}|[+-]?\\d+(?:\\.\\d+)?(?![\\w.])|[A-Za-z_][A-Za-z0-9_]*\\.[A-Za-z_][A-Za-z0-9_]*)",
               "i"
             )
 
@@ -882,8 +947,8 @@ defmodule OptimalEngine.Store.Dialect do
         column = slice(masked, column)
 
         with {:ok, keys} <- json_path(literal_text(slice(masked, path), literals)),
-             :ok <- reject_right_operand(before),
-             {:ok, replacement, rest, used} <- json_context(column, keys, rest) do
+             {:ok, replacement, rest, used} <-
+               json_operand(column, keys, before, rest, done, literals) do
           rewrite_json_extract(rest, literals, [replacement, before | done], used ++ params)
         end
     end
@@ -906,6 +971,25 @@ defmodule OptimalEngine.Store.Dialect do
 
   defp json_path(_literal), do: {:error, {:unsupported, "json_extract path"}}
 
+  @column_equals Regex.compile!(
+                   "(?<![\\w.$\"])(?!(?:AND|OR|NOT|WHERE|ON|WHEN|THEN|ELSE|SET)\\b)#{@identifier}\\s*(=|!=|<>)\\s*\\z",
+                   "i"
+                 )
+
+  # A json_extract compared for equality to a column on its left is the
+  # column's text affinity applied to the value: its text. Anywhere else on the
+  # right of a comparison it is refused.
+  defp json_operand(column, keys, before, rest, done, literals) do
+    if Regex.match?(@column_equals, before) do
+      with :ok <- operand_ends(rest), do: {:ok, text_value(column, keys), rest, []}
+    else
+      with :ok <- reject_right_operand(before) do
+        prefix = IO.iodata_to_binary(Enum.reverse([before | done]))
+        json_context(column, keys, rest, prefix, literals)
+      end
+    end
+  end
+
   defp reject_right_operand(before) do
     if Regex.match?(~r/([=<>!]|\bIS(\s+NOT)?|\bIN|\bFROM)\s*\(?\s*\z/i, before) and
          not Regex.match?(~r/\bSELECT\s*\z/i, before),
@@ -925,12 +1009,19 @@ defmodule OptimalEngine.Store.Dialect do
   @equality Regex.compile!("\\A\\s*(==|=|!=|<>)\\s*(#{@operand})", "i")
   @in_list ~r/\A\s*(NOT\s+)?IN\s*\(/i
   @ordered ~r/\A\s*(<=|>=|<|>|(NOT\s+)?BETWEEN\b)/i
+  @ordered_number Regex.compile!(
+                    "\\A\\s*(<=|>=|<|>)\\s*(#{@placeholder}|[+-]?\\d+(?:\\.\\d+)?(?![\\w.]))"
+                  )
   @other_comparison ~r/\A\s*(==|=|!=|<>|IS\b)/i
+  @json_pair Regex.compile!(
+               "\\A\\s*(==|=|!=|<>)\\s*json_extract\\(\\s*(#{@identifier})\\s*,\\s*(#{@sentinel})\\s*\\)",
+               "i"
+             )
   @number ~r/\A[+-]?\d+(\.\d+)?\z/
-  @operand_end ~r/\A\s*(\z|\)|,|;|(AND|OR|THEN|ELSE|END|WHEN|ORDER|GROUP|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT|HAVING|WINDOW|RETURNING)\b)/i
+  @operand_end ~r/\A\s*(\z|\)|,|;|(AND|OR|WHERE|FROM|THEN|ELSE|END|WHEN|ORDER|GROUP|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT|HAVING|WINDOW|RETURNING)\b)/i
   @bound Regex.compile!("\\A(?:#{@sentinel}|#{@placeholder})\\z")
 
-  defp json_context(column, keys, rest) do
+  defp json_context(column, keys, rest, prefix, literals) do
     jsonb = jsonb_value(column, keys)
 
     cond do
@@ -947,6 +1038,17 @@ defmodule OptimalEngine.Store.Dialect do
           {:ok, "#{jsonb} #{comparison} #{rhs}", tail(rest, whole), used}
         end
 
+      match = Regex.run(@json_pair, rest) ->
+        # Two json_extract values compare as SQLite compares them, by type and
+        # value: as jsonb.
+        [whole, operator, other, path] = match
+        operator = if operator == "==", do: "=", else: operator
+
+        with {:ok, other_keys} <- json_path(literal_text(path, literals)),
+             :ok <- operand_ends(tail(rest, whole)) do
+          {:ok, "#{jsonb} #{operator} #{jsonb_value(other, other_keys)}", tail(rest, whole), []}
+        end
+
       match = Regex.run(@equality, rest) ->
         [whole, operator, operand] = match
         operator = if operator == "==", do: "=", else: operator
@@ -959,16 +1061,109 @@ defmodule OptimalEngine.Store.Dialect do
         [whole | negated] = match
         in_list(column, keys, negated not in [[], [""]], tail(rest, whole))
 
+      match = Regex.run(@ordered_number, rest) ->
+        [whole, operator, operand] = match
+
+        with :ok <- operand_ends(tail(rest, whole)) do
+          ordered(column, keys, operator, operand, tail(rest, whole))
+        end
+
       Regex.match?(@ordered, rest) ->
         {:error, {:unsupported, "json_extract ordered comparison"}}
 
       Regex.match?(@other_comparison, rest) ->
         {:error, {:unsupported, "json_extract compared to an expression"}}
 
+      position = whole_item(prefix, rest) ->
+        used = if is_integer(position), do: [{:json_column, position}], else: []
+        {:ok, jsonb, rest, used}
+
       true ->
         {:ok, text_value(column, keys), rest, []}
     end
   end
+
+  @item_end ~r/\A\s*(\z|,|\)|;|(FROM|AS|HAVING|ORDER|LIMIT|UNION|EXCEPT|INTERSECT|WINDOW)\b)/i
+  @clause_keyword ~r/\b(SELECT|FROM|WHERE|ON|JOIN|GROUP|ORDER|HAVING|SET|VALUES|CASE|WHEN|THEN|ELSE|END|AND|OR|NOT|LIMIT|OFFSET|RETURNING|BY|IN|IS|LIKE|ILIKE|UNION|EXCEPT|INTERSECT|DISTINCT|ALL)\b/i
+  @balanced ~r/\([^()]*\)/
+
+  # A whole item of a query's own select list, or a term of its GROUP BY: its
+  # value is the JSON value, so the row holds what SQLite's json_extract
+  # returns (a number as a number, true and false as 1 and 0, an object or
+  # array as JSON text; the store converts it,
+  # `OptimalEngine.Store.Postgres.Affinity.normalize_json/1`). Only the
+  # outermost query of a SELECT: a subquery's value or an INSERT's is compared
+  # or stored, and stays text.
+  #
+  # The select-list item's position (from 0), `:group` for a GROUP BY term, or
+  # nil. An item after a `*` has no position the statement says, so it stays
+  # text.
+  defp whole_item(prefix, rest) do
+    with true <- Regex.match?(@item_end, rest),
+         true <- Regex.match?(~r/\A\s*(SELECT|WITH)\b/i, prefix),
+         {:ok, scope} <- top_level(prefix) do
+      item_position(scope)
+    else
+      _ -> nil
+    end
+  end
+
+  # The query's own select-list items that are a placeholder: PostgreSQL types
+  # an untyped parameter as text, and SQLite returns the value bound.
+  defp selected_params(masked) do
+    for [{start, length}, {n_start, n_length}] <- Regex.scan(@dollar, masked, return: :index),
+        position <- [
+          whole_item(
+            binary_part(masked, 0, start),
+            binary_part(masked, start + length, byte_size(masked) - start - length)
+          )
+        ],
+        is_integer(position),
+        do: {position, String.to_integer(binary_part(masked, n_start, n_length))}
+  end
+
+  # The prefix with closed groups and CASE expressions removed, when no
+  # parenthesis is left open.
+  defp top_level(prefix) do
+    flat = prefix |> flatten_groups() |> String.replace(~r/\bCASE\b.*?\bEND\b/is, "_")
+    if String.contains?(flat, "("), do: :nested, else: {:ok, flat}
+  end
+
+  defp flatten_groups(text) do
+    flattened = Regex.replace(@balanced, text, "_")
+    if flattened == text, do: text, else: flatten_groups(flattened)
+  end
+
+  defp item_position(scope) do
+    case Regex.scan(@clause_keyword, scope, return: :index) |> List.last() do
+      nil ->
+        nil
+
+      [{start, length} | _] ->
+        keyword = scope |> binary_part(start, length) |> String.upcase()
+        after_keyword = binary_part(scope, start + length, byte_size(scope) - start - length)
+        next_item? = Regex.match?(~r/\A(\s*|.*,\s*)\z/s, after_keyword)
+
+        cond do
+          keyword in ["SELECT", "DISTINCT", "ALL"] and next_item? and
+            select_keyword?(scope, keyword, start) and not String.contains?(after_keyword, "*") ->
+            after_keyword |> :binary.matches(",") |> length()
+
+          keyword == "BY" and next_item? and
+              Regex.match?(~r/\bGROUP\s+\z/i, binary_part(scope, 0, start)) ->
+            :group
+
+          true ->
+            nil
+        end
+    end
+  end
+
+  # DISTINCT and ALL count only right after SELECT.
+  defp select_keyword?(_scope, "SELECT", _start), do: true
+
+  defp select_keyword?(scope, _keyword, start),
+    do: Regex.match?(~r/\bSELECT\s+\z/i, binary_part(scope, 0, start))
 
   # The compared value must be the whole right side: `= ?1 || 'x'` compares
   # to an expression.
@@ -1000,6 +1195,33 @@ defmodule OptimalEngine.Store.Dialect do
         # A column: SQLite applies the column's text affinity to the value.
         {:ok, "#{text_value(column, keys)} #{operator} #{operand}", rest, []}
     end
+  end
+
+  # Ordered against a number, as SQLite orders its values: NULL is unknown, a
+  # JSON number or boolean (1 or 0) compares as a number, and text (a string,
+  # object or array) sorts after every number.
+  defp ordered(column, keys, operator, operand, rest) do
+    jsonb = jsonb_value(column, keys)
+
+    {rhs, used} =
+      case Integer.parse(String.trim_leading(operand, "$")) do
+        {index, ""} when binary_part(operand, 0, 1) == "$" ->
+          {"(#{operand}::text)::numeric", [{:number, index}]}
+
+        _ ->
+          {operand, []}
+      end
+
+    text_result = if operator in [">", ">="], do: "TRUE", else: "FALSE"
+
+    sql =
+      "(CASE WHEN #{jsonb} IS NULL THEN NULL " <>
+        "WHEN jsonb_typeof(#{jsonb}) = 'number' THEN (#{jsonb} #>> '{}')::numeric #{operator} #{rhs} " <>
+        "WHEN jsonb_typeof(#{jsonb}) = 'boolean' THEN " <>
+        "(CASE WHEN #{jsonb} = 'true'::jsonb THEN 1 ELSE 0 END) #{operator} #{rhs} " <>
+        "ELSE #{text_result} END)"
+
+    {:ok, sql, rest, used}
   end
 
   # An integer literal matches the JSON number, and 1 and 0 also match true
