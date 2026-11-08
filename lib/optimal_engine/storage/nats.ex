@@ -231,7 +231,11 @@ defmodule OptimalEngine.Storage.NATS do
     end
   end
 
-  defp connect_options(config) do
+  @doc false
+  # The CONNECT options for `config`, the credential included; the long-lived
+  # client (`NATS.Connection`) sends the same ones.
+  @spec connect_options(map()) :: map()
+  def connect_options(config) do
     base = %{
       verbose: false,
       pedantic: false,
