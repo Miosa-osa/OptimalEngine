@@ -99,7 +99,6 @@ defmodule OptimalEngine.API.SyncAPI do
     if is_binary(workspace_id) do
       case Sync.enable(tenant(conn), workspace_id, Actor.of(conn, body), label: body["label"]) do
         {:ok, result} -> json(conn, 200, Map.put(result, :label, Sync.label()))
-        {:error, {:unsupported, message}} -> error(conn, 501, message)
         {:error, reason} -> error(conn, 422, reason)
       end
     else
@@ -113,7 +112,6 @@ defmodule OptimalEngine.API.SyncAPI do
 
     case Sync.add_peer(tenant(conn), attrs, Actor.of(conn, body)) do
       {:ok, peer} -> json(conn, 201, peer)
-      {:error, {:unsupported, message}} -> error(conn, 501, message)
       {:error, reason} -> error(conn, 422, reason)
     end
   end

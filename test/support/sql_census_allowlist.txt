@@ -114,6 +114,7 @@ refused	SELECT c.id, c.uri, c.type, c.path, c.title, c.l0_abstract, c.l1_overvie
 refused	SELECT c.id, c.uri, c.type, c.path, c.title, c.l0_abstract, c.l1_overview, c.content, c.mode, c.genre, c.signal_type, c.format, c.structure, c.node, c.sn_ratio, c.entities, c.created_at, c.modified_at, c.valid_from, c.valid_until, c.supersedes, c.routed_to, c.metadata, c.workspace_id, -bm25(contexts_fts) as bm25_rank FROM contexts_fts CROSS JOIN contexts c ON c.id = contexts_fts.id WHERE contexts_fts MATCH ? AND c.archived_at IS NULL AND c.workspace_id = ? ORDER BY bm25_rank DESC, c.uri, c.id LIMIT ? OFFSET ?
 refused	SELECT ce.chunk_id, ce.tenant_id, ce.vector, i.intent, ch.signal_id, (SELECT GROUP_CONCAT(e.name, '…') FROM entities e WHERE e.context_id = ch.signal_id) AS entity_names FROM chunk_embeddings ce JOIN chunks ch ON ch.id = ce.chunk_id LEFT JOIN intents i ON i.chunk_id = ce.chunk_id WHERE ce.tenant_id = ?
 refused	SELECT changes()
+refused	SELECT context_id, hex(embedding), dimensions FROM vectors WHERE workspace_id = ? ORDER BY context_id
 refused	SELECT contexts_fts.id, -bm25(contexts_fts) AS score FROM contexts_fts WHERE contexts_fts MATCH ? ORDER BY score DESC, N
 refused	SELECT correlation_id, workspace_id, MIN(occurred_at), MAX(occurred_at), COUNT(*), group_concat(stage), MAX(agent), MAX(action) FROM authority_action_steps WHERE tenant_id = ? AND workspace_id IN (?) GROUP BY correlation_id, workspace_id ORDER BY MAX(occurred_at) DESC LIMIT N
 refused	SELECT envelope_slug, metadata, score, pushed_at FROM surfacing_events WHERE workspace_id = ? AND category = '…' AND datetime(pushed_at) >= datetime('…') ORDER BY pushed_at DESC LIMIT ? OFFSET ?
@@ -210,6 +211,7 @@ refused	SELECT m.id, m.tenant_id, m.workspace_id, m.content, m.is_static, m.is_f
 refused	SELECT m.id, m.tenant_id, m.workspace_id, m.content, m.is_static, m.is_forgotten, m.forget_after, m.forget_reason, m.version, m.parent_memory_id, m.root_memory_id, m.is_latest, m.citation_uri, m.source_chunk_id, m.audience, m.metadata, m.created_at, m.updated_at FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid WHERE memories_fts MATCH ? AND m.workspace_id = ? AND m.tenant_id = ? AND m.is_forgotten = N AND m.is_latest = N ORDER BY bm25(memories_fts) ASC, m.id LIMIT ? OFFSET ?
 refused	SELECT m.name FROM sqlite_master m WHERE m.type = '…' AND m.sql NOT LIKE '…' AND EXISTS ( SELECT N FROM pragma_index_list(m.name) il JOIN pragma_index_info(il.name) ii WHERE ii.seqno = N AND ii.name = ? )
 refused	SELECT m.name, c.name FROM sqlite_master m, pragma_table_info(m.name) c WHERE m.type = '…' AND EXISTS (SELECT N FROM pragma_table_info(m.name) w WHERE w.name = '…') ORDER BY m.name, c.name
+refused	SELECT memory_id, model, content_hash, hex(embedding) FROM memory_embeddings WHERE workspace_id = ? ORDER BY memory_id, model
 refused	SELECT name FROM pragma_table_info(?) ORDER BY cid
 refused	SELECT name FROM sqlite_master WHERE type = '…'
 refused	SELECT name FROM sqlite_master WHERE type = '…' AND name = ?
@@ -513,6 +515,8 @@ rejected	UPDATE txn_test_N SET val = '…' WHERE id = ?
 rejected	UPDATE txn_test_N SET val = ? WHERE id = N
 rejected	UPDATE vectors SET tenant_id = (SELECT c.tenant_id FROM contexts c WHERE c.id = vectors.context_id), workspace_id = (SELECT c.workspace_id FROM contexts c WHERE c.id = vectors.context_id) WHERE EXISTS ( SELECT N FROM contexts c WHERE c.id = vectors.context_id AND (c.tenant_id IS NOT vectors.tenant_id OR c.workspace_id IS NOT vectors.workspace_id) )
 rejected	WITH ranked AS ( SELECT id, ROW_NUMBER() OVER ( PARTITION BY tenant_id, workspace_id, content ORDER BY modified_at DESC, created_at DESC, id DESC ) AS duplicate_rank FROM contexts WHERE archived_at IS NULL AND trim(content) <> '…' AND (? IS NULL OR (tenant_id = ? AND workspace_id = ?)) ) SELECT id FROM ranked WHERE duplicate_rank > N
+unordered	SELECT "…" FROM "…" WHERE "…" = ? AND "…" = ? AND "…" IS ? LIMIT N
+unordered	SELECT "…" FROM "…" WHERE "…" = ? AND "…" IS ? LIMIT N
 unordered	SELECT "…" FROM "…" WHERE "…" = ? LIMIT N
 unordered	SELECT "…", "…" FROM "…" WHERE "…" = ? AND "…" IS ? LIMIT N
 unordered	SELECT "…", "…" FROM "…" WHERE "…" = ? LIMIT N

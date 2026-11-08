@@ -923,7 +923,7 @@ defmodule OptimalEngine.Sync.Gate do
           spec.partitions && non_empty_json("partition_ids"),
           spec.meta && metadata_candidate(spec.meta),
           spec.class &&
-            "(#{spec.class} IS NOT NULL AND lower(#{spec.class}) NOT IN ('', 'internal', 'public'))"
+            "(#{spec.class} IS NOT NULL AND #{Lineage.ascii_lower_sql(spec.class)} NOT IN ('', 'internal', 'public'))"
         ],
         &(&1 in [nil, false])
       )
@@ -959,8 +959,8 @@ defmodule OptimalEngine.Sync.Gate do
     quoted = quote_name(column)
 
     "(#{quoted} LIKE '%security_labels%' OR #{quoted} LIKE '%partition_ids%' OR " <>
-      "(#{Lineage.backslash_sql(quoted)} AND json_valid(#{quoted}) AND " <>
-      "EXISTS (SELECT 1 FROM json_each(#{quoted}) WHERE key IN ('security_labels', 'partition_ids'))))"
+      "(#{Lineage.backslash_sql(quoted)} AND #{Lineage.json_fn("json_valid")}(#{quoted}) AND " <>
+      "EXISTS (SELECT 1 FROM #{Lineage.json_fn("json_each")}(#{quoted}) WHERE key IN ('security_labels', 'partition_ids'))))"
   end
 
   # The labels and partitions of a metadata column as a small JSON object, which
@@ -970,6 +970,27 @@ defmodule OptimalEngine.Sync.Gate do
   # unresolved: SQLite reads the first of two, `Jason` the last, and a row must
   # not pass as unlabelled because the two disagree.
   defp metadata_labels_sql(column) do
+    if Lineage.json_fn("json_each") == "json_each",
+      do: sqlite_metadata_labels_sql(column),
+      else: postgres_metadata_labels_sql(column)
+  end
+
+  # json_object keeps the JSON value json_extract gives (an array stays an
+  # array, a string a string); oe_json_raw gives the member as json, which
+  # json_build_object keeps the same way.
+  defp postgres_metadata_labels_sql(column) do
+    quoted = quote_name(column)
+
+    field = fn key ->
+      "CASE WHEN (SELECT count(*) FROM oe_json_each(#{quoted}) WHERE key = '#{key}') > 1 THEN to_json(0) " <>
+        "ELSE oe_json_raw(#{quoted}, '$.#{key}') END"
+    end
+
+    "CASE WHEN oe_json_valid(#{quoted}) THEN json_build_object('security_labels', #{field.("security_labels")}, " <>
+      "'partition_ids', #{field.("partition_ids")})::text END"
+  end
+
+  defp sqlite_metadata_labels_sql(column) do
     quoted = quote_name(column)
 
     field = fn key ->
@@ -1024,17 +1045,17 @@ defmodule OptimalEngine.Sync.Gate do
   # anything else cannot be read.
   def exact_predicate({:meta, meta}, rank) do
     """
-    (CASE WHEN json_valid(#{meta}) THEN
+    (CASE WHEN #{Lineage.json_fn("json_valid")}(#{meta}) THEN
        (#{metadata_key(meta, "security_labels", labels_above(rank))})
        OR (#{metadata_key(meta, "partition_ids", nil)})
-       ELSE 0 END)
+       ELSE #{Lineage.sql_false()} END)
     """
   end
 
   # `internal` is the default of a classification column and says nothing; a
   # name this Engine does not know cannot be read (`Lineage.own_tokens/2`).
   def exact_predicate({:class, class}, rank) do
-    name = "lower(#{Lineage.trimmed_sql(class)})"
+    name = Lineage.ascii_lower_sql(Lineage.trimmed_sql(class))
     known = Enum.map_join(SecurityLabels.classes(), ", ", &"'#{&1}'")
 
     "(#{class} IS NOT NULL AND #{class} != '' AND " <>
@@ -1043,23 +1064,24 @@ defmodule OptimalEngine.Sync.Gate do
 
   # An element of a label array that is a class above the gate.
   defp labels_above(rank),
-    do: "lower(#{Lineage.trimmed_sql("j.value")}) IN (#{classes_above(rank)})"
+    do: "#{Lineage.ascii_lower_sql(Lineage.trimmed_sql("j.value"))} IN (#{classes_above(rank)})"
 
   defp metadata_key(meta, key, extra) do
     path = "'$.#{key}'"
-    type = "json_type(#{meta}, #{path})"
-    text = "json_extract(#{meta}, #{path})"
+    type = "#{Lineage.json_fn("json_type")}(#{meta}, #{path})"
+    text = "#{Lineage.json_fn("json_extract")}(#{meta}, #{path})"
+    {yes, no} = {Lineage.sql_true(), Lineage.sql_false()}
 
     """
-    CASE WHEN (SELECT count(*) FROM json_each(#{meta}) WHERE key = '#{key}') > 1 THEN 1
-    WHEN #{type} IS NULL OR #{type} = 'null' THEN 0
+    CASE WHEN (SELECT count(*) FROM #{Lineage.json_fn("json_each")}(#{meta}) WHERE key = '#{key}') > 1 THEN #{yes}
+    WHEN #{type} IS NULL OR #{type} = 'null' THEN #{no}
     WHEN #{type} = 'array' THEN #{Lineage.unreadable_elements_sql("#{meta}, #{path}", extra)}
     WHEN #{type} = 'text' THEN
-      CASE WHEN #{text} = '' THEN 0
-           WHEN json_valid(#{text}) AND json_type(#{text}) = 'array'
+      CASE WHEN #{text} = '' THEN #{no}
+           WHEN #{Lineage.json_fn("json_valid")}(#{text}) AND #{Lineage.json_fn("json_type")}(#{text}) = 'array'
              THEN #{Lineage.unreadable_elements_sql(text, extra)}
-           ELSE 1 END
-    ELSE 1 END
+           ELSE #{yes} END
+    ELSE #{yes} END
     """
   end
 
@@ -1181,10 +1203,7 @@ defmodule OptimalEngine.Sync.Gate do
     if query!("SELECT 1 FROM sync_workspaces WHERE workspace_id = ?1", [gate.workspace_id]) == [] do
       :uncached
     else
-      query!(
-        "SELECT name, seq FROM sqlite_sequence WHERE name IN ('sync_capture', 'sync_local_stamp', 'sync_mutations') ORDER BY name",
-        []
-      )
+      OptimalEngine.Sync.Capture.write_sequences()
     end
   end
 
@@ -1365,11 +1384,11 @@ defmodule OptimalEngine.Sync.Gate do
 
   defp links_to_held(column) do
     """
-    CASE WHEN json_valid(l.#{column}) THEN EXISTS (
-      SELECT 1 FROM json_each(l.#{column}) j
-      WHERE (CASE WHEN j.type = 'object' THEN json_extract(j.value, '$.id') ELSE j.value END)
+    CASE WHEN #{Lineage.json_fn("json_valid")}(l.#{column}) THEN EXISTS (
+      SELECT 1 FROM #{Lineage.json_fn("json_each")}(l.#{column}) j
+      WHERE (CASE WHEN j.type = 'object' THEN #{Lineage.json_fn("json_extract")}(j.value, '$.id') ELSE j.value END)
         IN (SELECT value FROM json_each(?3))
-    ) ELSE 0 END
+    ) ELSE #{Lineage.sql_false()} END
     """
   end
 

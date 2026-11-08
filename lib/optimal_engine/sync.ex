@@ -77,11 +77,6 @@ defmodule OptimalEngine.Sync do
     id
   end
 
-  # Capture is SQLite triggers and applying reads SQLite's catalog, so a
-  # PostgreSQL store refuses to start replicating rather than recording
-  # changes nothing will send (`OptimalEngine.Storage.Postgres.unavailable/0`).
-  @unavailable {:unsupported, "replication is not available on the PostgreSQL store"}
-
   @doc "This Engine's own label (`enable/4` sets it), or `nil`."
   @spec label() :: String.t() | nil
   def label do
@@ -99,9 +94,6 @@ defmodule OptimalEngine.Sync do
   @spec enable(String.t(), String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def enable(tenant_id, workspace_id, by, opts \\ []) do
     cond do
-      not Store.selected?(OptimalEngine.Store.SQLite) ->
-        {:error, @unavailable}
-
       not valid_label?(opts[:label]) ->
         {:error, :invalid_label}
 
@@ -361,15 +353,11 @@ defmodule OptimalEngine.Sync do
   """
   @spec tables() :: %{replicated: [String.t()], local_only: [String.t()], migration: integer()}
   def tables do
-    {:ok, authority} =
-      Store.raw_query(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND substr(name, 1, 10) = 'authority_' ORDER BY name",
-        []
-      )
+    authority = Enum.filter(store_tables(), &String.starts_with?(&1, "authority_"))
 
     %{
       replicated: Capture.replicated_tables(),
-      local_only: Enum.sort(Capture.local_tables() ++ List.flatten(authority)),
+      local_only: Enum.sort(Capture.local_tables() ++ authority),
       migration: engine_info()["migration"]
     }
   end
@@ -394,6 +382,28 @@ defmodule OptimalEngine.Sync do
   # types are free-form and name no table: those stay.
   @purge_scope "(entity_type IN (SELECT name FROM sqlite_master WHERE type = 'table') OR " <>
                  "entity_type LIKE 'authority\\_%' ESCAPE '\\')"
+
+  # The same scope on PostgreSQL, whose catalog lists the store schema's tables.
+  @pg_purge_scope "(entity_type IN (SELECT c.relname::text FROM pg_class c " <>
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace " <>
+                    "WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p')) OR " <>
+                    "entity_type LIKE 'authority\\_%' ESCAPE '\\')"
+
+  defp purge_scope, do: if(postgres?(), do: @pg_purge_scope, else: @purge_scope)
+
+  defp postgres?, do: Store.selected?(OptimalEngine.Store.Postgres)
+
+  # The base tables of the store, from its catalog.
+  defp store_tables do
+    if postgres?() do
+      OptimalEngine.Sync.Postgres.tables()
+    else
+      {:ok, rows} =
+        Store.raw_query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name", [])
+
+      List.flatten(rows)
+    end
+  end
 
   @doc """
   Removes the ledger rows of tables that do not replicate: an earlier version
@@ -427,7 +437,7 @@ defmodule OptimalEngine.Sync do
         """
         SELECT sequence, id, tenant_id, workspace_id, device_id, entity_type, entity_id, operation, occurred_at
         FROM sync_mutations
-        WHERE sequence > ?#{n + 1} AND entity_type NOT IN (#{marks}) AND #{@purge_scope}
+        WHERE sequence > ?#{n + 1} AND entity_type NOT IN (#{marks}) AND #{purge_scope()}
         ORDER BY sequence LIMIT ?#{n + 2}
         """,
         names ++ [after_sequence, @purge_batch]
@@ -442,7 +452,7 @@ defmodule OptimalEngine.Sync do
       {:ok, _} =
         Store.raw_query(
           "DELETE FROM sync_mutations WHERE sequence > ?#{n + 1} AND sequence <= ?#{n + 2} " <>
-            "AND entity_type NOT IN (#{marks}) AND #{@purge_scope}",
+            "AND entity_type NOT IN (#{marks}) AND #{purge_scope()}",
           names ++ [after_sequence, last]
         )
 
@@ -476,16 +486,47 @@ defmodule OptimalEngine.Sync do
   def purge_unreplicated_once do
     version = list_version()
 
-    case Store.raw_query("PRAGMA user_version", []) do
-      {:ok, [[^version]]} ->
+    case checked_version() do
+      ^version ->
         {:ok, %{}}
 
       _ ->
         with {:ok, purged} <- purge_unreplicated(),
              {:ok, _reported} <- report_colon_ids() do
-          {:ok, _} = Store.raw_query("PRAGMA user_version = #{version}", [])
+          :ok = put_checked_version(version)
           {:ok, purged}
         end
+    end
+  end
+
+  # SQLite keeps the version in the database file's header; PostgreSQL in the
+  # store's own key-value table, which the schema sync creates.
+  @checked_key "sync_ledger_checks"
+
+  defp checked_version do
+    if postgres?() do
+      case Store.raw_query("SELECT value FROM optimal_store_schema WHERE key = ?1", [@checked_key]) do
+        {:ok, [[value]]} -> String.to_integer(value)
+        _ -> nil
+      end
+    else
+      case Store.raw_query("PRAGMA user_version", []) do
+        {:ok, [[value]]} -> value
+        _ -> nil
+      end
+    end
+  end
+
+  defp put_checked_version(version) do
+    if postgres?() do
+      Store.raw_execute(
+        "INSERT INTO optimal_store_schema (key, value) VALUES (?1, ?2) " <>
+          "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [@checked_key, Integer.to_string(version)]
+      )
+    else
+      {:ok, _} = Store.raw_query("PRAGMA user_version = #{version}", [])
+      :ok
     end
   end
 
@@ -514,7 +555,7 @@ defmodule OptimalEngine.Sync do
         """
         SELECT sequence, id, tenant_id, workspace_id, device_id, entity_type, entity_id, occurred_at
         FROM sync_mutations
-        WHERE sequence > ?1 AND instr(id, ':') > 0
+        WHERE sequence > ?1 AND #{if postgres?(), do: "strpos", else: "instr"}(id, ':') > 0
         ORDER BY sequence LIMIT ?2
         """,
         [after_sequence, @purge_batch]
@@ -558,9 +599,6 @@ defmodule OptimalEngine.Sync do
     max_class = attrs["max_class"] || "confidential"
 
     cond do
-      not Store.selected?(OptimalEngine.Store.SQLite) ->
-        {:error, @unavailable}
-
       not (is_binary(attrs["workspace_id"]) and attrs["workspace_id"] != "") ->
         {:error, :workspace_id_required}
 
@@ -2071,7 +2109,7 @@ defmodule OptimalEngine.Sync do
              """
              UPDATE source_packages
              SET security_labels = ?2, partition_ids = ?3,
-                 metadata = json_set(COALESCE(metadata, '{}'), '$.sync_conflict', json('true'), '$.fact_id', ?4)
+                 metadata = #{conflict_metadata_sql()}
              WHERE id = ?1
              """,
              [source_id, Jason.encode!(merged_labels), Jason.encode!(merged_partitions), fact_id]
@@ -2437,6 +2475,15 @@ defmodule OptimalEngine.Sync do
     end
   end
 
+  # `$.sync_conflict` true and `$.fact_id` the fact, over the source's metadata.
+  defp conflict_metadata_sql do
+    if postgres?() do
+      "(COALESCE(metadata, '{}')::jsonb || jsonb_build_object('sync_conflict', true, 'fact_id', CAST(?4 AS text)))::text"
+    else
+      "json_set(COALESCE(metadata, '{}'), '$.sync_conflict', json('true'), '$.fact_id', ?4)"
+    end
+  end
+
   defp identity_unstable(peer, replica, when_text) do
     Logger.warning(
       "[Sync] peer #{LogUrl.render(peer.url)} answers as #{replica}, " <>
@@ -2454,9 +2501,16 @@ defmodule OptimalEngine.Sync do
            SELECT COUNT(*) FROM sync_conflicts
            WHERE tenant_id = ?1 AND workspace_id = ?2 AND table_name = 'sync_peers' AND entity_key = ?3
              AND kind = 'peer_replaced' AND resolved_by = 'sync'
-             AND created_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?4)
+             AND created_at > ?4
            """,
-           [peer.tenant_id, peer.workspace_id, peer.url, "-#{seconds} seconds"]
+           [
+             peer.tenant_id,
+             peer.workspace_id,
+             peer.url,
+             DateTime.utc_now()
+             |> DateTime.add(-seconds, :second)
+             |> Calendar.strftime("%Y-%m-%dT%H:%M:%SZ")
+           ]
          ) do
       {:ok, [[n]]} -> n
       _ -> 0
@@ -2973,8 +3027,8 @@ defmodule OptimalEngine.Sync do
       Store.raw_query(
         """
         UPDATE sync_peers SET status = ?4, message = ?5,
-          last_sync_at = CASE WHEN ?4 = 'active' AND ?6 IS NOT NULL THEN ?6 ELSE last_sync_at END,
-          pulled_local_seq = CASE WHEN ?4 = 'active' AND ?7 IS NOT NULL THEN ?7 ELSE pulled_local_seq END
+          last_sync_at = CASE WHEN ?4 = 'active' AND CAST(?6 AS TEXT) IS NOT NULL THEN ?6 ELSE last_sync_at END,
+          pulled_local_seq = CASE WHEN ?4 = 'active' AND CAST(?7 AS INTEGER) IS NOT NULL THEN ?7 ELSE pulled_local_seq END
         WHERE tenant_id = ?1 AND workspace_id = ?2 AND url = ?3
         """,
         [peer.tenant_id, peer.workspace_id, peer.url, status, message, at, floor]

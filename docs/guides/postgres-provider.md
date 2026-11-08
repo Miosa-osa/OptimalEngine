@@ -156,7 +156,7 @@ These features are not on the PostgreSQL store yet.
 
 | Feature | On a PostgreSQL store |
 | --- | --- |
-| Replication | Capture is SQLite triggers and applying reads SQLite's catalog. Enabling sync and adding a peer return `{:error, {:unsupported, "replication is not available on the PostgreSQL store"}}`, and the API answers 501. |
+| The SQLite catalog | `PRAGMA`, `sqlite_master` and the `pragma_*` functions are refused (workspace bundles, the data steward's table list, a workspace slug change). |
 | Schema and transaction statements | The schema comes from the migrations, so a schema change and SQLite-only table options (`AUTOINCREMENT`, `WITHOUT ROWID`) are refused. A transaction statement sent as a statement raises `ArgumentError` on both stores. |
 
 `OptimalEngine.Store.Dialect.refusals/0` lists every refused construct with its reason, and `test/store/postgres/unavailable_test.exs` checks both ways: every refusal of the dialect is under a feature here or under a ported feature (`OptimalEngine.Storage.Postgres.ported/0`, a feature that works on PostgreSQL through statements of its own while the SQLite statements behind it stay refused), and every name a feature lists is one the dialect or the store refuses with.
@@ -178,6 +178,14 @@ The dialect renames each call (`json_set` to `sqlite_json_set`, `datetime` to `s
 | `x GLOB p` | A regular expression match, when `x` is a column or a placeholder and `p` a literal or a placeholder. |
 
 Still refused by name: the `json_extract` forms that order or compare by SQLite's types, `json_tree`, `json_patch` and the other JSON functions no call site uses, `typeof`, `printf` and SQLite's other functions without a counterpart, a `GLOB` of an expression, SQLite's collations, and a `LIKE` with a computed pattern.
+### Replication
+Replication works on a PostgreSQL store with the ledger a SQLite Engine keeps, so SQLite and PostgreSQL Engines replicate with each other (`OptimalEngine.Sync.Postgres`, `docs/guides/replication.md`).
+- Capture is a PL/pgSQL row trigger on each replicated table, calling `optimal_sync_capture()` with the table's key columns, its `BYTEA` columns and whether it is append-only. It records in `sync_capture` what SQLite's capture triggers record: the whole row on an insert or an update, the key on a delete, bytes as upper-case hex in `blob_data`, the key as text or a compact JSON array, nothing while `sync_identity.applying` is set or for a workspace that does not sync. `test/sync/postgres_capture_test.exs` makes the same writes on both stores and compares what each captured.
+- The column lists come from the PostgreSQL catalog of the store's schema, an identity column standing for SQLite's rowid key, so a table an app creates at runtime is captured the same way.
+- Sealing runs at READ COMMITTED: it is idempotent (a mutation id is its capture key), and a batch of thousands of rows takes enough predicate locks at SERIALIZABLE to be aborted again and again beside the writers it overlaps. Seals in one Engine take turns.
+- The gate reads JSON as SQLite's JSON functions do, through `oe_json_valid`, `oe_json_type`, `oe_json_extract`, `oe_json_each` and `oe_json_raw` on PostgreSQL's `json` type, which keeps a key that appears twice (`OptimalEngine.Store.Postgres.SqliteJson`).
+- The gate cache's stamp is the largest key a committed row of `sync_capture`, `sync_local_stamp` and `sync_mutations` holds; PostgreSQL's sequences move before a writer commits, so they cannot be the stamp. The local stamp triggers of the tables the gate scans have SQLite's conditions, translated by the dialect.
+- `test/sync/cross_store_apply_test.exs` applies a page a SQLite Engine served and a page a PostgreSQL Engine served, recorded on each build, and checks the rows that result; CI runs it on both builds.
 
 ### Full-Text Search
 
@@ -191,7 +199,6 @@ Search, context assembly and asking work on a PostgreSQL store, with the tokens 
 - The index is a projection: `OptimalEngine.Store.Postgres.rebuild_full_text/1` empties it and indexes every row again.
 - The engine builds every `MATCH` string from quoted phrases joined by ` OR ` or by spaces, the last optionally a prefix; any other syntax is refused by name (`FTS5 query syntax`), and a `MATCH` statement sent to the PostgreSQL store is still refused (`FTS5 MATCH`).
 
-A store that finds replication data in its database does not start: `{:postgres_store_failed, {:unsupported_in_use, features}}`.
 An engine moved there from SQLite would otherwise run on and silently stop replicating, or stop serving its collections.
 
 ### The Catalog, `rowid` And Replace Writes
@@ -262,7 +269,7 @@ OPTIMAL_POSTGRES_URL=postgres://user:secret@host:5432/database scripts/proof-pos
 
 It builds the engine with `OPTIMAL_STORE=postgres`, boots two engine processes with their full supervision tree against one fresh PostgreSQL schema, has each write the workspace through `OptimalEngine.Store`, and then runs the same checks and the same 20 queries against an embedded SQLite copy in a third process.
 While they write, both engines publish ten policy packs each for one scope; the 20 packs must take versions 1 to 20 with exactly one active, because each publish reads the active pack and the next version inside its own transaction.
-Each engine also searches the workspace through the full-text index and must find the contexts it wrote, and checks that enabling replication is refused by name.
+Each engine also searches the workspace through the full-text index and must find the contexts it wrote, and enables replication for the workspace.
 The schema is dropped at the end.
 
 ### What Is On PostgreSQL
@@ -324,7 +331,7 @@ OPTIMAL_POSTGRES_URL=postgres://user:secret@host:5432/database?sslmode=require _
 
 An engine built this way boots its whole supervision tree on PostgreSQL, and the two-engine proof runs on it.
 The features listed under What Does Not Work On PostgreSQL are refused by name, so a PostgreSQL build is the canonical relational store for engines that share one database, not yet a replacement for every feature of an embedded engine.
-Replication change capture is switched off on a PostgreSQL store and says so once at boot.
+Replication works on a PostgreSQL build (see Replication below).
 
 ## Backups And Restore
 

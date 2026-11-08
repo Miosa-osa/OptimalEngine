@@ -491,12 +491,45 @@ defmodule OptimalEngine.Sync.Lineage do
 
   def may_name_class_sql({:class, column}, row) do
     value = "#{row}.\"#{column}\""
-    "(#{value} IS NOT NULL AND lower(#{value}) NOT IN ('', 'internal', 'public'))"
+    "(#{value} IS NOT NULL AND #{ascii_lower_sql(value)} NOT IN ('', 'internal', 'public'))"
   end
 
   # The characters of Unicode White_Space, which `String.trim/1` removes
   # (SQLite's `trim` takes the characters to remove).
-  @white_space "(' ' || char(#{Enum.join(Enum.to_list(9..13) ++ [133, 160, 5760, 6158] ++ Enum.to_list(8192..8202) ++ [8232, 8233, 8239, 8287, 12288], ", ")}))"
+  @white_space_points Enum.to_list(9..13) ++
+                        [133, 160, 5760, 6158] ++
+                        Enum.to_list(8192..8202) ++ [8232, 8233, 8239, 8287, 12288]
+
+  @white_space "(' ' || char(#{Enum.join(@white_space_points, ", ")}))"
+
+  # PostgreSQL has chr() for one code point where SQLite's char() takes many.
+  @pg_white_space "(' ' || #{Enum.map_join(@white_space_points, " || ", &"chr(#{&1})")})"
+
+  @doc """
+  The name of SQLite's JSON function `name` on this build's store: the function
+  itself on SQLite, and on PostgreSQL the `oe_` function that reads JSON as it
+  does (`OptimalEngine.Store.Postgres.SqliteJson`).
+  """
+  @spec json_fn(String.t()) :: String.t()
+  def json_fn(name), do: if(postgres?(), do: "oe_" <> name, else: name)
+
+  @doc "SQL true and false as a condition takes them: 1 and 0 on SQLite, booleans on PostgreSQL."
+  @spec sql_true() :: String.t()
+  def sql_true, do: if(postgres?(), do: "TRUE", else: "1")
+
+  @doc false
+  @spec sql_false() :: String.t()
+  def sql_false, do: if(postgres?(), do: "FALSE", else: "0")
+
+  @doc """
+  SQL lowercasing the ASCII letters of `expr` only, as SQLite's `lower` does
+  (PostgreSQL's does so in the `C` collation).
+  """
+  @spec ascii_lower_sql(String.t()) :: String.t()
+  def ascii_lower_sql(expr),
+    do: if(postgres?(), do: ~s|lower((#{expr}) COLLATE "C")|, else: "lower(#{expr})")
+
+  defp postgres?, do: OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres)
 
   @doc """
   SQL true when the text `value` holds a backslash. `LIKE` with an explicit
@@ -514,7 +547,7 @@ defmodule OptimalEngine.Sync.Lineage do
   """
   @spec unreadable_elements_sql(String.t(), String.t() | nil) :: String.t()
   def unreadable_elements_sql(source, extra \\ nil) do
-    "EXISTS (SELECT 1 FROM json_each(#{source}) j WHERE j.type != 'text' OR " <>
+    "EXISTS (SELECT 1 FROM #{json_fn("json_each")}(#{source}) j WHERE j.type != 'text' OR " <>
       "#{trimmed_sql("j.value")} = ''#{if extra, do: " OR " <> extra, else: ""})"
   end
 
@@ -525,13 +558,18 @@ defmodule OptimalEngine.Sync.Lineage do
   """
   @spec unreadable_array_sql(String.t(), String.t() | nil) :: String.t()
   def unreadable_array_sql(value, extra \\ nil) do
-    "(CASE WHEN json_valid(#{value}) THEN CASE json_type(#{value}) " <>
-      "WHEN 'array' THEN #{unreadable_elements_sql(value, extra)} ELSE 1 END ELSE 1 END)"
+    "(CASE WHEN #{json_fn("json_valid")}(#{value}) THEN CASE #{json_fn("json_type")}(#{value}) " <>
+      "WHEN 'array' THEN #{unreadable_elements_sql(value, extra)} ELSE #{sql_true()} END " <>
+      "ELSE #{sql_true()} END)"
   end
 
   @doc "SQL that trims `expr` of the white space `String.trim/1` removes."
   @spec trimmed_sql(String.t()) :: String.t()
-  def trimmed_sql(expr), do: "trim(#{expr}, #{@white_space})"
+  def trimmed_sql(expr) do
+    if postgres?(),
+      do: "btrim(#{expr}, #{@pg_white_space})",
+      else: "trim(#{expr}, #{@white_space})"
+  end
 
   @doc "How a table's class is made up, or nil for a table the map does not know."
   @spec spec(String.t()) :: t() | nil

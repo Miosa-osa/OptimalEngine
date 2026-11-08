@@ -12,6 +12,10 @@ defmodule OptimalEngine.Sync.LedgerKeyRepairTest do
 
   use ExUnit.Case, async: false
 
+  # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+  # test/sync/postgres_capture_test.exs.
+  @moduletag :sqlite_store
+
   import ExUnit.CaptureLog
 
   alias OptimalEngine.{Store, Sync, Workspace}
@@ -407,15 +411,7 @@ defmodule OptimalEngine.Sync.LedgerKeyRepairTest do
     end
   end
 
-  defp next_capture_sequence do
-    {:ok, [[next]]} =
-      Store.raw_query(
-        "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'sync_capture'), 0) + 1",
-        []
-      )
-
-    next
-  end
+  defp next_capture_sequence, do: OptimalEngine.Test.SyncSql.next_capture_sequence()
 
   defp peer_change(ctx, id, peer) do
     %{

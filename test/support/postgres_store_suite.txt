@@ -77,3 +77,6 @@ test/app_data
 test/ops/backup_test.exs
 test/storage/backup_offsite_test.exs
 test/storage/backup_postgres_test.exs
+test/sync/cross_store_apply_test.exs
+test/sync/gate_reader_cost_test.exs
+test/sync/sync_history_test.exs
