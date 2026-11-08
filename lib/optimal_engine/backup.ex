@@ -28,11 +28,24 @@ defmodule OptimalEngine.Backup do
   An offsite copy is always encrypted before it leaves the machine
   (`OptimalEngine.Backup.Envelope`, key from `OPTIMAL_BACKUP_KEY`). Without
   that key an offsite copy is refused; it is never uploaded in plaintext.
+
+  ## On a PostgreSQL store
+
+  A backup of a PostgreSQL store is the same kind of file: a SQLite database
+  holding one consistent snapshot of every table (`OptimalEngine.Backup.Postgres`).
+  Its checksum, integrity check, catalog row (in the PostgreSQL store), sealing,
+  offsite copy and schedule are the ones above. `restore/2` without a
+  `:target` restores into the store's schema (or `:schema`), in one
+  transaction that locks every table of the store, and checks every table's
+  rows against the file before it commits; restoring into the configured
+  schema needs the engine stopped, as replacing the live SQLite file does. A
+  `:target` path restores the file itself, as on SQLite.
   """
 
   require Logger
 
   alias OptimalEngine.Backup.Envelope
+  alias OptimalEngine.Backup.Postgres, as: PgBackup
   alias OptimalEngine.Storage.S3
   alias OptimalEngine.Store
 
@@ -70,7 +83,7 @@ defmodule OptimalEngine.Backup do
     with :ok <- ensure_parent_dir(parent),
          :ok <- ensure_no_existing(target_path),
          started <- System.monotonic_time(:millisecond),
-         :ok <- vacuum_into(target_path),
+         :ok <- snapshot_into(target_path),
          size <- File.stat!(target_path).size,
          rows <- count_backup_rows(target_path),
          checksum <- checksum_sha256(target_path),
@@ -271,7 +284,7 @@ defmodule OptimalEngine.Backup do
            metadata, encrypted
     FROM backup_records
     WHERE offsite = 1
-    ORDER BY created_at DESC, rowid DESC LIMIT ?1
+    ORDER BY created_at DESC, #{newest_first()} LIMIT ?1
     """
 
     case Store.raw_query(sql, [limit]) do
@@ -358,7 +371,7 @@ defmodule OptimalEngine.Backup do
              :ok <- match_download(object, row),
              {:ok, source} <- unseal(download, plaintext, backup_key),
              {:ok, restored} <-
-               restore(source, target: target, checksum_sha256: row.checksum_sha256) do
+               restore(source, [checksum_sha256: row.checksum_sha256] ++ target) do
           {:ok,
            %{
              backup_id: row.id,
@@ -403,7 +416,7 @@ defmodule OptimalEngine.Backup do
         with {:ok, object} <- S3.get_object_to_file(object_key, download),
              {:ok, opened} <- Envelope.open_file(download, plaintext, backup_key),
              {:ok, restored} <-
-               restore(plaintext, target: target, checksum_sha256: opened.plaintext_sha256) do
+               restore(plaintext, [checksum_sha256: opened.plaintext_sha256] ++ target) do
           {:ok,
            %{
              backup_id: opened.header["backup_id"],
@@ -514,17 +527,22 @@ defmodule OptimalEngine.Backup do
     {:error, {:backup_not_offsite, id}}
   end
 
+  # The options restore/2 is called with: a file path, or on a PostgreSQL
+  # store a schema to restore into.
   defp restore_target(opts) do
     cond do
+      is_binary(Keyword.get(opts, :schema)) and postgres?() ->
+        {:ok, [schema: Keyword.get(opts, :schema)]}
+
       is_binary(Keyword.get(opts, :target)) ->
-        {:ok, Path.expand(Keyword.get(opts, :target))}
+        {:ok, [target: Path.expand(Keyword.get(opts, :target))]}
 
       is_binary(Keyword.get(opts, :data_dir)) ->
         # A restore drill targets a fresh data directory, which need not exist
         # yet, so it is created here rather than failing on a missing parent.
         dir = Path.expand(Keyword.get(opts, :data_dir))
 
-        with :ok <- File.mkdir_p(dir), do: {:ok, Path.join(dir, "index.db")}
+        with :ok <- File.mkdir_p(dir), do: {:ok, [target: Path.join(dir, "index.db")]}
 
       true ->
         {:error, :restore_target_required}
@@ -552,6 +570,17 @@ defmodule OptimalEngine.Backup do
     LIMIT 1
     """
 
+    if postgres_catalog?(opts) do
+      case postgres_catalog(sql, [backup_id]) do
+        {:ok, rows} -> row_from(rows, backup_id)
+        {:error, _} -> {:error, :backup_catalog_unavailable}
+      end
+    else
+      sqlite_catalog_row(catalog_path, sql, backup_id)
+    end
+  end
+
+  defp sqlite_catalog_row(catalog_path, sql, backup_id) do
     with true <- is_binary(catalog_path) and File.regular?(catalog_path),
          {:ok, db} <- Exqlite.Sqlite3.open(catalog_path, mode: :readonly) do
       try do
@@ -634,6 +663,12 @@ defmodule OptimalEngine.Backup do
           {:ok, %{target: String.t(), archived: String.t() | nil, checksum_sha256: String.t()}}
           | {:error, term()}
   def restore(source_path, opts \\ []) when is_binary(source_path) do
+    if postgres?() and (Keyword.has_key?(opts, :schema) or not Keyword.has_key?(opts, :target)),
+      do: restore_postgres(source_path, opts),
+      else: restore_file(source_path, opts)
+  end
+
+  defp restore_file(source_path, opts) do
     live_path = Application.get_env(:optimal_engine, :db_path)
     target = Keyword.get(opts, :target, live_path)
     catalog_path = Keyword.get(opts, :catalog_path, live_path)
@@ -839,8 +874,104 @@ defmodule OptimalEngine.Backup do
 
   defp expected_checksum(source_path, catalog_path, opts) do
     case Keyword.get(opts, :checksum_sha256) do
-      checksum when is_binary(checksum) -> {:ok, String.downcase(checksum)}
-      nil -> catalog_checksum(source_path, catalog_path)
+      checksum when is_binary(checksum) ->
+        {:ok, String.downcase(checksum)}
+
+      nil ->
+        if postgres_catalog?(opts),
+          do: postgres_catalog_checksum(source_path),
+          else: catalog_checksum(source_path, catalog_path)
+    end
+  end
+
+  # ─── PostgreSQL store ───────────────────────────────────────────────────
+
+  defp postgres?, do: Store.selected?(OptimalEngine.Store.Postgres)
+
+  # The catalog of a PostgreSQL store is its backup_records table, unless the
+  # caller names a SQLite catalog file.
+  defp postgres_catalog?(opts), do: postgres?() and not Keyword.has_key?(opts, :catalog_path)
+
+  defp postgres_catalog(sql, params) do
+    PgBackup.with_pool([], fn pool ->
+      with {:ok, %{rows: rows}} <-
+             OptimalEngine.Store.Postgres.Connection.query(pool, sql, params),
+           do: {:ok, rows}
+    end)
+  end
+
+  defp postgres_catalog_checksum(source_path) do
+    sql = """
+    SELECT checksum_sha256 FROM backup_records
+    WHERE storage_uri = ?1 AND status = 'completed' AND checksum_sha256 IS NOT NULL
+    ORDER BY created_at DESC LIMIT 1
+    """
+
+    case postgres_catalog(sql, [Path.expand(source_path)]) do
+      {:ok, [[checksum]]} when is_binary(checksum) -> {:ok, checksum}
+      _ -> {:error, :backup_not_cataloged}
+    end
+  end
+
+  # SQLite's rowid breaks ties in insertion order; PostgreSQL rows have none,
+  # so ties fall to the id there.
+  @doc false
+  def newest_first, do: if(postgres?(), do: "id DESC", else: "rowid DESC")
+
+  defp snapshot_into(target_path) do
+    if postgres?() do
+      with {:ok, _} <- PgBackup.with_pool([], &PgBackup.snapshot(&1, target_path)), do: :ok
+    else
+      vacuum_into(target_path)
+    end
+  end
+
+  defp restore_postgres(source_path, opts) do
+    schema = Keyword.get(opts, :schema, PgBackup.configured_schema())
+
+    with :ok <- refuse_live_schema(schema),
+         :ok <- ensure_source_exists(source_path),
+         :ok <- ensure_no_wal(source_path),
+         {:ok, expected} <- expected_checksum(source_path, nil, opts),
+         :ok <- match_checksum(source_path, expected),
+         :ok <- ensure_integrity(source_path),
+         {:ok, {archived, restored}} <-
+           PgBackup.with_pool([schema: schema], fn pool ->
+             with {:ok, archived} <- archive_schema(pool, schema),
+                  {:ok, restored} <- PgBackup.restore(pool, source_path, schema: schema),
+                  do: {:ok, {archived, restored}}
+           end) do
+      {:ok,
+       %{
+         target: "postgres:" <> schema,
+         archived: archived,
+         checksum_sha256: expected,
+         tables: restored.tables
+       }}
+    end
+  end
+
+  defp refuse_live_schema(schema) do
+    if schema == PgBackup.configured_schema(), do: refuse_if_supervisor_up(), else: :ok
+  end
+
+  # The schema's current contents become a backup file first, the rollback of
+  # this restore, as the SQLite path archives the database it replaces.
+  defp archive_schema(pool, schema) do
+    if PgBackup.populated?(pool) do
+      dir = backup_dir()
+
+      path =
+        Path.join(
+          dir,
+          "pre-restore-#{schema}-#{System.os_time(:second)}-#{System.unique_integer([:positive])}.db"
+        )
+
+      with :ok <- File.mkdir_p(dir),
+           {:ok, _} <- PgBackup.snapshot(pool, path),
+           do: {:ok, path}
+    else
+      {:ok, nil}
     end
   end
 
