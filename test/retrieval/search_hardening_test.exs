@@ -111,13 +111,14 @@ defmodule OptimalEngine.Retrieval.SearchHardeningTest do
 
   describe "mode" do
     test "lexical is full text only", ctx do
-      assert {:ok, results} =
-               Search.search(ctx.token, workspace_id: ctx.workspace, mode: :lexical, limit: 10)
+      # One instant for both searches: the time decay measures age in whole
+      # seconds, so two searches either side of a second boundary differ.
+      opts = [workspace_id: ctx.workspace, limit: 10, as_of: DateTime.utc_now()]
+      assert {:ok, results} = Search.search(ctx.token, [mode: :lexical] ++ opts)
 
       assert length(results) == 3
 
-      assert {:ok, ^results} =
-               Search.search(ctx.token, workspace_id: ctx.workspace, mode: "lexical", limit: 10)
+      assert {:ok, ^results} = Search.search(ctx.token, [mode: "lexical"] ++ opts)
     end
 
     test "hybrid without a healthy embedder is unavailable, not a quiet fall back", ctx do

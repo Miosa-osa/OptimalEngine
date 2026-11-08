@@ -65,6 +65,8 @@ defmodule OptimalEngine.Store.Postgres.UnavailableTest do
 
   describe "a store whose database holds data of a feature it cannot run" do
     @describetag :postgres
+    # Starts a store of its own, which a PostgreSQL build already runs.
+    @describetag :sqlite_store
 
     setup do
       schema = PostgresStore.unique_schema()

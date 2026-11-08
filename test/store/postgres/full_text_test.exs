@@ -13,6 +13,9 @@ defmodule OptimalEngine.Store.Postgres.FullTextTest do
   alias OptimalEngine.Test.PostgresStore
 
   @moduletag :postgres
+  # Starts its own PostgreSQL store beside the embedded one, which a
+  # PostgreSQL build already runs as OptimalEngine.Store.
+  @moduletag :sqlite_store
 
   # Hyphens and underscores make phrases; repeats, long rows, diacritics, case,
   # other scripts and an empty title exercise tf, length normalisation and the

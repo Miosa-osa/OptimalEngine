@@ -8,6 +8,10 @@ defmodule OptimalEngine.Retrieval.SearchBusyTest do
 
   use ExUnit.Case, async: false
 
+  # Holds SQLite's single writer; a PostgreSQL store has no writer to hold, so
+  # a search beside an open transaction is not busy there.
+  @moduletag :sqlite_store
+
   import Plug.Test
 
   alias OptimalEngine.API.Router
