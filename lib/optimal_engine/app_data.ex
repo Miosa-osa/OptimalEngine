@@ -144,16 +144,26 @@ defmodule OptimalEngine.AppData do
   @doc "Capabilities and limits of this Engine's app data layer."
   @spec capabilities() :: map()
   def capabilities do
-    %{
-      "storage" => "sqlite",
-      "writer" => "single serialized writer (embedded SQLite)",
+    store =
+      if OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres),
+        do: %{
+          "storage" => "postgres",
+          "writer" => "concurrent writers (serializable transactions)",
+          "full_text" => "postgres posting lists ranked as sqlite fts5"
+        },
+        else: %{
+          "storage" => "sqlite",
+          "writer" => "single serialized writer (embedded SQLite)",
+          "full_text" => "sqlite fts5"
+        }
+
+    Map.merge(store, %{
       "field_types" => OptimalEngine.AppData.Schema.types(),
       "operations" => Scope.operations(),
       "max_batch" => Records.max_batch(),
       "max_file_bytes" => Files.max_bytes(),
-      "full_text" => "sqlite fts5",
       "semantic" => Semantic.status()
-    }
+    })
   end
 
   defp notified({:ok, _} = result, scope), do: tap(result, fn _ -> notify_latest(scope) end)

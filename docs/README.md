@@ -201,7 +201,7 @@ flowchart LR
 | FTS/vector/chunk indexes | Rebuildable retrieval projections. |
 | Cache directories | Rebuildable parse, embedding, and runtime acceleration. |
 | ETS and RocksDB | Triple-store mirrors of the SQLite `graph_edges` graph, which no retrieval path reads. ETS is the config default and what the Docker image and MIOSA template run; RocksDB is the dev launcher default. Mnesia is experimental (`ram_copies`) and Riak is in no build. |
-| Postgres | Optional provider for scale, wired but partial (compile-time `OPTIMAL_STORE=postgres`, no replication or app data collections). |
+| Postgres | Optional provider for scale, wired but partial (compile-time `OPTIMAL_STORE=postgres`, no replication). |
 | NATS | Provider with an adapter and a supervised JetStream client; carries the flows named in `OPTIMAL_NATS_FLOWS`, each after the Engine stored it in SQLite. |
 | Valkey, Qdrant, DuckDB, OpenBao | Providers with an adapter, health-checked and proved by a round trip; no Engine feature uses them yet. |
 | Fractal | Declared provider with no adapter yet. |

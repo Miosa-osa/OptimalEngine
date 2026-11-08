@@ -159,11 +159,16 @@ defmodule OptimalEngine.Store.FullText do
   phrases tokenized as FTS5 tokenizes them, as JSON text.
   """
   @spec query_param(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  def query_param(name, match) do
-    index = index!(name)
+  def query_param(name, match), do: query_json(index!(name).tokenize, match)
 
+  @doc """
+  `query_param/2` for an index created at runtime, by its FTS5 `tokenize`
+  option (`nil` for FTS5's default).
+  """
+  @spec query_json(String.t() | nil, String.t()) :: {:ok, String.t()} | {:error, term()}
+  def query_json(tokenize, match) do
     with {:ok, %{any: any, phrases: phrases}} <- parse(match) do
-      tokens = phrase_tokens(index.tokenize, Enum.map(phrases, & &1.text))
+      tokens = phrase_tokens(tokenize, Enum.map(phrases, & &1.text))
 
       json =
         phrases

@@ -157,7 +157,6 @@ These features are not on the PostgreSQL store yet.
 | Feature | On a PostgreSQL store |
 | --- | --- |
 | Replication | Capture is SQLite triggers and applying reads SQLite's catalog. Enabling sync and adding a peer return `{:error, {:unsupported, "replication is not available on the PostgreSQL store"}}`, and the API answers 501. |
-| App data collections | A collection creates a table, a full-text index and triggers at runtime. Creating one is refused, and so is any schema change outside the migrations. |
 | Schema and transaction statements | The schema comes from the migrations, so a schema change and SQLite-only table options (`AUTOINCREMENT`, `WITHOUT ROWID`) are refused. A transaction statement sent as a statement raises `ArgumentError` on both stores. |
 
 `OptimalEngine.Store.Dialect.refusals/0` lists every refused construct with its reason, and `test/store/postgres/unavailable_test.exs` checks both ways: every refusal of the dialect is under a feature here or under a ported feature (`OptimalEngine.Storage.Postgres.ported/0`, a feature that works on PostgreSQL through statements of its own while the SQLite statements behind it stay refused), and every name a feature lists is one the dialect or the store refuses with.
@@ -192,7 +191,7 @@ Search, context assembly and asking work on a PostgreSQL store, with the tokens 
 - The index is a projection: `OptimalEngine.Store.Postgres.rebuild_full_text/1` empties it and indexes every row again.
 - The engine builds every `MATCH` string from quoted phrases joined by ` OR ` or by spaces, the last optionally a prefix; any other syntax is refused by name (`FTS5 query syntax`), and a `MATCH` statement sent to the PostgreSQL store is still refused (`FTS5 MATCH`).
 
-A store that finds replication or app data collection data in its database does not start: `{:postgres_store_failed, {:unsupported_in_use, features}}`.
+A store that finds replication data in its database does not start: `{:postgres_store_failed, {:unsupported_in_use, features}}`.
 An engine moved there from SQLite would otherwise run on and silently stop replicating, or stop serving its collections.
 
 ### The Catalog, `rowid` And Replace Writes
@@ -206,6 +205,14 @@ The call sites that read SQLite's catalog, break ties by `rowid` or write with `
 
 `test/store/postgres/catalog_replace_test.exs` checks the catalog answers and the rows a replace leaves alike on both stores.
 
+### App Data Collections
+App data collections work on a PostgreSQL store (`OptimalEngine.AppData.Collections`).
+A collection's table, indexes and columns are created, altered and dropped at runtime in PostgreSQL DDL inside the collection's own transaction, so a failed change leaves the collection as it was, as on SQLite:
+- `_rowid` is a `BIGINT` identity column, field types map as the derived schema maps them (`BIGINT`, `DOUBLE PRECISION`, `TEXT COLLATE "C"`), and a reference field is a foreign key `DEFERRABLE INITIALLY IMMEDIATE`, like the store's own.
+- The full-text index of a collection's search fields is a posting list created at runtime (`OptimalEngine.Store.Postgres.FullText.create_index/2`, registered in `optimal_fts_indexes`), tokenized with the collection's FTS5 option `unicode61 remove_diacritics 2` and ranked by `optimal_fts_match` as FTS5's external-content table ranks.
+- A text query, a `contains` filter on a JSON field (SQLite's `json_each` values, compared by type, with `true` and `false` as 1 and 0) and on a text field (`strpos` for `instr`) are written for PostgreSQL; empty filters are `(1 = 1)` and `(1 = 0)` on both stores, as PostgreSQL has no integer booleans.
+- Semantic embeddings are upserted by their key.
+The SQLite statements behind collections (FTS5 tables, triggers, `STRICT` tables) are still refused there as schema changes outside the migrations.
 ### Decisions
 
 - The ETS hot cache is disabled when PostgreSQL is the canonical store, because a per-process cache cannot see another engine's writes.

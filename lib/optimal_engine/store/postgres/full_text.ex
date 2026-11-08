@@ -96,22 +96,106 @@ defmodule OptimalEngine.Store.Postgres.FullText do
     timeout = Keyword.get(opts, :timeout, 60_000)
 
     Enum.reduce_while(names, {:ok, 0}, fn name, {:ok, total} ->
-      case refresh_index(pool, FullText.index!(name), timeout, 0) do
+      case refresh_index(pool, name, timeout, 0) do
         {:ok, count} -> {:cont, {:ok, total + count}}
         {:error, _} = error -> {:halt, error}
       end
     end)
   end
 
-  defp refresh_index(pool, index, timeout, done) do
-    case Connection.transaction(pool, &index_batch(&1, index), timeout) do
+  @doc "Every index: the engine's own and those created at runtime (app data collections)."
+  @spec names(GenServer.server()) :: {:ok, [String.t()]} | {:error, term()}
+  def names(pool) do
+    with {:ok, %{rows: rows}} <-
+           Connection.query(pool, "SELECT name FROM optimal_fts_indexes ORDER BY name", [],
+             dialect: :postgres
+           ) do
+      {:ok, Map.keys(FullText.indexes()) ++ Enum.map(rows, &hd/1)}
+    end
+  end
+
+  defp refresh_index(pool, name, timeout, done) do
+    case Connection.transaction(pool, &index_batch(&1, name), timeout) do
       {:ok, 0} -> {:ok, done}
-      {:ok, count} -> refresh_index(pool, index, timeout, done + count)
+      {:ok, count} -> refresh_index(pool, name, timeout, done + count)
       {:error, _} = error -> error
     end
   end
 
-  defp index_batch(txn, index) do
+  # An index created at runtime is read from the registry inside the batch's
+  # own transaction; one dropped meanwhile has nothing left to index.
+  defp index_batch(txn, name) do
+    case index_def(txn, name) do
+      {:ok, nil} -> {:ok, 0}
+      {:ok, index} -> queued_batch(txn, index)
+      {:error, _} = error -> error
+    end
+  end
+
+  defp index_def(txn, name) do
+    case Map.fetch(FullText.indexes(), name) do
+      {:ok, index} ->
+        {:ok, Map.put(index, :key_type, "text")}
+
+      :error ->
+        with {:ok, %{rows: rows}} <-
+               native(
+                 txn,
+                 "SELECT table_name, key_column, key_type, columns, tokenize FROM optimal_fts_indexes WHERE name = $1",
+                 [name]
+               ) do
+          case rows do
+            [[table, key, key_type, columns, tokenize]] ->
+              {:ok,
+               %{
+                 name: name,
+                 table: table,
+                 key: key,
+                 key_type: key_type,
+                 columns: columns,
+                 tokenize: tokenize
+               }}
+
+            [] ->
+              {:ok, nil}
+          end
+        end
+    end
+  end
+
+  @doc """
+  Creates a full-text index on `table` inside the caller's transaction: its
+  registry row, its trigger and its totals, with every row the table holds
+  queued. `index` has `:name`, `:table`, `:key` (a text or bigint column),
+  `:key_type` (`"text"` or `"bigint"`), `:columns` and `:tokenize`, FTS5's
+  option.
+  """
+  @spec create_index(term(), map()) :: :ok | {:error, term()}
+  def create_index(txn, %{key_type: key_type} = index) when key_type in ["text", "bigint"] do
+    run_all(txn, [
+      {"""
+       INSERT INTO optimal_fts_indexes (name, table_name, key_column, key_type, columns, tokenize)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       """, [index.name, index.table, index.key, key_type, index.columns, index.tokenize]}
+      | index_ddl(index)
+    ])
+  end
+
+  @doc "Drops a full-text index created with `create_index/2`, inside the caller's transaction."
+  @spec drop_index(term(), String.t(), String.t()) :: :ok | {:error, term()}
+  def drop_index(txn, name, table) do
+    run_all(txn, [
+      "DROP TRIGGER IF EXISTS #{quote_name(name <> "_enqueue")} ON #{quote_name(table)}",
+      "DROP VIEW IF EXISTS #{quote_name(name)}",
+      {"DELETE FROM optimal_fts_postings WHERE index_name = $1", [name]},
+      {"DELETE FROM optimal_fts_docs WHERE index_name = $1", [name]},
+      {"DELETE FROM optimal_fts_queue WHERE index_name = $1", [name]},
+      {"DELETE FROM optimal_fts_totals WHERE index_name = $1", [name]},
+      {"DELETE FROM optimal_fts_indexes WHERE name = $1", [name]}
+    ])
+  end
+
+  defp queued_batch(txn, index) do
     with {:ok, %{rows: queued}} <-
            native(
              txn,
@@ -131,8 +215,8 @@ defmodule OptimalEngine.Store.Postgres.FullText do
     columns = Enum.map_join(index.columns, ", ", &quote_name/1)
 
     current =
-      "SELECT #{quote_name(index.key)}, #{columns} FROM #{quote_name(index.table)} " <>
-        "WHERE #{quote_name(index.key)} = ANY($1::text[])"
+      "SELECT #{quote_name(index.key)}::text, #{columns} FROM #{quote_name(index.table)} " <>
+        "WHERE #{quote_name(index.key)} = ANY($1::text[]::#{index.key_type}[])"
 
     with {:ok, %{rows: rows}} <- native(txn, current, [keys]),
          tokenized =
@@ -260,6 +344,16 @@ defmodule OptimalEngine.Store.Postgres.FullText do
       )
       """,
       "CREATE INDEX IF NOT EXISTS optimal_fts_queue_index ON optimal_fts_queue (index_name, seq)",
+      """
+      CREATE TABLE IF NOT EXISTS optimal_fts_indexes (
+        name TEXT COLLATE "C" PRIMARY KEY,
+        table_name TEXT COLLATE "C" NOT NULL,
+        key_column TEXT COLLATE "C" NOT NULL,
+        key_type TEXT COLLATE "C" NOT NULL,
+        columns TEXT[] NOT NULL,
+        tokenize TEXT
+      )
+      """,
       enqueue_function(),
       match_function()
     ]
@@ -423,7 +517,7 @@ defmodule OptimalEngine.Store.Postgres.FullText do
          ON CONFLICT (index_name) DO NOTHING RETURNING index_name
        )
        INSERT INTO optimal_fts_queue (index_name, doc_key)
-       SELECT added.index_name, t.#{quote_name(key)} FROM added CROSS JOIN #{quote_name(table)} t
+       SELECT added.index_name, t.#{quote_name(key)}::text FROM added CROSS JOIN #{quote_name(table)} t
        ORDER BY t.#{quote_name(key)}
        """, [name]}
     ]

@@ -33,7 +33,7 @@ The "Wired?" column says whether a working adapter exists in this repository tod
 | Substrate | Role | Canonical? | Rebuildable? | Wired? | Notes |
 | --- | --- | --- | --- | --- | --- |
 | SQLite | The canonical relational store of every default build. | Yes. | No for durable rows; yes for derived rows. | Wired, the default. | Owns the DB-backed runtime tables. One file, one writer. |
-| Postgres | Optional provider for scale: the canonical relational store of a Postgres build. | Yes, in a Postgres build. | No for durable rows; yes for derived rows. | Wired, partial. | Chosen at compile time with `OPTIMAL_STORE=postgres`. It refuses replication and app data collections. See [PostgreSQL Provider](../guides/postgres-provider.md). |
+| Postgres | Optional provider for scale: the canonical relational store of a Postgres build. | Yes, in a Postgres build. | No for durable rows; yes for derived rows. | Wired, partial. | Chosen at compile time with `OPTIMAL_STORE=postgres`. It refuses replication. See [PostgreSQL Provider](../guides/postgres-provider.md). |
 | Raw artifact storage (filesystem) | Preserved source files, uploads, attachments, media, exported payloads. | Yes. | No unless the external source still exists. | Wired, the default. | Lives under the Engine root. Source evidence must survive parser, model, and index changes. |
 | S3-compatible object storage | Assets and offsite backups for the Engine that is configured with it. | Yes for the artifacts assigned to it. | No unless replicated elsewhere. | Wired. | Garage, AWS S3, R2, MinIO, or a MIOSA bucket. Backups are sealed with `OPTIMAL_BACKUP_KEY` before upload. |
 | FTS5, vector, and chunk indexes | Retrieval acceleration and ranked candidate generation. | No. | Yes. | Wired, embedded. | FTS5 tables and float32 vector BLOBs live in the SQLite file. A Postgres build has no full-text search. |
@@ -254,7 +254,7 @@ Each moves one concern off the single disk without changing what the Engine stor
 | Concern | Provider | Status |
 | --- | --- | --- |
 | Assets and offsite backups | S3-compatible storage: Garage, AWS S3, R2, MinIO, a MIOSA bucket | Wired. |
-| Canonical relational store | PostgreSQL, a compile-time `OPTIMAL_STORE=postgres` build | Wired, partial. It refuses replication and app data collections. |
+| Canonical relational store | PostgreSQL, a compile-time `OPTIMAL_STORE=postgres` build | Wired, partial. It refuses replication. |
 | Replayable events and jobs | NATS JetStream | Adapter wired; `available` when `OPTIMAL_NATS_URL` answers with JetStream. The change ledger is published to it with `OPTIMAL_NATS_FLOWS=ledger`, background jobs are dispatched through it with `jobs` (the `jobs` table stays the record), connector intake is queued on it with `intake`. |
 | Distributed cache and locks | Valkey | In the data path when `OPTIMAL_VALKEY_URL` is set: shared rate limits and caches, ETS while it is down. |
 | High-scale vectors | Qdrant | Adapter wired; `available` when `OPTIMAL_QDRANT_URL` lists collections. |

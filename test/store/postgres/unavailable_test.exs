@@ -11,7 +11,7 @@ defmodule OptimalEngine.Store.Postgres.UnavailableTest do
   alias OptimalEngine.Store.Postgres.{Connection, Schema}
   alias OptimalEngine.Test.PostgresStore
 
-  @features ~w(replication app_data_collections runtime_schema_and_transactions)
+  @features ~w(replication runtime_schema_and_transactions)
 
   # Where the PostgreSQL store and its dialect refuse a statement or a feature.
   @refusing ~w(lib/optimal_engine/store/dialect.ex lib/optimal_engine/store/postgres/connection.ex
@@ -93,7 +93,7 @@ defmodule OptimalEngine.Store.Postgres.UnavailableTest do
       released()
     end
 
-    test "does not start with an app data collection", %{schema: schema, pool: pool} do
+    test "starts with an app data collection, which it serves", %{schema: schema, pool: pool} do
       {:ok, plan} = Schema.derive()
       table = Enum.find(plan.tables, &(&1.name == "data_collections"))
 
@@ -122,9 +122,8 @@ defmodule OptimalEngine.Store.Postgres.UnavailableTest do
           Enum.map(names, &Map.fetch!(row, &1))
         )
 
-      assert {:error, {:postgres_store_failed, {:unsupported_in_use, ["app_data_collections"]}}} =
-               start_store(schema)
-
+      assert {:ok, store} = start_store(schema)
+      GenServer.stop(store)
       released()
     end
   end

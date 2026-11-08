@@ -74,7 +74,7 @@ Use these words precisely:
 | Layer | Meaning |
 | --- | --- |
 | SQLite | Durable canonical runtime store of the default build; one Engine instance holds every store inside it. |
-| Postgres | Optional provider for scale, partial: a compile-time `OPTIMAL_STORE=postgres` build without replication or app data collections. |
+| Postgres | Optional provider for scale, partial: a compile-time `OPTIMAL_STORE=postgres` build without replication. |
 | RocksDB | Persistent triple-store mirror of the graph: the default of `scripts/run-engine.sh`; elsewhere opt in with `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`. |
 | ETS | In-memory triple-store mirror of the graph: the config default (bare `mix`, tests), and what the Docker image and MIOSA template run. |
 | Mnesia | Experimental graph backend, `ram_copies` only. |

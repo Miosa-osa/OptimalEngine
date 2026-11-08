@@ -37,6 +37,7 @@ defmodule OptimalEngine.AppData.Query do
   """
 
   alias OptimalEngine.AppData.{Collections, Records, Schema, Scope, Semantic, SQL}
+  alias OptimalEngine.Store.FullText
 
   @default_limit 50
   @max_limit 1_000
@@ -104,7 +105,7 @@ defmodule OptimalEngine.AppData.Query do
 
     {cursor_sql, cursor_params} =
       case decode_cursor(plan.spec["cursor"], hash, length(sort)) do
-        nil -> {"1", []}
+        nil -> {"(1 = 1)", []}
         {values, rowid} -> keyset(sort, values, rowid)
       end
 
@@ -168,17 +169,35 @@ defmodule OptimalEngine.AppData.Query do
   # Full-text matches are computed once (FTS5 first, materialized), then
   # joined to the collection by primary key. Letting SQLite drive the join
   # from the collection side probes FTS5 once per candidate row instead.
+  #
+  # On PostgreSQL the collection's index is the store's posting list, read
+  # through optimal_fts_match; its score is -bm25(), so `_score` is negated
+  # back to bm25()'s sign and the sort is the same on both stores.
   defp join(c, {:text, query}) when is_binary(query) do
     fts = Collections.fts_table(c)
 
-    {~s[WITH s AS MATERIALIZED (SELECT rowid AS _rid, bm25("#{fts}") AS _score FROM "#{fts}" WHERE "#{fts}" MATCH ?)],
-     [query]}
+    if postgres?() do
+      {:ok, param} = FullText.query_json(Collections.fts_tokenize(), query)
+
+      {~s[WITH s AS MATERIALIZED (SELECT doc_key::bigint AS _rid, -score AS _score FROM optimal_fts_match('#{fts}', ?))],
+       [param]}
+    else
+      {~s[WITH s AS MATERIALIZED (SELECT rowid AS _rid, bm25("#{fts}") AS _score FROM "#{fts}" WHERE "#{fts}" MATCH ?)],
+       [query]}
+    end
   end
 
   defp join(_c, _mode), do: {"", []}
 
-  defp source(c, {:text, _}), do: ~s[s CROSS JOIN "#{c.table}" t ON t."_rowid" = s._rid]
+  defp source(c, {:text, _}) do
+    if postgres?(),
+      do: ~s[s JOIN "#{c.table}" t ON t."_rowid" = s._rid],
+      else: ~s[s CROSS JOIN "#{c.table}" t ON t."_rowid" = s._rid]
+  end
+
   defp source(c, _mode), do: ~s["#{c.table}" t]
+
+  defp postgres?, do: OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres)
 
   defp score_expr({:text, _}), do: "s._score"
   defp score_expr(_mode), do: "NULL"
@@ -330,7 +349,7 @@ defmodule OptimalEngine.AppData.Query do
 
   defp after_key({expr, :asc}, nil), do: {"#{expr} IS NOT NULL", []}
   defp after_key({expr, :asc}, value), do: {"#{expr} > ?", [value]}
-  defp after_key({_expr, :desc}, nil), do: {"0", []}
+  defp after_key({_expr, :desc}, nil), do: {"(1 = 0)", []}
   defp after_key({expr, :desc}, value), do: {"(#{expr} < ? OR #{expr} IS NULL)", [value]}
 
   defp cursor_hash(plan, sort) do
@@ -377,8 +396,8 @@ defmodule OptimalEngine.AppData.Query do
     {:ok, compile(where, ctx)}
   end
 
-  defp compile(nil, _ctx), do: {"1", []}
-  defp compile(where, _ctx) when where == %{}, do: {"1", []}
+  defp compile(nil, _ctx), do: {"(1 = 1)", []}
+  defp compile(where, _ctx) when where == %{}, do: {"(1 = 1)", []}
 
   defp compile(_where, %{depth: depth}) when depth > @max_depth,
     do: throw({:bad_query, "where nests deeper than #{@max_depth} levels"})
@@ -414,7 +433,7 @@ defmodule OptimalEngine.AppData.Query do
 
   defp compile(_where, _ctx), do: throw({:bad_query, "where must be an object"})
 
-  defp combine([], _joiner), do: {"1", []}
+  defp combine([], _joiner), do: {"(1 = 1)", []}
 
   defp combine(parts, joiner) do
     {Enum.map_join(parts, " #{joiner} ", &"(#{elem(&1, 0)})"), Enum.flat_map(parts, &elem(&1, 1))}
@@ -476,13 +495,17 @@ defmodule OptimalEngine.AppData.Query do
     do: throw({:bad_query, "#{name}: is_null takes true or false"})
 
   defp condition(expr, %{"type" => "json"}, name, "contains", value) do
-    {"EXISTS (SELECT 1 FROM json_each(#{expr}) WHERE json_each.value = ?)",
-     [json_scalar(name, value)]}
+    scalar = json_scalar(name, value)
+
+    if postgres?(),
+      do: json_contains_postgres(expr, scalar),
+      else: {"EXISTS (SELECT 1 FROM json_each(#{expr}) WHERE json_each.value = ?)", [scalar]}
   end
 
   defp condition(expr, %{"type" => type} = field, name, "contains", value)
        when type in ~w(string text) do
-    {"instr(#{expr}, ?) > 0", [filter_value(field, name, value)]}
+    function = if postgres?(), do: "strpos", else: "instr"
+    {"#{function}(#{expr}, ?) > 0", [filter_value(field, name, value)]}
   end
 
   defp condition(_expr, _field, name, "contains", _value),
@@ -497,7 +520,7 @@ defmodule OptimalEngine.AppData.Query do
         throw({:bad_query, "#{name}: #{op} needs a list of at most #{@max_in} values"})
 
       values == [] ->
-        {if(op == "in", do: "0", else: "1"), []}
+        {if(op == "in", do: "(1 = 0)", else: "(1 = 1)"), []}
 
       true ->
         keyword = if op == "in", do: "IN", else: "NOT IN"
@@ -547,6 +570,32 @@ defmodule OptimalEngine.AppData.Query do
       {:ok, normalized} -> normalized
       :error -> throw({:bad_query, "#{name}: expected an ISO 8601 datetime"})
     end
+  end
+
+  # SQLite's json_each walks an array's elements, an object's values, or the
+  # value itself, and gives each as SQLite gives JSON values: a string as text,
+  # a number as a number, true and false as 1 and 0. The comparison is by type,
+  # so a string never equals a number. The PostgreSQL condition walks the same
+  # values as jsonb and compares the same way.
+  defp json_contains_postgres(expr, scalar) do
+    values =
+      "(SELECT j.value FROM jsonb_array_elements(CASE WHEN jsonb_typeof(#{expr}::jsonb) = 'array' THEN #{expr}::jsonb END) AS j(value) " <>
+        "UNION ALL SELECT o.value FROM jsonb_each(CASE WHEN jsonb_typeof(#{expr}::jsonb) = 'object' THEN #{expr}::jsonb END) AS o(key, value) " <>
+        "UNION ALL SELECT #{expr}::jsonb WHERE jsonb_typeof(#{expr}::jsonb) NOT IN ('array', 'object'))"
+
+    match =
+      cond do
+        is_binary(scalar) ->
+          "v.value = to_jsonb(CAST(? AS text))"
+
+        scalar in [0, 1] ->
+          "(v.value = to_jsonb(CAST(? AS double precision)) OR v.value = '#{if scalar == 1, do: "true", else: "false"}'::jsonb)"
+
+        true ->
+          "v.value = to_jsonb(CAST(? AS double precision))"
+      end
+
+    {"EXISTS (SELECT 1 FROM #{values} AS v(value) WHERE #{match})", [scalar]}
   end
 
   defp json_scalar(_name, true), do: 1
