@@ -21,6 +21,27 @@ defmodule OptimalEngine.Storage.Providers do
   (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`). On an ETS knowledge store it reports
   `available`: the library is loaded and a restart with that setting moves the
   graph onto it.
+
+  ## Reachable is not in the data path
+
+  `lifecycle_state` and `health` say whether a provider answers. They do not
+  say whether the Engine keeps anything in it: an adapter may only probe and
+  prove a round trip. Two more fields say that:
+
+    * `serves`: what the Engine routes through this provider when it is
+      configured and selected (`canonical_store`, `full_text_search`,
+      `api_rate_limits`, ...). An adapter that exports `serves/0` declares it
+      itself; otherwise the registry below does. An empty list means the
+      adapter only checks the provider: nothing the Engine stores goes there.
+    * `data_path`: `serving` when the Engine routes those things through the
+      provider now (it serves something, is configured, is the store this
+      build selected or the backend in use, and is not `unavailable`);
+      `standby` when it would but is not configured, not selected, not in use
+      or unavailable; `probe_only` when the adapter serves nothing; `none`
+      when there is no adapter.
+
+  A platform that needs a provider to hold data checks `data_path ==
+  "serving"`; one that needs it reachable checks `lifecycle_state` as before.
   """
 
   @providers [
@@ -34,6 +55,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(relational temporal jobs metrics backups model_registry)a,
       activation: "default_local",
       probe: :store,
+      serves: ~w(canonical_store),
       required_env: [],
       optional_env: []
     },
@@ -46,6 +68,8 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(full_text)a,
       activation: "default_local",
       probe: :store,
+      serves: ~w(full_text_search),
+      serves_with: OptimalEngine.Store.SQLite,
       required_env: [],
       optional_env: []
     },
@@ -58,6 +82,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(vector)a,
       activation: "default_local",
       probe: :store,
+      serves: ~w(vector_search),
       required_env: [],
       optional_env: []
     },
@@ -71,6 +96,7 @@ defmodule OptimalEngine.Storage.Providers do
       activation: "default_local",
       in_use: :knowledge_backend,
       probe: {:module, :rocksdb},
+      serves: ~w(graph_mirror),
       required_env: [],
       optional_env: []
     },
@@ -83,6 +109,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(objects assets)a,
       activation: "default_local",
       probe: :root_path,
+      serves: ~w(assets),
       required_env: [],
       optional_env: []
     },
@@ -95,6 +122,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(cache coordination)a,
       activation: "default_local",
       probe: :runtime,
+      serves: ~w(api_rate_limits connector_rate_limits api_key_cache sync_gate_cache),
       required_env: [],
       optional_env: []
     },
@@ -108,6 +136,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(relational temporal document geospatial time_series)a,
       activation: "cloud_team",
       probe: {:postgres_url, "OPTIMAL_POSTGRES_URL"},
+      serves: ~w(canonical_store),
       required_env: ["OPTIMAL_POSTGRES_URL"],
       optional_env: []
     },
@@ -120,6 +149,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(objects assets backups)a,
       activation: "cloud_team",
       probe: :s3,
+      serves: ~w(assets offsite_backups),
       required_env:
         ~w(OPTIMAL_S3_ENDPOINT OPTIMAL_S3_BUCKET OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY),
       optional_env:
@@ -134,6 +164,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(event_stream jobs replication coordination)a,
       activation: "distributed_runtime",
       probe: :nats,
+      serves: [],
       required_env: ["OPTIMAL_NATS_URL"],
       optional_env: []
     },
@@ -146,6 +177,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(cache coordination rate_limits)a,
       activation: "distributed_runtime",
       probe: :valkey,
+      serves: [],
       required_env: ["OPTIMAL_VALKEY_URL"],
       optional_env: []
     },
@@ -158,6 +190,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(vector)a,
       activation: "high_scale_semantic",
       probe: :qdrant,
+      serves: [],
       required_env: ["OPTIMAL_QDRANT_URL"],
       optional_env: ["OPTIMAL_QDRANT_API_KEY"]
     },
@@ -170,6 +203,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(analytics columnar lakehouse)a,
       activation: "analytics",
       probe: :duckdb,
+      serves: [],
       required_env: ["OPTIMAL_ANALYTICS_PATH"],
       optional_env: []
     },
@@ -182,6 +216,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(secrets kms pki)a,
       activation: "cloud_team",
       probe: :openbao,
+      serves: [],
       required_env: ["OPTIMAL_OPENBAO_ADDR", "OPTIMAL_OPENBAO_TOKEN"],
       optional_env: []
     },
@@ -194,6 +229,7 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(digital_twin distributed_analytics ai_safe_structured_data)a,
       activation: "enterprise_ai",
       probe: {:http, "OPTIMAL_FRACTAL_ENDPOINT", "/"},
+      serves: [],
       required_env: ["OPTIMAL_FRACTAL_ENDPOINT", "OPTIMAL_FRACTAL_CREDENTIAL_REF"],
       optional_env: []
     }
@@ -306,15 +342,21 @@ defmodule OptimalEngine.Storage.Providers do
 
     adapter_implemented = adapter_implemented?(provider.adapter)
     lifecycle_state = lifecycle_state(provider, adapter_implemented, configured, health, in_use)
+    serves = serves(provider, adapter_implemented)
+
+    data_path =
+      data_path(adapter_implemented, serves, routed?(provider, configured, in_use), lifecycle_state)
 
     provider
-    |> Map.drop([:adapter, :store, :probe, :required_env, :optional_env, :in_use])
+    |> Map.drop([:adapter, :store, :probe, :required_env, :optional_env, :in_use, :serves_with])
     |> put_selected(provider)
     |> Map.put(:adapter_implemented, adapter_implemented)
     |> Map.put(:adapter_module, adapter_name(provider.adapter, adapter_implemented))
     |> Map.put(:configured, configured)
     |> Map.put(:health, Atom.to_string(health))
     |> Map.put(:lifecycle_state, lifecycle_state)
+    |> Map.put(:serves, serves)
+    |> Map.put(:data_path, data_path)
     |> Map.put(:required_environment, provider.required_env)
     |> Map.put(:optional_environment, provider.optional_env)
     |> Map.put(:missing_environment, missing)
@@ -348,6 +390,32 @@ defmodule OptimalEngine.Storage.Providers do
   defp lifecycle_state(_provider, true, true, :healthy, _in_use), do: "available"
   defp lifecycle_state(_provider, true, true, :configured, _in_use), do: "configured_unverified"
   defp lifecycle_state(_provider, true, true, _health, _in_use), do: "unavailable"
+
+  # The adapter's own declaration, when it makes one, is the truth about what
+  # it carries; the registry's covers the providers whose adapter is the store.
+  defp serves(_provider, false), do: []
+
+  defp serves(provider, true) do
+    if function_exported?(provider.adapter, :serves, 0),
+      do: Enum.map(provider.adapter.serves(), &to_string/1),
+      else: provider.serves
+  end
+
+  # Whether this Engine routes anything to the provider now: configured, the
+  # backend in use, the canonical store this build selected, and (for FTS5) on
+  # the store it lives in.
+  defp routed?(provider, configured, in_use) do
+    configured and in_use and store_selected?(Map.get(provider, :store)) and
+      store_selected?(Map.get(provider, :serves_with))
+  end
+
+  defp store_selected?(nil), do: true
+  defp store_selected?(store), do: OptimalEngine.Store.selected?(store)
+
+  defp data_path(false, _serves, _routed, _lifecycle_state), do: "none"
+  defp data_path(true, [], _routed, _lifecycle_state), do: "probe_only"
+  defp data_path(true, _serves, true, state) when state != "unavailable", do: "serving"
+  defp data_path(true, _serves, _routed, _lifecycle_state), do: "standby"
 
   defp adapter_implemented?(nil), do: false
   defp adapter_implemented?(module) when is_atom(module), do: Code.ensure_loaded?(module)

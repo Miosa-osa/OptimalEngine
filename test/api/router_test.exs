@@ -162,6 +162,16 @@ defmodule OptimalEngine.API.RouterTest do
       assert postgres["adapter_implemented"]
       assert postgres["lifecycle_state"] == "configured_unverified"
       assert is_boolean(postgres["selected"])
+      assert postgres["serves"] == ["canonical_store"]
+
+      # Reachable and in the data path are told apart for every provider.
+      for provider <- body["providers"] do
+        assert is_list(provider["serves"]), provider["id"]
+        assert provider["data_path"] in ~w(serving standby probe_only none), provider["id"]
+      end
+
+      nats = Enum.find(body["providers"], &(&1["id"] == "nats_jetstream"))
+      assert nats["data_path"] == "probe_only"
       refute conn.resp_body =~ "private-user"
       refute conn.resp_body =~ "private-pass"
     end

@@ -7,7 +7,9 @@ defmodule OptimalEngine.Storage.Planner do
   cross-workspace routing have a large blast radius. A plan that selects a
   provider without an engine adapter lists it under `adapter_missing` and is
   never `ready`, and neither is a plan with a canonical store the build does
-  not run on (`selected: false`), however healthy its service is.
+  not run on (`selected: false`), however healthy its service is. A provider
+  whose adapter only checks it (`data_path: "probe_only"`) is listed under
+  `probe_only`: reachable, but holding none of the plan's data.
   """
 
   alias OptimalEngine.Storage.Providers
@@ -102,6 +104,7 @@ defmodule OptimalEngine.Storage.Planner do
          ready: Enum.all?(selected, &ready?/1),
          activation_required: Enum.filter(selected, &(not ready?(&1))) |> Enum.map(& &1.id),
          adapter_missing: Enum.reject(selected, & &1.adapter_implemented) |> Enum.map(& &1.id),
+         probe_only: Enum.filter(selected, &(&1.data_path == "probe_only")) |> Enum.map(& &1.id),
          invariant:
            "Canonical data remains governed by its domain owner; projections and transports never become truth."
        }}
