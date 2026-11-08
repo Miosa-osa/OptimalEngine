@@ -31,11 +31,13 @@ defmodule OptimalEngine.Storage.NATS do
   @flows_env "OPTIMAL_NATS_FLOWS"
   @namespace_env "OPTIMAL_NATS_NAMESPACE"
   @default_namespace "optimal"
-  @flows ~w(ledger)
+  @flows ~w(ledger jobs intake)
 
   @doc """
   The Engine flows that run through JetStream, from `OPTIMAL_NATS_FLOWS`: a
-  comma-separated list of #{Enum.map_join(@flows, ", ", &"`#{&1}`")}, or `all`.
+  comma-separated list of #{Enum.map_join(@flows, ", ", &"`#{&1}`")}, or `all`
+  (`ledger`: `NATS.LedgerPublisher`; `jobs`: `NATS.JobQueue`; `intake`:
+  `NATS.IntakeQueue`).
   None by default: setting the URL alone only checks and proves the server,
   and nothing the Engine holds leaves it until a flow is named. A name that is
   not a flow is ignored.

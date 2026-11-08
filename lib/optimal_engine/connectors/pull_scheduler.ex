@@ -370,17 +370,29 @@ defmodule OptimalEngine.Connectors.PullScheduler do
   # signal's body is re-driven through the full intake pipeline, attributed to
   # the workspace `Connectors.Routing` resolves for it, and what it implies
   # (open loops, outward evidence) is recorded alongside the ingest.
+  #
+  # With the `intake` NATS flow on, the signals are queued on JetStream first
+  # (`Storage.NATS.IntakeQueue`), each acknowledged by the stream before the
+  # Runner moves the cursor, and the queue's consumer ingests them; what could
+  # not be queued is ingested here, as without NATS. `:queue` names the queue
+  # (tests).
   @doc false
-  def intake_sink do
+  def intake_sink(opts \\ []) do
+    queue = Keyword.get(opts, :queue, OptimalEngine.Storage.NATS.IntakeQueue)
+
     fn signals, scope ->
-      refused = Enum.count(signals, &(ingest_signal(&1, scope) == :refused))
+      {_queued, rest} = OptimalEngine.Storage.NATS.IntakeQueue.offer(queue, signals, scope)
+      refused = Enum.count(rest, &(ingest_signal(&1, scope) == :refused))
       {:ok, refused}
     end
   end
 
   # `:ok` when the Signal is stored (or has nothing to store), `:refused` when
-  # intake does not take it. The Runner counts refusals in the run.
-  defp ingest_signal(signal, scope) do
+  # intake does not take it. The Runner counts refusals in the run; the NATS
+  # intake queue ingests through it too.
+  @doc false
+  @spec ingest_signal(OptimalEngine.Signal.t(), map()) :: :ok | :refused
+  def ingest_signal(signal, scope) do
     content = signal.content || ""
 
     if String.trim(content) == "" do

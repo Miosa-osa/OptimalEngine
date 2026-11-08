@@ -330,6 +330,7 @@ Every tick (`tick_ms`, one minute by default) it reads the enabled connector row
 The Runner writes one `connector_runs` row for every sync it attempts, including one whose adapter could not be initialised, advances the cursor only on success, disables a connector on a fatal error, and retries rate limits and transient failures with backoff.
 A connector whose workspace was archived fails its run with `workspace_archived` instead of pulling into a retired workspace.
 The produced Signals are driven through `OptimalEngine.Pipeline.Intake`, which is where routing, loops and outward tagging happen.
+With `intake` in `OPTIMAL_NATS_FLOWS` and NATS connected, they are queued on a JetStream work queue first, each acknowledged by the stream before the cursor moves, and ingested by the queue's consumer; see [Connector intake](storage-providers.md#connector-intake).
 
 | Setting (`config :optimal_engine, :pull_scheduler`) | Default | Meaning |
 | --- | --- | --- |

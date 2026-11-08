@@ -19,7 +19,9 @@ defmodule OptimalEngine.Storage.NATS.Supervisor do
   def init(_opts) do
     children = [
       OptimalEngine.Storage.NATS.Connection,
-      OptimalEngine.Storage.NATS.LedgerPublisher
+      OptimalEngine.Storage.NATS.LedgerPublisher,
+      OptimalEngine.Storage.NATS.JobQueue,
+      OptimalEngine.Storage.NATS.IntakeQueue
     ]
 
     Supervisor.init(children, strategy: :rest_for_one, max_restarts: 10, max_seconds: 60)
