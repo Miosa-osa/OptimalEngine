@@ -95,7 +95,7 @@ Use these terms precisely:
 | Store | Role |
 | --- | --- |
 | SQLite | The canonical runtime store of the default build, in the same instance as FTS5 and vectors. |
-| Postgres | Optional provider for scale: a compile-time `OPTIMAL_STORE=postgres` build, partial (no replication). |
+| Postgres | Optional provider for scale: an `OPTIMAL_STORE=postgres` Engine, partial (no replication). |
 | Raw artifact storage | Preserved files, uploads, attachments, and media evidence. |
 | FTS, vector, chunk, cache rows | Rebuildable retrieval and acceleration projections. |
 | RocksDB | Persistent triple-store mirror of the graph: the default of `scripts/run-engine.sh`; elsewhere opt in with `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`. |

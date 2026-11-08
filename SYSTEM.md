@@ -43,7 +43,7 @@ The triple store (ETS or RocksDB) is a mirror rebuilt from it, and no retrieval 
 The mirror is ETS, in memory, under bare `mix`, in tests, in the Docker image, and in the MIOSA template and managed Engines, because none of them sets `OPTIMAL_KNOWLEDGE_BACKEND`.
 `scripts/run-engine.sh` defaults it to RocksDB, and `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb` with `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` selects it anywhere.
 Mnesia is an experiment with `ram_copies` tables, and Riak is in no build.
-Providers are things a deployment grows onto: S3-compatible storage is wired for assets and offsite backups, and Postgres is an optional, partial provider for scale (a compile-time `OPTIMAL_STORE=postgres` build without full-text search, replication, or app data collections).
+Providers are things a deployment grows onto: S3-compatible storage is wired for assets and offsite backups, and Postgres is an optional, partial provider for scale (an `OPTIMAL_STORE=postgres` Engine without full-text search, replication, or app data collections).
 NATS JetStream, Valkey, Qdrant, DuckDB, and OpenBao have adapters that are health-checked and proved by a round trip, and no Engine feature uses them yet; Fractal is declared with no adapter.
 Vectors, chunks, FTS rows, and caches are projections.
 The live logical-store catalog is available through `GET /api/stores`.

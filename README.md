@@ -1054,7 +1054,7 @@ SQLite: canonical runtime store, with FTS5 and vectors in the same file
 Files: assets and objects, caches, backups
 graph_edges in SQLite: the graph; ETS or RocksDB: a mirror of it
 S3-compatible storage: wired for assets and offsite backups
-Postgres: wired but partial, a compile-time OPTIMAL_STORE=postgres build
+Postgres: wired but partial, an OPTIMAL_STORE=postgres Engine
           that refuses replication
 Valkey, NATS JetStream, Qdrant, OpenBao, DuckDB: adapters wired, proved by a round trip; Fractal: declared, no adapter yet
 Markdown/files/wiki/HTML/API: export and control surfaces

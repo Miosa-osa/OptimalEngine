@@ -1,5 +1,5 @@
 # One role of scripts/proof-postgres-two-engines.sh. Run with `mix run` in a
-# build compiled with OPTIMAL_STORE=postgres:
+# build started with OPTIMAL_STORE=postgres:
 #
 #   setup            create the proof workspace and its counter row
 #   writer <n>       boot the engine, wait for the start signal, write the

@@ -9,10 +9,11 @@ config :optimal_engine,
   topology_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY", ".optimal/config.yaml"),
   topology_full_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY_FULL", "topology.yaml")
 
-# The canonical store this build runs (OptimalEngine.Store), fixed when the
-# engine is compiled. SQLite is the default. OPTIMAL_STORE=postgres at compile
-# time selects the PostgreSQL store, which then reads OPTIMAL_POSTGRES_URL when
-# it starts (docs/guides/postgres-provider.md).
+# The canonical store the Engine runs (OptimalEngine.Store). SQLite is the
+# default; OPTIMAL_STORE=postgres selects the PostgreSQL store, which reads
+# OPTIMAL_POSTGRES_URL when it starts (docs/guides/postgres-provider.md). A
+# release reads OPTIMAL_STORE when it boots (config/runtime.exs), so one build
+# runs either store.
 store_adapter =
   case System.get_env("OPTIMAL_STORE", "sqlite") do
     "sqlite" -> OptimalEngine.Store.SQLite

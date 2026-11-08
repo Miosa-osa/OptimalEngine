@@ -71,7 +71,7 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OPTIMAL_STORE` | `sqlite` | **Compile time.** `sqlite` or `postgres`: which canonical store the build runs. A Postgres build refuses full-text search, replication, and app data collections. Any other value stops the build. |
+| `OPTIMAL_STORE` | `sqlite` | Read when the Engine boots. `sqlite` or `postgres`: which canonical store the Engine runs; one build runs either. See `docs/guides/postgres-provider.md` for what a PostgreSQL store does not do yet. Any other value stops the boot. |
 | `OPTIMAL_POSTGRES_URL` | none | Connection URL of a Postgres build, read when the store starts. Never logged or returned. |
 | `OPTIMAL_POSTGRES_SCHEMA` | `public` | Schema a Postgres build keeps its tables in; use one per Engine. |
 | `OPTIMAL_S3_ENDPOINT` | none | S3-compatible endpoint base URL. |
@@ -242,7 +242,7 @@ They should not connect to the owner's private engine unless explicitly configur
 | --- | --- | --- |
 | Local source checkout | Developer or local agent work | `bin/optimal dev` runs the engine on `localhost:4200`. |
 | Bundled desktop engine | BusinessOS desktop user | App launches a local release with fresh local runtime data. |
-| Production service | Hosted org or workspace | Service uses production secrets and scoped keys. Postgres is an optional, partial provider chosen when the Engine is built (`OPTIMAL_STORE=postgres`, compile time), not switched on by configuring a URL. |
+| Production service | Hosted org or workspace | Service uses production secrets and scoped keys. Postgres is an optional, partial provider chosen when the Engine boots (`OPTIMAL_STORE=postgres`), not switched on by configuring a URL alone. |
 | Test mode | CI and unit tests | Use isolated temp stores and avoid private `.optimal/` data. |
 
 ## Compatibility And API Grants
