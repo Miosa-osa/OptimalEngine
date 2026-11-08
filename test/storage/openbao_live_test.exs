@@ -27,11 +27,11 @@ defmodule OptimalEngine.Storage.OpenBaoLiveTest do
   alias OptimalEngine.Secrets
   alias OptimalEngine.Storage.OpenBao
 
-  @addr System.get_env("OPTIMAL_TEST_OPENBAO_ADDR")
-  @token System.get_env("OPTIMAL_TEST_OPENBAO_TOKEN")
+  @configured System.get_env("OPTIMAL_TEST_OPENBAO_ADDR") != nil and
+                System.get_env("OPTIMAL_TEST_OPENBAO_TOKEN") != nil
   @unseal_key System.get_env("OPTIMAL_TEST_OPENBAO_UNSEAL_KEY")
 
-  if is_nil(@addr) or is_nil(@token) do
+  unless @configured do
     @moduletag skip: "set OPTIMAL_TEST_OPENBAO_ADDR and OPTIMAL_TEST_OPENBAO_TOKEN to run"
   end
 
@@ -44,8 +44,8 @@ defmodule OptimalEngine.Storage.OpenBaoLiveTest do
     kv = "optimal-it-kv-#{run}"
     transit = "optimal-it-transit-#{run}"
 
-    System.put_env("OPTIMAL_OPENBAO_ADDR", @addr)
-    System.put_env("OPTIMAL_OPENBAO_TOKEN", @token)
+    System.put_env("OPTIMAL_OPENBAO_ADDR", addr())
+    System.put_env("OPTIMAL_OPENBAO_TOKEN", token())
     System.put_env("OPTIMAL_OPENBAO_KV_MOUNT", kv)
     Secrets.flush_cache()
 
@@ -63,15 +63,19 @@ defmodule OptimalEngine.Storage.OpenBaoLiveTest do
     %{kv: kv, transit: transit}
   end
 
+  # Read at run time: the module attributes are nil when the suite skips it.
+  defp addr, do: System.get_env("OPTIMAL_TEST_OPENBAO_ADDR")
+  defp token, do: System.get_env("OPTIMAL_TEST_OPENBAO_TOKEN")
+
   defp admin(method, path, body \\ nil) do
     opts = [
       method: method,
-      headers: [{"X-Vault-Token", @token}, {"content-type", "application/json"}],
+      headers: [{"X-Vault-Token", token()}, {"content-type", "application/json"}],
       single_attempt: true
     ]
 
     opts = if body, do: Keyword.put(opts, :body, body), else: opts
-    {:ok, %{status: status}} = HTTP.request(@addr <> path, opts)
+    {:ok, %{status: status}} = HTTP.request(addr() <> path, opts)
     status
   end
 
