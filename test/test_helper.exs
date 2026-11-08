@@ -29,6 +29,18 @@ exclude =
     do: [:sqlite_store | exclude],
     else: exclude
 
+# Analytics against a real DuckDB run with OPTIMAL_TEST_DUCKDB naming the
+# `duckdb` executable (test/analytics/analytics_duckdb_test.exs).
+exclude =
+  case System.get_env("OPTIMAL_TEST_DUCKDB") do
+    path when is_binary(path) and path != "" ->
+      exclude
+
+    _ ->
+      IO.puts("DuckDB analytics tests skipped: set OPTIMAL_TEST_DUCKDB to a duckdb executable.")
+      [:duckdb | exclude]
+  end
+
 # The 100 MB Notion import timing runs only when asked for (--only notion_scale).
 ExUnit.configure(exclude: [:notion_scale | exclude])
 

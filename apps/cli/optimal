@@ -312,7 +312,8 @@ value_opt() {
       timezone | type | intent | scale | modality | path | action | resource | data-class | subject | \
       ttl | sender | domain | label | channel | text | since | name | workspaces | date | query | \
       audience | justification | for | slug | days | bandwidth | correlation-id | summary | out | \
-      after | until | format | as-of | mode) return 0 ;;
+      after | until | format | as-of | mode | bucket | from | to | metric | peer | table | \
+      origin) return 0 ;;
   esac
   return 1
 }
@@ -1191,6 +1192,11 @@ Setup and health
   analyses run <kind> [ws]         run one now (admin scope): promises, workspace_population,
                                    meeting_archive, file_audit, storage_usage, retention_sweep
   jobs [ws] [--state available|running|completed|dead]
+  analytics [ws]                   what the workspace's analytics hold and the questions they answer
+  analytics query <dataset> [ws] [--bucket hour|day|week|month] [--from] [--to] [-n]
+                                   [--metric] [--peer] [--table] [--origin local|peer] [--kind]
+                                   datasets: metrics, sync_runs, ledger, usage (read-only, Parquet via DuckDB)
+  analytics export [ws]            rebuild the workspace's Parquet files now (admin scope)
 
 Engine
   status | health | version | doctor | url | workspaces | organizations
@@ -1615,6 +1621,33 @@ case $CMD in
       use_ws "${1:-}"
       get /api/analyses "" workspace "$WS" kind "${O_kind:-}" limit "${O_limit:-}"
     fi
+    ;;
+  analytics)
+    _sub=${1:-}
+    case $_sub in
+      query)
+        shift
+        too_many $# 2 "analytics query"
+        [ -n "${1:-}" ] || usage_die "analytics query needs a dataset: metrics, sync_runs, ledger or usage"
+        case $1 in metrics | sync_runs | ledger | usage) ;; *) usage_die "unknown dataset '$1'; one of metrics, sync_runs, ledger, usage" ;; esac
+        case ${O_bucket:-day} in hour | day | week | month) ;; *) usage_die "--bucket takes hour, day, week or month" ;; esac
+        use_ws "${2:-}"
+        get /api/analytics/query "" workspace "$WS" dataset "$1" bucket "${O_bucket:-}" \
+          from "${O_from:-}" to "${O_to:-}" limit "${O_limit:-}" metric "${O_metric:-}" \
+          peer "${O_peer:-}" table "${O_table:-}" origin "${O_origin:-}" kind "${O_kind:-}"
+        ;;
+      export)
+        shift
+        too_many $# 1 "analytics export"
+        use_ws "${1:-}"
+        post /api/analyses/run "$(jobj workspace "$WS" kind analytics_export)"
+        ;;
+      *)
+        too_many $# 1 analytics
+        use_ws "${1:-}"
+        get /api/analytics "" workspace "$WS"
+        ;;
+    esac
     ;;
   jobs)
     too_many $# 1 jobs

@@ -4491,6 +4491,12 @@ defmodule OptimalEngine.API.Router do
   get("/api/jobs/dead", do: AnalysesAPI.dead(conn))
   post("/api/jobs/dead/:id/replay", do: AnalysesAPI.replay(conn, id))
 
+  # ── Analytics over the workspace's Parquet files (OptimalEngine.API.AnalyticsAPI) ─
+  alias OptimalEngine.API.AnalyticsAPI
+
+  get("/api/analytics", do: AnalyticsAPI.status(conn))
+  get("/api/analytics/query", do: AnalyticsAPI.query(conn))
+
   # ── Imports (OptimalEngine.API.ImportsAPI) ───────────────────────────────
   alias OptimalEngine.API.ImportsAPI
 

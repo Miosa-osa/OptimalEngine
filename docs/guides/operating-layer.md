@@ -146,6 +146,7 @@ The Engine runs its standing analyses as durable jobs (`OptimalEngine.Jobs`: ret
 | `file_audit` | the tenant | the storage audit checks and the hierarchy issue count |
 | `storage_usage` | the tenant | usage against the size profile and the resize advice |
 | `retention_sweep` | the tenant | the retention policies applied, held items skipped |
+| `analytics_export` | each workspace, while `OPTIMAL_ANALYTICS_PATH` is set | the workspace's analytics Parquet files rebuilt, with each file's rows |
 
 Each kind runs once a day per workspace (a worker schedules and drains every five minutes, `OPTIMAL_ANALYSES_INTERVAL_MS`, 0 disables).
 

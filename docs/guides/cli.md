@@ -177,6 +177,7 @@ Text arguments may be `-` to read standard input.
 | `chain <correlation, request, or grant id> [ws]` | `GET /api/agent-actions/:id` |
 | `check "draft"\|- [ws] [--channel --bandwidth --genre --type]` | `POST /api/signals/check` (pre-send check) |
 | `analyses [ws] [--kind]`, `analyses run <kind> [ws]` | `GET /api/analyses`, `POST /api/analyses/run` (admin scope) |
+| `analytics [ws]`, `analytics query <dataset> [ws] [--bucket] [--from] [--to] [-n] [--metric] [--peer] [--table] [--origin] [--kind]`, `analytics export [ws]` | `GET /api/analytics`, `GET /api/analytics/query`, `POST /api/analyses/run` with `kind` `analytics_export` (admin scope) |
 | `jobs [ws] [--state]` | `GET /api/jobs` |
 | `status`, `health`, `workspaces`, `organizations` | `GET /api/status`, `/api/health`, `/api/workspaces`, `/api/organizations` |
 | `whoami` | `GET /api/auth/whoami`: the key's scopes and workspaces, never the key |

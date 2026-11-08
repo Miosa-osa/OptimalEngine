@@ -84,6 +84,7 @@ At 70 percent of any limit the recommendation is `resize` to the next profile, w
 | Gauge | Provider the recommendation names | Status |
 | --- | --- | --- |
 | `vectors` | `qdrant` | Reached and proved; the Engine's vector search still reads the embedded vectors. |
+| no gauge (analytics) | `duckdb` | Wired: the daily `analytics_export` analysis writes each workspace's metrics, sync runs, ledger and usage as Parquet under `OPTIMAL_ANALYTICS_PATH`, and `GET /api/analytics/query` answers over them; no gauge names it, so turn it on when the workspace needs analytics. |
 | `disk_bytes` | `s3` | Wired. Moves assets and backups off the disk. |
 | `writes_per_minute` | `postgres`, `nats_jetstream` | `postgres` is wired but partial; `nats_jetstream` publishes the change ledger to subscribers (`OPTIMAL_NATS_FLOWS=ledger`), but Engine writes still land in SQLite first, so it adds no write capacity. |
 | any other gauge | `postgres` | Wired but partial. |
