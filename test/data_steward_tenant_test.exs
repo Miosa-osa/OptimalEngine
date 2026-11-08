@@ -753,18 +753,12 @@ defmodule OptimalEngine.DataStewardTenantTest do
     end
 
     test "every such table in the schema is either traced or reported" do
-      {:ok, rows} =
-        Store.raw_query(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-          []
-        )
+      {:ok, tables} = OptimalEngine.Store.Catalog.tables()
 
       unscoped =
-        rows
-        |> List.flatten()
+        tables
         |> Enum.filter(fn table ->
-          {:ok, columns} = Store.raw_query("PRAGMA table_info(\"#{table}\")", [])
-          names = Enum.map(columns, &Enum.at(&1, 1))
+          {:ok, names} = OptimalEngine.Store.Catalog.column_names(table)
           "workspace_id" in names and "tenant_id" not in names
         end)
         |> Enum.reject(&(&1 in ["steward_tenantless_test"]))

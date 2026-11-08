@@ -63,10 +63,7 @@ defmodule OptimalEngine.MemoryCore.SpineTest do
     ]
 
     for table <- required_tables do
-      {:ok, [[^table]]} =
-        Store.raw_query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1", [
-          table
-        ])
+      assert OptimalEngine.Store.Catalog.table_exists?(table), table
     end
   end
 

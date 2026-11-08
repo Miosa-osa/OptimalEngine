@@ -564,11 +564,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
   # deleted from (a contentless table) is logged, not fatal: erasure must not be
   # blocked by an index this version no longer maintains.
   defp delete_package_fts(txn, [pkgs]) do
-    with {:ok, [[_]]} <-
-           Store.txn_query(
-             txn,
-             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'source_packages_fts'"
-           ),
+    with true <- OptimalEngine.Store.Catalog.table_exists?("source_packages_fts", txn: txn),
          {:ok, count} <-
            Store.txn_execute(
              txn,
@@ -578,7 +574,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
            ) do
       count
     else
-      {:ok, []} ->
+      false ->
         0
 
       {:error, reason} ->

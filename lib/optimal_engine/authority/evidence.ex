@@ -21,6 +21,7 @@ defmodule OptimalEngine.Authority.Evidence do
 
   alias OptimalEngine.Authority.{CanonicalJSON, JWS, Keys}
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.Replace
 
   require Logger
 
@@ -328,7 +329,7 @@ defmodule OptimalEngine.Authority.Evidence do
           signature = Keys.sign(key, statement) |> JWS.encode64()
 
           {:ok, _} =
-            Store.raw_query(
+            Replace.raw_query(
               """
               INSERT OR REPLACE INTO authority_checkpoints (tenant_id, tenant_seq, hash, kid, signature, anchor)
               VALUES (?1, ?2, ?3, ?4, ?5, ?6)

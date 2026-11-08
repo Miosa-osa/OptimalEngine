@@ -49,6 +49,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   alias OptimalEngine.Authority.CanonicalJSON
   alias OptimalEngine.Compliance.Artifacts
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.Catalog
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.Store.Migrations
   alias OptimalEngine.Store.ReadSnapshot
@@ -1977,15 +1978,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp mark(placed, row, keys), do: Enum.reduce(keys, placed, &MapSet.put(&2, row[&1.to]))
 
   defp foreign_keys(table) do
-    case Store.raw_query(
-           "SELECT \"table\", \"from\", \"to\" FROM pragma_foreign_key_list(?1)",
-           [table]
-         ) do
-      {:ok, rows} ->
-        Enum.map(rows, fn [parent, from, to] -> %{table: parent, from: from, to: to} end)
-
-      _ ->
-        []
+    case Catalog.foreign_keys(table) do
+      {:ok, keys} -> keys
+      _ -> []
     end
   end
 
@@ -2207,37 +2202,28 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # ---------------------------------------------------------------------------
   # Schema helpers
 
+  # The store's ordinary tables (Store.Catalog: no virtual or FTS5 shadow
+  # tables) that hold workspace rows.
   defp workspace_tables do
-    {:ok, rows} =
-      Store.raw_query("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name", [])
+    {:ok, names} = Catalog.tables()
 
-    for [name, sql] <- rows,
+    for name <- names,
         not Capture.bundle_excluded?(name),
-        not String.starts_with?(name, "sqlite_"),
-        not (is_binary(sql) and String.contains?(sql, "VIRTUAL")),
-        not fts_shadow?(name),
         Enum.any?(columns(name), &(elem(&1, 0) == "workspace_id")) do
       name
     end
   end
 
-  defp fts_shadow?(name), do: Regex.match?(~r/_fts_(data|idx|docsize|config|content)\z/, name)
-
   defp columns(table) do
-    {:ok, rows} =
-      Store.raw_query("SELECT name, type, pk FROM pragma_table_info(?1) ORDER BY cid", [table])
-
-    Enum.map(rows, fn [name, type, pk] -> {name, String.upcase(type || ""), pk} end)
+    {:ok, columns} = Catalog.columns(table)
+    columns
   end
 
   # Rows a bundle carries for a superseded table go to its successor.
   defp target_table(name), do: Map.get(Migrations.superseded_tables(), name, name)
 
   defp table_exists?(table) do
-    match?(
-      {:ok, [_]},
-      Store.raw_query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1", [table])
-    )
+    Catalog.table_exists?(table)
   end
 
   # A single INTEGER PRIMARY KEY is a rowid alias: let the target assign it.

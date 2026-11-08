@@ -68,8 +68,8 @@ defmodule OptimalEngine.Optimality do
   end
 
   defp storage_gate do
-    with {:ok, [[integrity]]} <- Store.raw_query("PRAGMA integrity_check"),
-         {:ok, foreign_keys} <- Store.raw_query("PRAGMA foreign_key_check") do
+    with {:ok, integrity} <- OptimalEngine.Store.Catalog.integrity_check(),
+         {:ok, foreign_keys} <- OptimalEngine.Store.Catalog.foreign_key_violations() do
       passed = integrity == "ok" and foreign_keys == []
 
       {:ok,

@@ -133,7 +133,7 @@ defmodule OptimalEngine.Analyses do
         SELECT id, workspace_id, kind, job_id, status, summary, report, created_at
         FROM analysis_reports
         WHERE tenant_id = ?1 AND workspace_id IN (#{placeholders})#{kind_sql}
-        ORDER BY created_at DESC, rowid DESC LIMIT #{limit}
+        ORDER BY created_at DESC, #{OptimalEngine.Store.Catalog.insertion_order("id")} DESC LIMIT #{limit}
         """,
         [tenant_id | workspace_ids] ++ params
       )

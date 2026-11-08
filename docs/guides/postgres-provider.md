@@ -158,9 +158,6 @@ These features are not on the PostgreSQL store yet.
 | --- | --- |
 | Replication | Capture is SQLite triggers and applying reads SQLite's catalog. Enabling sync and adding a peer return `{:error, {:unsupported, "replication is not available on the PostgreSQL store"}}`, and the API answers 501. |
 | App data collections | A collection creates a table, a full-text index and triggers at runtime. Creating one is refused, and so is any schema change outside the migrations. |
-| The SQLite catalog | `PRAGMA`, `sqlite_master` and the `pragma_*` functions are refused (workspace bundles, the data steward's table list, a workspace slug change, replication). |
-| `rowid` | A statement that orders or filters by `rowid`, or reads `last_insert_rowid()`, is refused (backup schedules, the storage audit, graph edge listings, model call history, a workspace slug change). |
-| Replace writes | `INSERT OR REPLACE`, `REPLACE INTO`, an `UPDATE` with a conflict clause (`UPDATE OR REPLACE` and the like) and an `INSERT OR IGNORE` with its own `ON CONFLICT` are refused at their call sites; the store's context and chunk writes replace rows as SQLite does. |
 | Schema and transaction statements | The schema comes from the migrations, so a schema change and SQLite-only table options (`AUTOINCREMENT`, `WITHOUT ROWID`) are refused. A transaction statement sent as a statement raises `ArgumentError` on both stores. |
 
 `OptimalEngine.Store.Dialect.refusals/0` lists every refused construct with its reason, and `test/store/postgres/unavailable_test.exs` checks both ways: every refusal of the dialect is under a feature here or under a ported feature (`OptimalEngine.Storage.Postgres.ported/0`, a feature that works on PostgreSQL through statements of its own while the SQLite statements behind it stay refused), and every name a feature lists is one the dialect or the store refuses with.
@@ -197,6 +194,17 @@ Search, context assembly and asking work on a PostgreSQL store, with the tokens 
 
 A store that finds replication or app data collection data in its database does not start: `{:postgres_store_failed, {:unsupported_in_use, features}}`.
 An engine moved there from SQLite would otherwise run on and silently stop replicating, or stop serving its collections.
+
+### The Catalog, `rowid` And Replace Writes
+
+The call sites that read SQLite's catalog, break ties by `rowid` or write with `INSERT OR REPLACE` run on PostgreSQL through statements of their own; the SQLite statements stay refused by name (`OptimalEngine.Storage.Postgres.ported/0`).
+
+- `OptimalEngine.Store.Catalog` answers what `sqlite_master` and the `PRAGMA` functions answer: the store's tables, a table's columns and primary key, its foreign keys, the tables with an index that starts at a column, whether a table exists. On PostgreSQL it reads `pg_catalog`, limited to the store's schema and without the store's own `optimal_*` tables, and a column's key position is the one the migrations declare. `PRAGMA integrity_check` answers `ok` and `PRAGMA foreign_key_check` no rows, because PostgreSQL enforces every key as it writes. Workspace bundles, the data steward, a workspace slug change, the storage audit, health, optimality, policy entity types and erasure read it.
+- A listing that broke ties of one second by `rowid` (API keys, analysis reports, a verified backup, a workspace's earlier slugs) breaks them by the table's key on PostgreSQL (`Catalog.insertion_order/1`), which has no insertion order; rows written in the same second can therefore list in another order than on SQLite.
+- `OptimalEngine.Store.Replace` runs `INSERT OR REPLACE` as SQLite does: on PostgreSQL it deletes the row each key of the table (the primary key and every unique key, from the derived schema) names, with their `ON DELETE` actions, and then inserts, in one transaction. A key column written as an expression rather than a value is refused with `ArgumentError`. Sessions, vectors, memory embeddings, memory associations, viability reports, authority checkpoints, model call operations and tool definitions write through it.
+- A workspace bundle reads one moment of the database: on PostgreSQL a read-only `REPEATABLE READ` transaction (`OptimalEngine.Store.Postgres.read_snapshot/2`), as the read-only SQLite connection is on SQLite.
+
+`test/store/postgres/catalog_replace_test.exs` checks the catalog answers and the rows a replace leaves alike on both stores.
 
 ### Decisions
 

@@ -10,6 +10,7 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
   alias OptimalEngine.MemoryCore.{ID, JSON, ScopeEnvelope, SecurityLabels}
   alias OptimalEngine.Retrieval.AsOf
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.Replace
 
   @version "associative-v2"
   @stopwords ~w[a an and are as at be by for from how in is it of on or that the this to was what when where which who why with]
@@ -467,7 +468,7 @@ defmodule OptimalEngine.MemoryCore.AssociativeProjection do
         @version
       ]
 
-      case Store.txn_execute(txn, sql, params) do
+      case Replace.txn_execute(txn, sql, params) do
         {:ok, _} -> {:cont, :ok}
         error -> {:halt, error}
       end

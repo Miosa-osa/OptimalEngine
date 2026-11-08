@@ -12,11 +12,18 @@ defmodule OptimalEngine.Store.ReadSnapshot do
   It is for an answer that must come from one moment, such as a workspace
   bundle, whose ledger mark and rows must describe the same database. Backup
   opens its own connection for `VACUUM INTO` for the same reason.
+
+  On the PostgreSQL store the snapshot is a read-only `REPEATABLE READ`
+  transaction on a pooled connection of its own
+  (`OptimalEngine.Store.Postgres.read_snapshot/2`), with the same guarantee.
+  There a stream reads its query's rows at once and hands them out in chunks.
   """
+
+  @postgres OptimalEngine.Store.Postgres
 
   @busy_timeout_ms 5_000
 
-  @opaque t :: {:snapshot, reference()}
+  @opaque t :: {:snapshot, reference()} | {:postgres, term()}
 
   @doc """
   Runs `fun` with a snapshot of the database and returns what it returns. The
@@ -24,6 +31,12 @@ defmodule OptimalEngine.Store.ReadSnapshot do
   """
   @spec run((t() -> result)) :: result | {:error, term()} when result: term()
   def run(fun) when is_function(fun, 1) do
+    if OptimalEngine.Store.selected?(@postgres),
+      do: @postgres.read_snapshot(&fun.({:postgres, &1})),
+      else: run_sqlite(fun)
+  end
+
+  defp run_sqlite(fun) do
     path = Application.fetch_env!(:optimal_engine, :db_path)
 
     with {:ok, db} <- Exqlite.Sqlite3.open(path, mode: :readonly) do
@@ -44,7 +57,11 @@ defmodule OptimalEngine.Store.ReadSnapshot do
 
   @doc "Runs a query in the snapshot and returns every row."
   @spec query(t(), String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
-  def query({:snapshot, db}, sql, params \\ []) do
+  def query(snapshot, sql, params \\ [])
+
+  def query({:postgres, txn}, sql, params), do: @postgres.txn_query(txn, sql, params)
+
+  def query({:snapshot, db}, sql, params) do
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql) do
       try do
         with :ok <- Exqlite.Sqlite3.bind(stmt, params), do: collect(db, stmt, [])
@@ -61,6 +78,23 @@ defmodule OptimalEngine.Store.ReadSnapshot do
   the query fails.
   """
   @spec stream(t(), String.t(), [term()], pos_integer()) :: Enumerable.t()
+  def stream({:postgres, txn}, sql, params, chunk_rows)
+      when is_integer(chunk_rows) and chunk_rows > 0 do
+    Stream.resource(
+      fn ->
+        case @postgres.txn_query(txn, sql, params) do
+          {:ok, rows} -> rows
+          {:error, reason} -> raise "snapshot query failed: #{inspect(reason)}"
+        end
+      end,
+      fn
+        [] -> {:halt, []}
+        rows -> rows |> Enum.split(chunk_rows) |> then(fn {chunk, rest} -> {[chunk], rest} end)
+      end,
+      fn _ -> :ok end
+    )
+  end
+
   def stream({:snapshot, db}, sql, params, chunk_rows)
       when is_integer(chunk_rows) and chunk_rows > 0 do
     Stream.resource(

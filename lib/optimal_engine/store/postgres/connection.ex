@@ -472,6 +472,37 @@ defmodule OptimalEngine.Store.Postgres.Connection do
     end
   end
 
+  @doc """
+  Runs `fun` in a read-only `REPEATABLE READ` transaction, which sees the
+  database as it was at its first statement whatever commits meanwhile, and
+  rolls it back. `fun` gets a handle for `txn_query/4` and its value is
+  returned. A read-only transaction at this level is never aborted to keep it
+  serializable, so `fun` runs once, and may have effects of its own.
+  """
+  @spec snapshot(GenServer.server(), (txn() -> result), timeout()) :: result | {:error, term()}
+        when result: term()
+  def snapshot(pool, fun, timeout) when is_function(fun, 1) do
+    deadline = deadline(timeout!(timeout))
+
+    DBConnection.run(
+      pool,
+      fn conn ->
+        case Postgrex.query(conn, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", []) do
+          {:ok, _} ->
+            try do
+              fun.({__MODULE__, conn, :atomics.new(1, []), deadline})
+            after
+              _ = Postgrex.query(conn, "ROLLBACK", [], timeout: 5_000)
+            end
+
+          {:error, error} ->
+            {:error, {:begin_failed, Errors.message(error)}}
+        end
+      end,
+      timeout: timeout + @rollback_grace
+    )
+  end
+
   # ---------------------------------------------------------------------------
   # Transactions
   # ---------------------------------------------------------------------------

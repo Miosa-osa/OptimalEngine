@@ -347,7 +347,7 @@ defmodule OptimalEngine.Session do
       Jason.encode!(state.metadata)
     ]
 
-    case OptimalEngine.Store.raw_query(sql, params) do
+    case OptimalEngine.Store.Replace.raw_query(sql, params) do
       {:ok, _} -> :ok
       {:error, reason} -> Logger.warning("[Session] Persist failed: #{inspect(reason)}")
     end

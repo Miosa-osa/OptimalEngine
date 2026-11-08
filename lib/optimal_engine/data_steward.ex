@@ -24,6 +24,7 @@ defmodule OptimalEngine.DataSteward do
   }
 
   alias OptimalEngine.Portability.WorkspaceBundle
+  alias OptimalEngine.Store.Catalog
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.UriRepair.References
   alias OptimalEngine.Workspace.Filesystem
@@ -1425,21 +1426,14 @@ defmodule OptimalEngine.DataSteward do
   # not left alone (@not_rekeyed), with whether they also have a tenant_id
   # column to bind the move to the caller's tenant.
   defp workspace_tables do
-    with {:ok, rows} <-
-           Store.raw_query(
-             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-             []
-           ) do
+    with {:ok, names} <- all_tables() do
       tables =
-        rows
-        |> List.flatten()
+        names
         |> Enum.filter(&safe_identifier?/1)
         |> Enum.reject(&(&1 in @not_rekeyed))
         |> Enum.flat_map(fn table ->
-          case Store.raw_query("PRAGMA table_info(\"#{table}\")", []) do
-            {:ok, columns} ->
-              names = Enum.map(columns, &Enum.at(&1, 1))
-
+          case Catalog.column_names(table) do
+            {:ok, names} ->
               if "workspace_id" in names,
                 do: [%{name: table, tenant_scoped?: "tenant_id" in names}],
                 else: []
@@ -1450,6 +1444,21 @@ defmodule OptimalEngine.DataSteward do
         end)
 
       {:ok, tables}
+    end
+  end
+
+  # Every table but SQLite's own, virtual ones included, as before; on
+  # PostgreSQL the store's tables (Store.Catalog).
+  defp all_tables do
+    if Store.selected?(OptimalEngine.Store.Postgres) do
+      Catalog.tables()
+    else
+      with {:ok, rows} <-
+             Store.raw_query(
+               "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+               []
+             ),
+           do: {:ok, List.flatten(rows)}
     end
   end
 

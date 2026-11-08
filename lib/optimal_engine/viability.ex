@@ -15,6 +15,7 @@ defmodule OptimalEngine.Viability do
   """
 
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.Replace
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Viability.{Audit, Metrics, Systems, Trajectory}
   alias OptimalEngine.Workspace
@@ -91,7 +92,7 @@ defmodule OptimalEngine.Viability do
     }
 
     {:ok, _} =
-      Store.raw_query(
+      Replace.raw_query(
         """
         INSERT OR REPLACE INTO viability_reports (tenant_id, scope, period, report, backfilled)
         VALUES (?1, ?2, ?3, ?4, ?5)

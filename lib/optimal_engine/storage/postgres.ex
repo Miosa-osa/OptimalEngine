@@ -106,6 +106,36 @@ defmodule OptimalEngine.Storage.Postgres do
         refused_as:
           refused_by("a SQLite function with no translation") ++
             ["GLOB", "SQLite collation", "LIKE with a computed pattern"]
+      },
+      %{
+        feature: "sqlite_catalog",
+        how:
+          "the call sites read tables, columns, keys, foreign keys and indexes through " <>
+            "OptimalEngine.Store.Catalog (pg_catalog, limited to the store's schema), and the " <>
+            "integrity checks answer for PostgreSQL, which enforces every key as it writes " <>
+            "(workspace bundles, the data steward, a workspace slug change, the storage audit, " <>
+            "health, optimality, policy entity types, erasure)",
+        refused_as: ["PRAGMA", "sqlite_master", "SQLite catalog function"]
+      },
+      %{
+        feature: "rowid",
+        how:
+          "a listing that broke ties of one second by rowid breaks them by the table's key " <>
+            "(Store.Catalog.insertion_order/1), and the FTS5 joins on rowid read the full-text " <>
+            "index by id",
+        refused_as: ["rowid", "last_insert_rowid"]
+      },
+      %{
+        feature: "replace_writes",
+        how:
+          "INSERT OR REPLACE runs as a delete of the row each key of the table names, then the " <>
+            "insert, in one transaction (OptimalEngine.Store.Replace), as SQLite replaces",
+        refused_as: [
+          "INSERT OR REPLACE",
+          "REPLACE INTO",
+          "UPDATE with a conflict clause",
+          "INSERT OR IGNORE with an explicit ON CONFLICT clause"
+        ]
       }
     ]
   end
@@ -135,35 +165,6 @@ defmodule OptimalEngine.Storage.Postgres do
         refused_as: [
           "app data collections are not available on the PostgreSQL store",
           "schema change outside the migrations"
-        ]
-      },
-      %{
-        feature: "sqlite_catalog",
-        reason:
-          "PRAGMA, sqlite_master and the pragma_* functions are refused (workspace bundles, " <>
-            "the data steward's table list, a workspace slug change, replication)",
-        refused_as: ["PRAGMA", "sqlite_master", "SQLite catalog function"]
-      },
-      %{
-        feature: "rowid",
-        reason:
-          "a statement that orders or filters by rowid, or reads last_insert_rowid(), is " <>
-            "refused (backup schedules, the storage audit, graph edge listings, model call " <>
-            "history, a workspace slug change)",
-        refused_as: ["rowid", "last_insert_rowid"]
-      },
-      %{
-        feature: "replace_writes",
-        reason:
-          "SQLite's delete-and-insert writes (INSERT OR REPLACE, REPLACE INTO), an UPDATE " <>
-            "with a conflict clause (UPDATE OR REPLACE) and an INSERT OR IGNORE with its own " <>
-            "ON CONFLICT are refused at their call sites; the " <>
-            "store's context and chunk writes replace rows as SQLite does",
-        refused_as: [
-          "INSERT OR REPLACE",
-          "REPLACE INTO",
-          "UPDATE with a conflict clause",
-          "INSERT OR IGNORE with an explicit ON CONFLICT clause"
         ]
       },
       %{
