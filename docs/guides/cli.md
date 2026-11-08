@@ -57,6 +57,7 @@ It installs `optimal`, `oe` and `optimal-engine-mcp` under a prefix, writes the 
 | Workspace | `-w`, `--workspace <id>` | `OPTIMAL_WORKSPACE` | `workspace=` |
 | Profile | `--profile <name or path>` | `OPTIMAL_PROFILE` | |
 | Timeout | `--timeout <s>` | `OPTIMAL_TIMEOUT` (default 120) | |
+| Wait for a waking Engine | | `OPTIMAL_WAKE_TIMEOUT` (default 90, `0` never waits) | |
 
 Precedence: flags, then a profile named with `--profile` or `OPTIMAL_PROFILE`, then the environment, then the default profile, then `http://127.0.0.1:4200`.
 The default profile is `${XDG_CONFIG_HOME:-~/.config}/optimal/profile`; a named profile is `~/.config/optimal/profiles/<name>`.
@@ -95,9 +96,28 @@ The client never sends `actor_id`, `verifier_id` or `created_by`; the Engine tak
 | 426 | 78 | The Engine refuses this client's major release; the line says which client to install |
 | 200 without the field the command reads | 65 | For example a `log` answer with no `text` |
 | No response | 69 | `cannot reach the Engine at <url>` |
+| 503 `ENGINE_WAKING` after `OPTIMAL_WAKE_TIMEOUT` | 69 | `the Engine at <url> is still waking after <n>s`; see [a paused Engine](#a-paused-engine-that-is-waking) |
 | Other errors | 1 | `HTTP <status> from <method> <path>` with the Engine's code |
 
 Exit 64 is a usage error, 65 an answer the client cannot read, and 78 a refused operator command, a client the Engine refuses, or bad configuration.
+
+## A paused Engine that is waking
+
+A managed Engine that has scaled to zero is started again by the first request that reaches it.
+While it boots, which takes about 25 to 45 seconds, MIOSA's proxy in front of it answers `503` with `{"error": {"code": "ENGINE_WAKING", ...}}` and `Retry-After` in seconds.
+The client then prints one line on stderr, `optimal: waking the Engine at <url>; retrying for up to 90s...`, waits as long as `Retry-After` says (5 seconds when it says nothing), and sends the same request again, until the Engine answers.
+
+| Answer | Asked again |
+| --- | --- |
+| `503` with `ENGINE_WAKING` | Any method: the proxy answers before the request reaches the Engine, so a `POST` has not been applied. |
+| Any other `503`, or a `429`, with `Retry-After` | `GET` and `HEAD` only: a write may already have been applied, so it fails at once with exit 1. |
+| A `503` or `429` without `Retry-After`, or any other status | Never. |
+
+The waits add up to at most `OPTIMAL_WAKE_TIMEOUT` seconds (default 90): a `Retry-After` longer than what is left is cut to it, and after the last wait the request is sent once more.
+An Engine still waking after that exits 69 with `the Engine at <url> is still waking after <n>s`; `OPTIMAL_WAKE_TIMEOUT=0` never waits.
+Each attempt is limited by `--timeout` on its own.
+Every attempt sends the same bytes: a body, including one read from standard input or from a file argument, is held in a temporary file of mode 0600 for the whole run and removed when the client exits.
+The MCP server waits the same way, with the same variable, and logs the same line once per request.
 
 ## Version compatibility
 
@@ -298,6 +318,7 @@ OPTIMAL_ENGINE_URL=https://engine.example.com OPTIMAL_ENGINE_API_KEY=... OPTIMAL
 
 It reads the same settings as the client, without flags: `OPTIMAL_PROFILE`, `OPTIMAL_ENGINE_URL` (then `OE_API`, `OPTIMAL_ENGINE_API_URL`), `OPTIMAL_ENGINE_API_KEY` (then `OPTIMAL_ENGINE_API_KEY_FILE`, `OPTIMAL_API_KEY`), `OPTIMAL_WORKSPACE`, and the default profile (including `key_file=`), with the same rule that a profile key only goes to its own URL.
 It reads them once, when it starts: restart the server after its key rotates.
+`OPTIMAL_WAKE_TIMEOUT` sets how long it waits for a [paused Engine that is waking](#a-paused-engine-that-is-waking).
 It sends the key as a bearer token and logs one line to stderr naming the URL and where the key came from, never the key; error messages carry the Engine's code and are redacted.
 
 Tools for the operating loop: `boot`, `brief`, `protocol`, `loops_list`, `loops_add`, `loops_close`, `search`, `assemble`, `read`, `capture`, `record` (note, lesson, decision, task), `close`, `authority_decide`, and `authority_effective`.
@@ -312,11 +333,11 @@ When the Engine refuses it with 426, every tool fails with the upgrade hint, for
 Register it with a harness as a stdio server running `node <path>/apps/mcp/dist/index.js` with those environment variables.
 From a release archive, `install-client.sh` installs a launcher, `optimal-engine-mcp`, and registers it as `optimal-engine` with Claude Code (user scope) and Codex 0.47.0 or newer (`[mcp_servers.optimal-engine]` in `$CODEX_HOME/config.toml`).
 Codex gives a stdio server only a fixed environment, so the Codex table lists the Engine settings in `env_vars`; Claude Code passes its own environment.
-`npm test` builds the server and checks tool listing, routes, bearer authentication, that keys never appear in results, and the version warning and 426 refusal.
+`npm test` builds the server and checks tool listing, routes, bearer authentication, that keys never appear in results, the version warning and 426 refusal, and the wait for a waking Engine (`test/wake_retry.test.mjs`).
 
 ## Verification
 
-`scripts/tests/test_optimal_cli.py` checks the client against a fake HTTP server: route mapping, URL encoding and JSON escaping, configuration precedence, the bearer header, that the key never reaches a process argument list or any output, error codes, the version warning and the 426 refusal, operator refusals, the maintenance routes a remote Engine is reached through, the start and stop of a process the client started, a minimal tool PATH, other shells, and the release archives.
+`scripts/tests/test_optimal_cli.py` checks the client against a fake HTTP server: route mapping, URL encoding and JSON escaping, configuration precedence, the bearer header, that the key never reaches a process argument list or any output, error codes, the version warning and the 426 refusal, the wait for a waking or busy Engine (which requests are sent again, `Retry-After`, the bound, and the temporary body file), operator refusals, the maintenance routes a remote Engine is reached through, the start and stop of a process the client started, a minimal tool PATH, other shells, and the release archives.
 For the remote cases the fake server is curl's HTTP proxy, so the client sees a remote URL while nothing leaves the machine.
 Run it with `python3 -m unittest discover -s scripts/tests -p 'test_optimal_cli.py'`; set `OPTIMAL_CLI_TEST_SHELL=dash` to run every case under another shell.
 `scripts/tests/test_install_client.py` runs `install-client.sh` in a temporary home against release files and a fake Engine: exit codes, checksums, a tampered CLI or MCP archive or a full disk leaving the install untouched, a signal or a kill between the MCP renames, interrupted and concurrent installs (the lock, a sweep that keeps live runs' and foreign files), read-only package directories, an MCP server without the installer's marks or a program link that is not an Optimal link left alone, a required source, directory, HTTPS and pinned HTTP sources, the shared install found without a prefix, root never installing into its own home, the installer refreshed from the CLI archive, the profile and its modes, verification from the profile and the environment, a 0.3.2 release, harness registration with Codex `env_vars` (a symlinked, unreadable or unfilterable Codex config included, and as root a foreign, symlinked or group-writable `CODEX_HOME`, a symlinked config, or a foreign home refused), and that the key is never a program argument or in a harness configuration.

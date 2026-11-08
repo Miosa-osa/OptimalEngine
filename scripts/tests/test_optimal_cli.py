@@ -49,7 +49,10 @@ class FakeEngine:
     def __init__(self, require_key=KEY):
         self.requests = []
         self.routes = {}
+        # (method, path) -> responses served once each, in order, before routes.
+        self.queued = {}
         self.headers = {}
+        self.on_request = None
         engine = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -67,8 +70,14 @@ class FakeEngine:
                 })
                 # A route is (status, payload) or (status, payload, response headers);
                 # a bytes payload is sent as it is.
-                status, payload, *extra = engine.routes.get((self.command, split.path),
-                                                            (200, {'ok': True, 'path': split.path}))
+                if engine.on_request:
+                    engine.on_request()
+                queue = engine.queued.get((self.command, split.path))
+                if queue:
+                    status, payload, *extra = queue.pop(0)
+                else:
+                    status, payload, *extra = engine.routes.get((self.command, split.path),
+                                                                (200, {'ok': True, 'path': split.path}))
                 if require_key and self.headers.get('Authorization') != f'Bearer {require_key}':
                     status, payload = 401, {'error': 'missing_api_key'}
                 if isinstance(payload, bytes):
@@ -1109,6 +1118,127 @@ class PortabilityTests(CliTestCase):
                                         env=self.env, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(engine.last['body']['text'], 'a "b" \\c')
+
+
+def waking(retry_after='1'):
+    """The answer of MIOSA's proxy while a scaled-to-zero Engine boots."""
+    headers = {'Retry-After': retry_after} if retry_after is not None else {}
+    return (503, {'error': {'code': 'ENGINE_WAKING', 'message': 'the Engine is starting'}}, headers)
+
+
+class WakeRetryTests(CliTestCase):
+    """A paused managed Engine answers 503 ENGINE_WAKING while it boots; the client waits for it."""
+
+    def setUp(self):
+        super().setUp()
+        self.env['OPTIMAL_ENGINE_API_KEY'] = KEY
+        self.tmpdir = self.dir / 'tmp'
+        self.tmpdir.mkdir()
+        self.env['TMPDIR'] = str(self.tmpdir)
+
+    def test_get_waits_for_a_waking_engine(self):
+        engine = self.remote_engine()
+        engine.queued[('GET', '/api/search')] = [waking(), waking()]
+        engine.routes[('GET', '/api/search')] = (200, {'results': ['found']})
+        started = time.monotonic()
+        result = self.ok('search', 'renewal', 'default:sales', '--raw')
+        self.assertGreaterEqual(time.monotonic() - started, 2, 'Retry-After was not honored')
+        self.assertEqual(json.loads(result.stdout), {'results': ['found']})
+        self.assertEqual(len(engine.requests), 3)
+        self.assertEqual(len({json.dumps(r, sort_keys=True) for r in engine.requests}), 1)
+        self.assertEqual(result.stderr.count('waking'), 1, result.stderr)
+        self.assertNotIn(KEY, result.stderr)
+
+    def test_post_is_resent_with_the_same_body_when_the_engine_was_waking(self):
+        engine = self.engine()
+        engine.queued[('POST', '/api/ingest')] = [waking()]
+        self.ok('capture', 'Customer moved the date', 'default:sales')
+        self.assertEqual([r['method'] for r in engine.requests], ['POST', 'POST'])
+        self.assertEqual(engine.requests[0]['body'], engine.requests[1]['body'])
+        self.assertEqual(engine.requests[1]['body']['text'], 'Customer moved the date')
+
+    def test_stdin_body_is_resent_and_its_buffer_is_private_and_removed(self):
+        engine = self.engine()
+        engine.queued[('POST', '/api/ingest')] = [waking()]
+        modes = []
+        engine.on_request = lambda: modes.extend(
+            (p.stat().st_mode & 0o777) for p in self.tmpdir.iterdir())
+        self.ok('capture', '-', 'default:sales', stdin='from stdin\nsecond line')
+        self.assertEqual(len(engine.requests), 2)
+        for request in engine.requests:
+            self.assertEqual(request['body']['text'], 'from stdin\nsecond line')
+        self.assertTrue(modes)
+        self.assertEqual(set(modes), {0o600})
+        self.assertEqual(list(self.tmpdir.iterdir()), [])
+
+    def test_file_argument_is_sent_again(self):
+        engine = self.engine()
+        engine.queued[('POST', '/api/sessions/commit')] = [waking()]
+        path = self.dir / 'messages.json'
+        messages = [{'role': 'user', 'content': 'hello'}]
+        path.write_text(json.dumps(messages))
+        self.ok('session', 'commit', str(path), 'default:sales', '--correlation-id', 'chat_1')
+        self.assertEqual(len(engine.requests), 2)
+        for request in engine.requests:
+            self.assertEqual(request['body']['messages'], messages)
+
+    def test_plain_503_and_429_with_retry_after_retry_reads_only(self):
+        engine = self.engine()
+        engine.queued[('GET', '/api/boot')] = [(503, {'error': 'unavailable'}, {'Retry-After': '1'}),
+                                               (429, {'error': 'rate_limited'}, {'Retry-After': '1'})]
+        engine.routes[('GET', '/api/boot')] = (200, {'day': 'today'})
+        self.ok('boot', 'default:sales')
+        self.assertEqual(len(engine.requests), 3)
+        for status in (503, 429):
+            engine.requests.clear()
+            engine.queued[('POST', '/api/ingest')] = [(status, {'error': 'busy'}, {'Retry-After': '1'})]
+            result = self.run_cli('capture', 'not twice', 'default:sales')
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(len(engine.requests), 1, f'a {status} POST was sent again')
+            self.assertIn(f'HTTP {status}', result.stderr)
+
+    def test_503_without_retry_after_is_not_retried(self):
+        engine = self.engine()
+        engine.routes[('GET', '/api/boot')] = (503, {'error': 'unavailable'})
+        result = self.run_cli('boot', 'default:sales')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(len(engine.requests), 1)
+
+    def test_the_wait_is_bounded_by_the_wake_timeout(self):
+        engine = self.engine()
+        engine.routes[('GET', '/api/boot')] = waking('30')
+        self.env['OPTIMAL_WAKE_TIMEOUT'] = '2'
+        started = time.monotonic()
+        result = self.run_cli('boot', 'default:sales')
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 69, result.stderr)
+        self.assertLess(elapsed, 10)
+        self.assertGreaterEqual(elapsed, 2)
+        self.assertEqual(len(engine.requests), 2)
+        self.assertIn('still waking after 2s', result.stderr)
+        self.assertIn('OPTIMAL_WAKE_TIMEOUT', result.stderr)
+
+    def test_a_wake_timeout_of_zero_does_not_wait(self):
+        engine = self.engine()
+        engine.routes[('GET', '/api/boot')] = waking()
+        self.env['OPTIMAL_WAKE_TIMEOUT'] = '0'
+        result = self.run_cli('boot', 'default:sales')
+        self.assertEqual(result.returncode, 69, result.stderr)
+        self.assertEqual(len(engine.requests), 1)
+        self.assertNotIn('retrying', result.stderr)
+
+    def test_waking_without_retry_after_still_waits(self):
+        engine = self.engine()
+        engine.queued[('GET', '/api/boot')] = [waking(None)]
+        self.ok('boot', 'default:sales')
+        self.assertEqual(len(engine.requests), 2)
+
+    def test_a_bad_wake_timeout_is_a_configuration_error(self):
+        self.engine()
+        self.env['OPTIMAL_WAKE_TIMEOUT'] = 'soon'
+        result = self.run_cli('boot', 'default:sales')
+        self.assertEqual(result.returncode, 78, result.stderr)
+        self.assertIn('OPTIMAL_WAKE_TIMEOUT', result.stderr)
 
 
 class BuildTests(unittest.TestCase):
