@@ -5,8 +5,10 @@ defmodule OptimalEngine.Storage.Valkey do
   durable truth; everything in it can be rebuilt from the canonical stores.
 
   The engine speaks RESP2 directly over TCP, so the provider needs no client
-  library and no supervision tree: every call opens one connection, runs its
-  commands and closes it. `OPTIMAL_VALKEY_URL` is `redis://[user:password@]host[:port][/db]`
+  library. The health check and the proof open a connection of their own and
+  close it; the data path (`OptimalEngine.Storage.Shared`) runs on the
+  supervised connections of `OptimalEngine.Storage.Valkey.Pool`, which call
+  `open/2`, `pipeline/3` and `close/1` here. `OPTIMAL_VALKEY_URL` is `redis://[user:password@]host[:port][/db]`
   (`rediss://` for TLS, `valkey://` accepted as an alias). The URL carries the
   credential, so it is never logged, described or returned by the API;
   `safe_config/1` is the shape a route may show.
@@ -114,18 +116,73 @@ defmodule OptimalEngine.Storage.Valkey do
     end
   end
 
+  @doc """
+  Runs several commands on an open connection in one write and reads their
+  replies in order. Each reply is the decoded value or `{:error, {:server,
+  message}}`; a failure of the connection itself is `{:error, reason}` for the
+  whole batch, after which the socket must not be used again.
+  """
+  @spec pipeline(:gen_tcp.socket() | :ssl.sslsocket(), [[String.t()]], timeout()) ::
+          {:ok, [term()]} | {:error, term()}
+  def pipeline(socket, commands, timeout \\ @default_timeout) when is_list(commands) do
+    with :ok <- send_data(socket, Enum.map(commands, &encode/1)) do
+      read_replies(socket, length(commands), "", timeout, [])
+    end
+  end
+
+  defp read_replies(_socket, 0, _buffer, _timeout, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp read_replies(socket, n, buffer, timeout, acc) do
+    case read_reply(socket, buffer, timeout) do
+      {:ok, {:error, message}, rest} ->
+        read_replies(socket, n - 1, rest, timeout, [{:error, {:server, message}} | acc])
+
+      {:ok, value, rest} ->
+        read_replies(socket, n - 1, rest, timeout, [value | acc])
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Connection
   # ---------------------------------------------------------------------------
 
-  defp with_connection(config, timeout, fun) do
+  @doc """
+  Opens an authenticated connection on the configured database (`config/1`'s
+  map). The caller owns the socket and closes it with `close/1`. Never raises.
+  """
+  @spec open(map(), timeout()) :: {:ok, term()} | {:error, term()}
+  def open(config, timeout \\ @default_timeout) do
     case connect(config, timeout) do
       {:ok, socket} ->
+        with :ok <- authenticate(socket, config, timeout),
+             :ok <- select(socket, config, timeout) do
+          {:ok, socket}
+        else
+          error ->
+            close(socket)
+            error
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  catch
+    _kind, _reason -> {:error, :unreachable}
+  end
+
+  @doc "Closes a socket `open/2` returned."
+  @spec close(term()) :: :ok
+  def close({:sslsocket, _, _} = socket), do: :ssl.close(socket)
+  def close(socket), do: :gen_tcp.close(socket)
+
+  defp with_connection(config, timeout, fun) do
+    case open(config, timeout) do
+      {:ok, socket} ->
         try do
-          with :ok <- authenticate(socket, config, timeout),
-               :ok <- select(socket, config, timeout) do
-            fun.(socket)
-          end
+          fun.(socket)
         after
           close(socket)
         end
@@ -190,9 +247,6 @@ defmodule OptimalEngine.Storage.Valkey do
 
   defp recv({:sslsocket, _, _} = socket, timeout), do: :ssl.recv(socket, 0, timeout)
   defp recv(socket, timeout), do: :gen_tcp.recv(socket, 0, timeout)
-
-  defp close({:sslsocket, _, _} = socket), do: :ssl.close(socket)
-  defp close(socket), do: :gen_tcp.close(socket)
 
   # ---------------------------------------------------------------------------
   # RESP2

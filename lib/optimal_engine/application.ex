@@ -139,7 +139,12 @@ defmodule OptimalEngine.Application do
       {OptimalEngine.Signal.PubSub, name: OptimalEngine.Signal.PubSub},
       {OptimalEngine.Signal.Journal, name: OptimalEngine.Signal.Journal},
 
-      # ── HTTP API rate limiter (owns the ETS bucket table) ────────────────
+      # ── Valkey connections (only with OPTIMAL_VALKEY_URL; :ignore without) ─
+      # Shared rate limits and caches run on it while it is up and fall back
+      # to each owner's ETS table when it is not (Storage.Shared).
+      OptimalEngine.Storage.Valkey.Pool,
+
+      # ── HTTP API rate limiter (owns the local ETS bucket table) ──────────
       OptimalEngine.API.RateLimiter,
 
       # ── Verified API key cache (bcrypt once per key and secret) ──────────

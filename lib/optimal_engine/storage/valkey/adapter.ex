@@ -6,19 +6,31 @@ defmodule OptimalEngine.Storage.Valkey.Adapter do
   reports `valkey` as implemented, configured and healthy instead of
   `adapter_missing`. Health is claimed only on evidence: a `PING` the server
   answered. Nothing here returns, logs or embeds the URL or its credential.
+
+  When configured, Valkey is in the data path: `serves/0` names what runs on
+  it (`OptimalEngine.Storage.Shared`), and `status/1` reports how many of the
+  pool's connections are up.
   """
 
   @behaviour OptimalEngine.Storage.Provider
 
   alias OptimalEngine.Storage.Valkey
+  alias OptimalEngine.Storage.Valkey.Pool
 
   @capabilities ~w(cache coordination rate_limits)a
+
+  # What the Engine runs on Valkey when it is configured and up.
+  @serves ~w(api_rate_limits connector_rate_limits api_key_cache sync_gate_cache)
 
   @impl OptimalEngine.Storage.Provider
   def id, do: "valkey"
 
   @impl OptimalEngine.Storage.Provider
   def capabilities, do: @capabilities
+
+  @doc "The data the Engine keeps on Valkey while it is configured and up."
+  @spec serves() :: [String.t()]
+  def serves, do: @serves
 
   @impl OptimalEngine.Storage.Provider
   def describe do
@@ -28,7 +40,8 @@ defmodule OptimalEngine.Storage.Valkey.Adapter do
       kind: "service",
       role: "ephemeral",
       capabilities: Enum.map(@capabilities, &Atom.to_string/1),
-      operations: ~w(ping set get del),
+      operations: ~w(ping set get del evalsha incr),
+      serves: @serves,
       protocol: "RESP2 over TCP, TLS with rediss://",
       durability: "none: a cache and coordination store, rebuilt from the canonical stores"
     }
@@ -51,7 +64,10 @@ defmodule OptimalEngine.Storage.Valkey.Adapter do
       health: Atom.to_string(health),
       lifecycle_state: lifecycle_state(configured, health),
       capabilities: Enum.map(@capabilities, &Atom.to_string/1),
-      tls: tls_configured?()
+      tls: tls_configured?(),
+      serves: @serves,
+      serving: Pool.serving?(),
+      pool: Pool.stats()
     }
   end
 

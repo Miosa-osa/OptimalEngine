@@ -147,7 +147,7 @@ A provider has one of six lifecycle states.
 It outranks configuration and probes: a reachable endpoint the engine cannot talk to is not available storage.
 Every provider reports `adapter_implemented`.
 The embedded local providers, `s3`, and `postgres` have adapters (`postgres` is partial: a compile-time build that refuses full-text search, replication, and app data collections).
-`nats_jetstream`, `valkey`, `qdrant`, `duckdb`, and `openbao` have adapters that check and prove the service, and no Engine feature uses them yet; `fractal` has none.
+`nats_jetstream`, `qdrant`, `duckdb`, and `openbao` have adapters that check and prove the service, and no Engine feature uses them yet; `valkey` carries the shared rate limits and caches when it is configured; `fractal` has none.
 
 `active` means a default local provider is currently part of the running engine.
 RocksDB is `active` only when the knowledge store runs on it (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`); on an ETS knowledge store it reports `available`.

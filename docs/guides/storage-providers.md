@@ -345,7 +345,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | `s3` (S3-compatible: Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Asset bytes, offsite backups, the probe and the placement reconciler | |
 | `postgres` | Wired, partial | The canonical relational store of a compile-time `OPTIMAL_STORE=postgres` build | Full-text search, replication, app data collections, and the engine's backup routes; moving an existing Engine to it |
 | `nats_jetstream` | Wired | The probe (PONG and a JetStream account answer) and the proof (a stream created, a message published and read back by sequence, the stream deleted) over `OPTIMAL_NATS_URL` | Engine events, jobs and replication do not flow through it yet |
-| `valkey` | Wired | The probe (PING) and the proof (set, get, delete) over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Engine caches, locks and rate limits do not live in it yet |
+| `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
 | `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`) and the proof (a Parquet file written and read back) | No Engine projection is written to it yet |
 | `openbao` | Wired | The probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` | The Engine's own secrets still come from the environment |
@@ -463,9 +463,46 @@ This recipe runs it next to the Engine and uses it for assets and encrypted offs
 
 Keep `OPTIMAL_BACKUP_KEY` away from the machine, and give a Garage bucket that holds more than one Engine's data one `OPTIMAL_S3_PREFIX` per Engine.
 
+## Valkey
+
+With `OPTIMAL_VALKEY_URL` set (`redis://[user:password@]host[:port][/db]`, `rediss://` for TLS), the Engine starts a supervised pool of connections to it at boot and keeps there what its processes must agree on:
+
+| What | Module | Without Valkey |
+| --- | --- | --- |
+| HTTP API rate limits, one token bucket per key or IP | `OptimalEngine.API.RateLimiter` | one bucket per key per Engine process |
+| Outbound connector rate limits | `OptimalEngine.Connectors.RateLimit` | one bucket per connector per Engine process |
+| API key secrets bcrypt already verified, and their removal on revoke or delete | `OptimalEngine.Auth.KeyCache` | per process |
+| The workspace scans a sync gate reuses, per store | `OptimalEngine.Sync.GateCache` | per process |
+
+All of it goes through `OptimalEngine.Storage.Shared`, a small cache, counter, lock and token-bucket interface whose fallback is the process's own ETS table.
+Nothing durable lives in Valkey, and every key it holds has a TTL.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `OPTIMAL_VALKEY_URL` | unset | Unset: no pool, everything on ETS, as before. |
+| `OPTIMAL_VALKEY_POOL_SIZE` | 4 | Connections per Engine process (1 to 32). |
+| `OPTIMAL_VALKEY_TIMEOUT_MS` | 500 | How long a command waits for its reply before the call is answered from ETS. |
+
+Valkey being down never fails a request.
+A connection that cannot open, or fails mid-command, is closed and opened again with a backoff of 100 ms doubling to 5 seconds; while no connection is up every call runs on ETS at once, and a server that stops answering costs one timeout per connection before that.
+A removal Valkey could not take while it was unreachable (a revoked key, a cleared gate cache) is kept and applied before anything is read from Valkey again, so a revoked key's entry is never read back.
+`ApiKey.verify/1` reads the key row on every request in any case, so a revocation takes effect at once whatever any cache holds.
+
+What is stored, and how:
+
+* Keys are `optimal:shared:<namespace>:<generation>:<key>`; clearing a namespace moves its generation in one command, and the old keys expire.
+* Cached values are signed with an HMAC: a value this Engine did not write reads as a miss. The key comes from `CONNECTOR_KEY`; give every process that shares a Valkey the same `CONNECTOR_KEY` and they share cache entries, otherwise each reads only its own (the rate limits are shared either way).
+* The key cache stores the SHA-256 of the stored bcrypt hash and the secret, never either of them.
+* A gate cache entry is keyed by the Engine's replica id, so Engines with stores of their own never share one.
+* The URL and its credential are never logged or returned; the inventory shows only whether TLS is on and how many connections are up (`OptimalEngine.Storage.Valkey.Adapter.status/1`).
+
+The scripts need a standalone Valkey (or Redis 7 or later); Valkey Cluster is not supported, because a script reads the namespace generation next to the key.
+`mix test --only valkey` with `OPTIMAL_TEST_VALKEY_URL=redis://127.0.0.1:6390/15` runs the shared interface against a real server (for example `docker run --rm -p 6390:6379 valkey/valkey:8.1`).
+
 ## What Is Not Implemented
 
-The Engine has no adapter for Fractal, and the provider inventory says so; Valkey, NATS JetStream, Qdrant, OpenBao and DuckDB are reached and proved, but no Engine feature is served from them yet.
+The Engine has no adapter for Fractal, and the provider inventory says so; NATS JetStream, Qdrant, OpenBao and DuckDB are reached and proved, but no Engine feature is served from them yet.
+Valkey carries the rate limits and caches listed under [Valkey](#valkey) and nothing durable.
 PostgreSQL holds the canonical relational store but not full-text search, replication, or app data collections, and moving an existing Engine's data to it (stage 4 of [PostgreSQL Provider](postgres-provider.md)) is not implemented.
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.
 
