@@ -174,8 +174,10 @@ defmodule OptimalEngine.Storage.NATS.JetStream do
   end
 
   @doc """
-  A stored message: `seq: n`, or `last_by_subject: subject` for the newest
-  one on that subject. `{:error, :not_found}` when there is none.
+  A stored message: `seq: n`; `last_by_subject: subject` for the newest one
+  on that subject (a wildcard subject included); or
+  `next_by_subject: subject, from: n` for the first one on it at or after
+  sequence `n`. `{:error, :not_found}` when there is none.
   """
   @spec get_message(conn(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def get_message(conn, stream, opts) do
@@ -183,6 +185,7 @@ defmodule OptimalEngine.Storage.NATS.JetStream do
       case opts do
         [seq: seq] -> %{"seq" => seq}
         [last_by_subject: subject] -> %{"last_by_subj" => subject}
+        [next_by_subject: subject, from: seq] -> %{"seq" => seq, "next_by_subj" => subject}
       end
 
     case api(conn, "STREAM.MSG.GET." <> stream, body) do
@@ -210,6 +213,33 @@ defmodule OptimalEngine.Storage.NATS.JetStream do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  @doc """
+  Removes every message a subject `filter` covers (a wildcard included) from
+  `stream`, or every message without one. Returns how many went.
+  """
+  @spec purge(conn(), String.t(), String.t() | nil) :: {:ok, non_neg_integer()} | {:error, term()}
+  def purge(conn, stream, filter \\ nil) do
+    body = if filter, do: %{"filter" => filter}, else: %{}
+
+    case api(conn, "STREAM.PURGE." <> stream, body) do
+      {:ok, %{"success" => true} = answer} -> {:ok, Map.get(answer, "purged", 0)}
+      {:ok, other} -> {:error, {:unexpected, other}}
+      {:error, {:jetstream, %{err_code: @stream_not_found}}} -> {:ok, 0}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Removes one message by sequence. `{:error, :not_found}` when it is not there."
+  @spec delete_message(conn(), String.t(), pos_integer()) :: :ok | {:error, term()}
+  def delete_message(conn, stream, seq) do
+    case api(conn, "STREAM.MSG.DELETE." <> stream, %{"seq" => seq}) do
+      {:ok, %{"success" => true}} -> :ok
+      {:ok, other} -> {:error, {:unexpected, other}}
+      {:error, {:jetstream, %{code: code}}} when code in [400, 404] -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
     end
   end
 

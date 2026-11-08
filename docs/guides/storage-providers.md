@@ -380,8 +380,8 @@ A workspace that is not enabled for replication has no ledger, and nothing of it
 Storage mutation entries (`POST /api/storage/workspaces/:id/mutations`) are not changes and are not published either.
 
 * Stream `<NAMESPACE>_LEDGER`, file storage, limits retention, kept `OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS` (default 168, `0` keeps it forever).
-* Subject `<namespace>.ledger.<tenant>.<workspace>`, each id made a subject token: bytes other than letters, digits, `_` and `-` are percent-encoded (`default:notes` is `default%3Anotes`).
-  Follow one workspace with that subject as a consumer's filter, or all of them with `<namespace>.ledger.>`.
+* Subject `<namespace>.ledger.<tenant>.<workspace>.<table>.<row>`, one per row, each id made a subject token: bytes other than letters, digits, `_` and `-` are percent-encoded (`default:notes` is `default%3Anotes`).
+  Follow one workspace with `<namespace>.ledger.<tenant>.<workspace>.>` as a consumer's filter, one row with its own subject, or everything with `<namespace>.ledger.>`.
 * Each message is one change as JSON, the shape a peer pulls (`sequence`, `id`, `device_id`, `entity_type`, `entity_id`, `operation`, `payload`, `payload_hash`, `idempotency_key`, `occurred_at`) with `tenant_id` and `workspace_id`.
   Headers: `Nats-Msg-Id` (the change's id), `Optimal-Ledger-Seq`, `Optimal-Entity-Type`, `Optimal-Operation`, `Optimal-Replica`.
 
@@ -392,8 +392,32 @@ Where to resume is read from the stream (the `Optimal-Ledger-Seq` of the last me
 `runtime.flows.ledger` in `GET /api/storage/providers/nats_jetstream` says where it stands: `state` (`off`, `buffering` while NATS is down, `publishing` while a backlog remains, `caught_up`, `error` with `last_error`), the changes published since start, and each workspace's `published_through` and `backlog`.
 
 The stream is a copy for subscribers, not a replication transport: Engines still replicate over HTTP or the MIOSA relay (see [Replication](replication.md)), and a peer's conflict detection, gates and version checks do not apply to a reader of the stream.
-A workspace erasure removes rows from the Engine and the ledger, not from the stream: the stream's age limit is what removes a change from NATS, so keep it as short as subscribers allow.
+The stream follows what the Engine forgets (next section); the age limit bounds the rest.
 The stream holds workspace content up to the serve ceiling, so the NATS account needs the same care as a replication peer.
+
+### What the Engine forgets leaves the stream
+
+The Engine's own ledger is append-only (see [Erasure And Retention](erasure-and-retention.md)), so the stream cannot be refilled from it naively.
+The publisher keeps the stream to what the Engine still holds instead:
+
+* A forget is a `delete` in the ledger (an erasure, a retention delete, a derived-data removal, any delete) or a `memories` change that sets `is_forgotten` (`Memory.forget/2`).
+  Before the forget goes out, every earlier message on the row's subject is purged, and the message that replaces them is a tombstone: a delete carries the row's key only, a forgotten memory its `id` and `is_forgotten` and nothing it said.
+* A create or update that a later forget in the ledger covers is never published, so a stream filled again from the ledger (after a loss, or a first start after the forget) holds nothing forgotten either.
+* An archived workspace (`Workspace.archive/1`) and the old id of a renamed one (`DataSteward.rename_workspace/3`) have their whole subject tree purged (`<namespace>.ledger.<tenant>.<workspace>.>`), and an archived workspace is no longer published.
+  The request is written first as an `events` row (`kind = 'nats_purge_requested'`), done at once when NATS is reachable and otherwise on the next pass after it is, so a purge asked for during an outage, or across a restart, is not lost.
+
+Every purge is evidence in `events`:
+
+| `kind` | `target_uri` | `metadata` |
+| --- | --- | --- |
+| `nats_purge` | `workspace:<id>` | A pass that forgot rows: `rows_forgotten`, `messages_purged`, `through_sequence`, `stream` |
+| `nats_purge_requested` | `workspace:<id>` | A workspace purge asked for: `reason` (`archived`, `renamed`), `namespace` |
+| `nats_purge` | `nats-purge-request:<request id>` | That purge done: `messages_purged`, `subjects`, `reason` |
+
+An erasure (`Compliance.Erasure.erase/2`) runs a pass over the erased workspaces before it reports, and its report and `erasure` audit event carry `nats_ledger`: `messages_purged` and `rows_forgotten`, `state: "off"` without the flow, or `pending: true` while NATS is down, in which case the purge happens when the deletes go out and is recorded as a `nats_purge` event.
+`runtime.flows.ledger` counts `messages_purged` and the workspace purges still pending (`purges_pending`).
+
+What this does not cover: the Engine's own derived rows that a soft forget leaves (`Memory.forget/2` marks the memory, and the source package and claim its creation wrote keep their text in the Engine, and so on the stream, until they are deleted); a subscriber's own copy of what it already read; and the intake queue, whose items carry connector content until they are ingested, dead-lettered or requeued.
 
 ### Background jobs
 
@@ -421,12 +445,32 @@ A Signal is therefore either stored in the stream or ingested in the pull, never
 The queue's durable consumer ingests each Signal through the same intake as the in-process path, with the connector's current routing config read from its row.
 A stored Signal is acknowledged and leaves the queue.
 One intake refuses is terminated and logged, as the in-process path logs it; one whose connector was deleted since is terminated.
-One whose intake raised is delivered again after a backoff (one second, doubling to ten minutes) for as long as it keeps failing, so a Signal is never dropped because its intake failed.
+One whose intake raised is delivered again after a backoff (one second, doubling to ten minutes), up to ten deliveries; the delivery that fails at the cap, or one that arrives past it unanswered, moves it to the dead letters (next section) and off the queue.
+JetStream's own `max_deliver` is the cap plus one, so that last delivery is still seen.
 One the Engine stopped in the middle of is delivered again after ten minutes.
 The message id is `<connector>:<signal id>`: a pull that runs again over items it already queued queues each once inside the stream's duplicate window (two minutes), and intake stores a source item once whatever arrives.
 
-Refusals at consumption are not counted in the pull's `connector_runs` row, which is written when the pull ends; they are in the queue's `terminated` count and the log.
+A refusal at consumption, and a dead letter, are counted in the `connector_runs` row of the pull that queued the Signal (its id travels with the message): `errors_encountered` goes up by one and `error_detail` counts them as `queue_refused` and `dead_lettered`.
+The row is written when the pull ends, so a refusal that comes while the pull still runs waits for it: the message comes back two seconds later instead of the count being lost.
 The Signal's content is in the stream until it is ingested, so the NATS account holds connector content in the meantime.
+
+### Dead letters
+
+An item a work queue gave up on is kept in stream `<NAMESPACE>_DEAD_LETTERS` (limits retention, file storage, kept until requeued or purged), on `<namespace>.dead.<flow>`, with its payload as it was queued and headers saying why: `Optimal-Flow`, `Optimal-Subject` (where it was queued), `Optimal-Delivered`, `Optimal-Error` (the last failure, one line, at most 500 bytes), `Optimal-Stream-Seq`.
+Intake is the flow that dead-letters; a job is never dead-lettered here, because the `jobs` table already dead-letters a job that runs out of attempts (`dead_letter_jobs`), and a job's message comes back for as long as the job is not finished.
+
+The inventory counts them (`runtime.dead_letters`: `total` and per flow).
+The Engine operator lists and requeues them; a letter is listed without its payload:
+
+```bash
+curl -s localhost:4200/api/maintenance/nats/dead-letters?flow=intake
+curl -s -X POST localhost:4200/api/maintenance/nats/dead-letters/42/requeue
+mix optimal.nats dead-letters --flow intake
+mix optimal.nats requeue 42
+```
+
+Both routes need an admin key of the default tenant whose workspace scope is `*` (403 `operator_only` otherwise), because the letters are every tenant's.
+A requeue publishes the payload to its original subject under a new message id (`requeue:<namespace>:<seq>`) and deletes the letter; 404 when there is no such letter, 503 while NATS is not reachable.
 
 ### Replication over NATS: not implemented
 

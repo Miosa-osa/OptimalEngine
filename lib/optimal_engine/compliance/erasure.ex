@@ -35,6 +35,15 @@ defmodule OptimalEngine.Compliance.Erasure do
   object-store asset copies of the workspace); it is recomputable, and its
   entries cannot be told apart per context.
 
+  ## On NATS
+
+  With the `ledger` NATS flow on, the deletes reach the ledger stream before
+  the erasure reports: every earlier message of each erased row is purged
+  (`OptimalEngine.Storage.NATS.LedgerPublisher.flush/1`), and `nats_ledger` in
+  the report and the audit event says what went (`messages_purged`,
+  `rows_forgotten`), or that the purge is `pending` while NATS is down (it
+  happens when the deletes go out, and is recorded as a `nats_purge` event).
+
   ## What survives
 
     * Immutable audit events for regulatory purposes are *redacted*
@@ -53,6 +62,7 @@ defmodule OptimalEngine.Compliance.Erasure do
           held: non_neg_integer(),
           forced?: boolean(),
           cache_purged: map(),
+          nats_ledger: map(),
           completed_at: String.t()
         }
 
@@ -90,6 +100,8 @@ defmodule OptimalEngine.Compliance.Erasure do
         |> Map.merge(derived)
 
       cache_purged = purge_cache(workspaces)
+      # What went, on the NATS ledger stream too, before the evidence is written.
+      nats_ledger = OptimalEngine.Storage.NATS.LedgerPublisher.flush(workspaces)
       redacted = redact_audit(principal_id, tenant_id)
 
       Store.raw_query(
@@ -106,7 +118,8 @@ defmodule OptimalEngine.Compliance.Erasure do
             events_redacted: redacted,
             held: held,
             forced?: force?,
-            cache_purged: cache_purged
+            cache_purged: cache_purged,
+            nats_ledger: nats_ledger
           })
         ]
       )
@@ -119,6 +132,7 @@ defmodule OptimalEngine.Compliance.Erasure do
          held: held,
          forced?: force?,
          cache_purged: cache_purged,
+         nats_ledger: nats_ledger,
          completed_at: DateTime.utc_now() |> DateTime.to_iso8601()
        }}
     end

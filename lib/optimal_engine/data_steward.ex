@@ -503,8 +503,20 @@ defmodule OptimalEngine.DataSteward do
       )
       |> settle_move(move)
       |> purge_vacated_cache(source_workspace_id, :rename)
+      |> forget_vacated_in_nats(tenant, source_workspace_id)
     end
   end
+
+  # The old id's messages on the NATS ledger stream go with it; the rows publish
+  # again under the new id when it replicates. Never fails the rename.
+  defp forget_vacated_in_nats({:ok, _} = result, tenant, source) do
+    _ = OptimalEngine.Storage.NATS.LedgerPublisher.forget_workspace(tenant, source, "renamed")
+    result
+  rescue
+    _ -> result
+  end
+
+  defp forget_vacated_in_nats(result, _tenant, _source), do: result
 
   # ── the directory goes with the id ─────────────────────────────────────────
 

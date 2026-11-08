@@ -17,8 +17,12 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   which answers `:ack` (done, gone from the queue), `{:retry, delay_ms}`
   (delivered again after the delay) or `:term` (never delivered again). A
   callback that raises gets the message delivered again after a backoff
-  (1 s doubling to 10 min) for as long as it keeps failing: a message is
-  never dropped because its handler failed. A message nobody answered (the
+  (1 s doubling to 10 min). A flow with a delivery cap
+  (`dead_letter_after/1`) moves a message that fails on its last allowed
+  delivery, or arrives past it unanswered, to the dead letters
+  (`OptimalEngine.Storage.NATS.DeadLetters`) and takes it off the queue; one
+  without a cap keeps retrying. A message is never dropped because its handler
+  failed. A message nobody answered (the
   Engine stopped mid-way) is delivered again after the consumer's ack wait.
 
   The stream and the consumer are made sure of once per connection, so a
@@ -30,7 +34,7 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   require Logger
 
   alias OptimalEngine.Storage.NATS
-  alias OptimalEngine.Storage.NATS.{Connection, JetStream}
+  alias OptimalEngine.Storage.NATS.{Connection, DeadLetters, JetStream}
 
   @callback flow() :: String.t()
   @callback stream_suffix() :: String.t()
@@ -39,10 +43,13 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   @callback stream_options() :: map()
   @callback handle_message(JetStream.message(), map()) :: :ack | :term | {:retry, non_neg_integer()}
   @callback on_provisioned(GenServer.server(), map()) :: :ok
+  @callback dead_letter_after(map()) :: pos_integer() | nil
+  @callback on_dead_letter(JetStream.message(), String.t(), map()) :: :ok
 
-  @optional_callbacks on_provisioned: 2
+  @optional_callbacks on_provisioned: 2, dead_letter_after: 1, on_dead_letter: 3
 
   @batch 10
+  @no_counts %{acked: 0, retried: 0, terminated: 0, failed: 0, dead_lettered: 0}
   @expires_ms 2_000
   @idle_ms 1_000
   @max_backoff_ms 600_000
@@ -134,7 +141,15 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
           true -> "starting"
         end,
       consumer_pid: nil,
-      counts: %{published: 0, acked: 0, retried: 0, terminated: 0, failed: 0, fallback: 0},
+      counts: %{
+        published: 0,
+        acked: 0,
+        retried: 0,
+        terminated: 0,
+        failed: 0,
+        dead_lettered: 0,
+        fallback: 0
+      },
       last_error: nil
     }
 
@@ -229,7 +244,16 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
 
         consumer = Map.merge(%{durable_name: consumer_name(state)}, state.callback.consumer())
 
+        # A capped flow: JetStream stops one past the cap, so the delivery that
+        # finds it over the cap is still seen and moved to the dead letters.
+        consumer =
+          case cap(state.callback, state.context) do
+            nil -> consumer
+            cap -> Map.put(consumer, :max_deliver, cap + 1)
+          end
+
         with {:ok, _outcome, _} <- JetStream.ensure_stream(state.connection, stream_config),
+             :ok <- ensure_dead_letters(state),
              {:ok, _} <- JetStream.ensure_consumer(state.connection, stream(state), consumer) do
           state = %{state | epoch: {n, since}, state: "running", last_error: nil}
 
@@ -255,6 +279,7 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
       connection: state.connection,
       stream: stream(state),
       consumer: consumer_name(state),
+      namespace: state.namespace,
       context: state.context
     }
   end
@@ -295,8 +320,7 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
     case JetStream.fetch(setup.connection, setup.stream, setup.consumer, fetch_opts) do
       {:ok, messages} ->
         counts =
-          Enum.reduce(messages, %{acked: 0, retried: 0, terminated: 0, failed: 0}, fn message,
-                                                                                      counts ->
+          Enum.reduce(messages, @no_counts, fn message, counts ->
             key = answer(setup, message)
             Map.update!(counts, key, &(&1 + 1))
           end)
@@ -311,7 +335,16 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   end
 
   defp answer(setup, message) do
-    case handle(setup, message) do
+    cap = cap(setup.callback, setup.context)
+    delivered = message.delivered || 1
+
+    if cap && delivered > cap,
+      do: dead_letter(setup, message, "delivered #{delivered} times without an answer"),
+      else: answer(setup, message, handle(setup, message), cap, delivered)
+  end
+
+  defp answer(setup, message, result, cap, delivered) do
+    case result do
       :ack ->
         _ = JetStream.ack(setup.connection, message)
         :acked
@@ -324,10 +357,57 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
         _ = JetStream.nak(setup.connection, message, delay_ms: max(delay_ms, 0))
         :retried
 
-      {:failed, delay_ms} ->
+      {:failed, _delay_ms, error} when not is_nil(cap) and delivered >= cap ->
+        dead_letter(setup, message, error)
+
+      {:failed, delay_ms, _error} ->
         _ = JetStream.nak(setup.connection, message, delay_ms: delay_ms)
         :failed
     end
+  end
+
+  # The item goes to the dead letters, then leaves the work queue. A dead
+  # letter that cannot be stored leaves it on the queue, delivered again later.
+  defp dead_letter(setup, message, error) do
+    flow = setup.callback.flow()
+
+    case DeadLetters.put(setup.connection, setup.namespace, flow, message, error) do
+      {:ok, _ack} ->
+        _ = JetStream.term(setup.connection, message)
+
+        Logger.warning(
+          "[NATS] #{flow} message #{message.stream_seq} dead-lettered after #{message.delivered} deliveries: #{error}"
+        )
+
+        if function_exported?(setup.callback, :on_dead_letter, 3),
+          do: safely(fn -> setup.callback.on_dead_letter(message, error, setup.context) end)
+
+        :dead_lettered
+
+      {:error, reason} ->
+        Logger.warning("[NATS] #{flow} dead letter not stored: #{inspect(reason)}")
+
+        _ =
+          JetStream.nak(setup.connection, message, delay_ms: backoff(setup, message.delivered || 1))
+
+        :failed
+    end
+  end
+
+  defp safely(fun) do
+    fun.()
+  rescue
+    error -> Logger.warning("[NATS] dead-letter hook failed: #{Exception.message(error)}")
+  end
+
+  defp cap(callback, context) do
+    if function_exported?(callback, :dead_letter_after, 1), do: callback.dead_letter_after(context)
+  end
+
+  defp ensure_dead_letters(state) do
+    if cap(state.callback, state.context),
+      do: DeadLetters.ensure(state.connection, state.namespace),
+      else: :ok
   end
 
   defp handle(setup, message) do
@@ -338,16 +418,20 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
     end
   rescue
     error ->
-      delay = backoff(message.delivered || 1)
+      delay = backoff(setup, message.delivered || 1)
 
       Logger.warning(
         "[NATS] #{setup.callback.flow()} message #{message.stream_seq} failed (delivery #{message.delivered}), again in #{div(delay, 1000)} s: #{Exception.message(error)}"
       )
 
-      {:failed, delay}
+      {:failed, delay, Exception.message(error)}
   end
 
-  defp backoff(delivered), do: min(1_000 * Integer.pow(2, min(delivered - 1, 20)), @max_backoff_ms)
+  # `:retry_ms` in the context is the first delay (tests); one second otherwise.
+  defp backoff(setup, delivered) do
+    base = Map.get(setup.context, :retry_ms, 1_000)
+    min(base * Integer.pow(2, min(delivered - 1, 20)), @max_backoff_ms)
+  end
 
   # ---------------------------------------------------------------------------
 
