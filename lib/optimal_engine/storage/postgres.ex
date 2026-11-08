@@ -61,6 +61,51 @@ defmodule OptimalEngine.Storage.Postgres do
             "FTS5's bm25() (OptimalEngine.Store.FullText); search, context assembly and " <>
             "asking run on them",
         refused_as: ["FTS5 MATCH"]
+      },
+      %{
+        feature: "sqlite_json_functions",
+        how:
+          "json(), json_set, json_insert, json_replace, json_remove, json_object, json_array, " <>
+            "json_type, json_array_length, json_each, json_group_array and json_valid run as " <>
+            "PostgreSQL functions with SQLite's results (OptimalEngine.Store.Postgres." <>
+            "SQLiteFunctions), the dialect renaming each call; json_each's value is text, and " <>
+            "a value bound to a parameter is a JSON string (bind JSON with json(?)). The " <>
+            "json_extract forms that order or compare by SQLite's types, and json_tree, " <>
+            "json_patch and the other functions no call site uses, stay refused",
+        refused_as:
+          refused_by("a SQLite JSON function with no translation") ++
+            [
+              "json_extract form",
+              "json_extract path",
+              "json_extract on the right of a comparison",
+              "json_extract ordered comparison",
+              "json_extract compared to an expression",
+              "json_extract compared to a non-text value",
+              "json_extract in ORDER BY",
+              "json_extract IN with an expression",
+              "json_extract IN with a subquery"
+            ]
+      },
+      %{
+        feature: "date_time_arithmetic",
+        how:
+          "datetime, date, time, julianday, unixepoch and strftime with any time value and " <>
+            "SQLite's modifiers (±N days/hours/minutes/seconds/months/years, start of " <>
+            "day/month/year, unixepoch, subsec, utc, localtime) run as PostgreSQL functions " <>
+            "that hold a time as SQLite does, in milliseconds since the Julian epoch; a " <>
+            "modifier or strftime format they do not have raises rather than answer",
+        refused_as: ["datetime() modifier", "strftime call"]
+      },
+      %{
+        feature: "sqlite_functions",
+        how:
+          "group_concat is string_agg, instr strpos, char chr, and GLOB of a column or " <>
+            "placeholder a regular expression match; typeof, printf and SQLite's other " <>
+            "functions no call site uses on PostgreSQL, a GLOB of an expression, SQLite's " <>
+            "collations and a LIKE with a computed pattern stay refused",
+        refused_as:
+          refused_by("a SQLite function with no translation") ++
+            ["GLOB", "SQLite collation", "LIKE with a computed pattern"]
       }
     ]
   end
@@ -93,45 +138,6 @@ defmodule OptimalEngine.Storage.Postgres do
         ]
       },
       %{
-        feature: "sqlite_json_functions",
-        reason:
-          "json_set, json_each, json(), json_array_length and SQLite's other JSON functions, " <>
-            "and the json_extract forms PostgreSQL cannot compare as SQLite does (an ordered " <>
-            "comparison, ORDER BY on it, a comparison to an expression or a non-text value), " <>
-            "are refused at their call sites (routing placement, memory partition and " <>
-            "security label filters, reconstruction learning)",
-        refused_as:
-          refused_by("a SQLite JSON function with no translation") ++
-            [
-              "json_extract form",
-              "json_extract path",
-              "json_extract on the right of a comparison",
-              "json_extract ordered comparison",
-              "json_extract compared to an expression",
-              "json_extract compared to a non-text value",
-              "json_extract in ORDER BY",
-              "json_extract IN with an expression",
-              "json_extract IN with a subquery",
-              "json_valid of an expression"
-            ]
-      },
-      %{
-        feature: "date_time_arithmetic",
-        reason:
-          "datetime and strftime with a computed modifier or another format, julianday, " <>
-            "unixepoch, date() and time() are refused (viability metrics, retention windows)",
-        refused_as: [
-          "unmapped date/time function",
-          "datetime() modifier",
-          "strftime call",
-          "strftime format",
-          "julianday",
-          "unixepoch",
-          "date",
-          "time"
-        ]
-      },
-      %{
         feature: "sqlite_catalog",
         reason:
           "PRAGMA, sqlite_master and the pragma_* functions are refused (workspace bundles, " <>
@@ -145,16 +151,6 @@ defmodule OptimalEngine.Storage.Postgres do
             "refused (backup schedules, the storage audit, graph edge listings, model call " <>
             "history, a workspace slug change)",
         refused_as: ["rowid", "last_insert_rowid"]
-      },
-      %{
-        feature: "sqlite_functions",
-        reason:
-          "group_concat, typeof, instr, printf and SQLite's other functions without a " <>
-            "translation, GLOB, SQLite's collations and a LIKE with a computed pattern are " <>
-            "refused at their call sites (action chain lists, clusters, insight health)",
-        refused_as:
-          refused_by("a SQLite function with no translation") ++
-            ["GLOB", "SQLite collation", "LIKE with a computed pattern"]
       },
       %{
         feature: "replace_writes",

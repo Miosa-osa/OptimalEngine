@@ -158,15 +158,30 @@ These features are not on the PostgreSQL store yet.
 | --- | --- |
 | Replication | Capture is SQLite triggers and applying reads SQLite's catalog. Enabling sync and adding a peer return `{:error, {:unsupported, "replication is not available on the PostgreSQL store"}}`, and the API answers 501. |
 | App data collections | A collection creates a table, a full-text index and triggers at runtime. Creating one is refused, and so is any schema change outside the migrations. |
-| SQLite JSON functions | `json_set`, `json_each`, `json()`, `json_array_length` and the rest, and the `json_extract` forms PostgreSQL cannot compare as SQLite does (an ordered comparison, `ORDER BY` on it, a comparison to an expression or a non-text value), are refused at their call sites (routing placement, memory partition and security label filters, reconstruction learning, and the facts that accepted a deleted claim in an erasure or a retention delete, so those two are refused by name on a PostgreSQL store until that step is ported). |
-| Date arithmetic | A `datetime` or `strftime` with a computed modifier or another format, `julianday`, `unixepoch`, `date()` and `time()` are refused (viability metrics, retention windows). |
 | The SQLite catalog | `PRAGMA`, `sqlite_master` and the `pragma_*` functions are refused (workspace bundles, the data steward's table list, a workspace slug change, replication). |
 | `rowid` | A statement that orders or filters by `rowid`, or reads `last_insert_rowid()`, is refused (backup schedules, the storage audit, graph edge listings, model call history, a workspace slug change). |
-| Other SQLite functions | `group_concat`, `typeof`, `instr`, `printf` and the rest, `GLOB`, SQLite's collations and a `LIKE` with a computed pattern are refused (action chain lists, clusters, insight health). |
 | Replace writes | `INSERT OR REPLACE`, `REPLACE INTO`, an `UPDATE` with a conflict clause (`UPDATE OR REPLACE` and the like) and an `INSERT OR IGNORE` with its own `ON CONFLICT` are refused at their call sites; the store's context and chunk writes replace rows as SQLite does. |
 | Schema and transaction statements | The schema comes from the migrations, so a schema change and SQLite-only table options (`AUTOINCREMENT`, `WITHOUT ROWID`) are refused. A transaction statement sent as a statement raises `ArgumentError` on both stores. |
 
 `OptimalEngine.Store.Dialect.refusals/0` lists every refused construct with its reason, and `test/store/postgres/unavailable_test.exs` checks both ways: every refusal of the dialect is under a feature here or under a ported feature (`OptimalEngine.Storage.Postgres.ported/0`, a feature that works on PostgreSQL through statements of its own while the SQLite statements behind it stay refused), and every name a feature lists is one the dialect or the store refuses with.
+
+### SQLite Functions
+
+SQLite's JSON, date and time, and text functions run on a PostgreSQL store as PostgreSQL functions with SQLite's results (`OptimalEngine.Store.Postgres.SQLiteFunctions`), which the schema sync creates before any index or view.
+The dialect renames each call (`json_set` to `sqlite_json_set`, `datetime` to `sqlite_datetime`, and so on), so none collides with PostgreSQL's own `json_object`, `json_array`, `date` or `time`, and passes every argument as text, as SQLite reads it.
+`test/store/postgres/sqlite_functions_parity_test.exs` runs each form on both stores and compares the rows.
+
+| SQLite | On PostgreSQL |
+| --- | --- |
+| `json()`, `json_set`, `json_insert`, `json_replace`, `json_remove`, `json_object`, `json_array` | JSON text, minified, with an object's members in the order written, as SQLite writes it. A value is JSON when it is another JSON function's result (or `json_extract`'s), and otherwise the SQL value: a number stays a number. A value bound to a parameter is bound as text, so it is a JSON string; bind JSON with `json(?)`. |
+| `json_type`, `json_array_length`, `json_valid` | The same answers, with a path. |
+| `json_each` | SQLite's columns; `value`, `atom` and an array's `key` are text. |
+| `json_group_array` | An aggregate with the same array, `DISTINCT` included. |
+| `datetime`, `date`, `time`, `julianday`, `unixepoch`, `strftime` | A time is held as SQLite holds it, in milliseconds since the Julian epoch, from any SQLite time value, with SQLite's modifiers: `±N days`, `hours`, `minutes`, `seconds`, `months`, `years` (months by the calendar fields, so January 31 plus one month is March 3, as on SQLite), `start of day`, `month`, `year`, `unixepoch`, `subsec`, and `utc` and `localtime`, which leave a UTC time as it is. `now` is the statement's start, to the millisecond. A modifier or `strftime` format the functions do not have raises an error rather than answer. |
+| `group_concat`, `instr`, `char` | `string_agg`, `strpos`, `chr`. |
+| `x GLOB p` | A regular expression match, when `x` is a column or a placeholder and `p` a literal or a placeholder. |
+
+Still refused by name: the `json_extract` forms that order or compare by SQLite's types, `json_tree`, `json_patch` and the other JSON functions no call site uses, `typeof`, `printf` and SQLite's other functions without a counterpart, a `GLOB` of an expression, SQLite's collations, and a `LIKE` with a computed pattern.
 
 ### Full-Text Search
 

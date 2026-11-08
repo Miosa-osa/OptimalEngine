@@ -98,15 +98,15 @@ defmodule OptimalEngine.Store.Dialect do
   @typedoc "What a translated statement needs from its parameters."
   @type requirements :: %{text_params: [pos_integer()], params: :all | [pos_integer()]}
 
+  # SQLite functions with no PostgreSQL counterpart in
+  # OptimalEngine.Store.Postgres.SQLiteFunctions; the rest are renamed to it.
   @sqlite_json_functions ~w(
-    json_set json_each json_tree json_insert json_replace json_remove json_patch
-    json_type json_quote json_object json_array json_array_length json_group_array
-    json_group_object json_error_position json_pretty json
+    json_tree json_patch json_quote json_group_object json_error_position json_pretty
   )
 
   @sqlite_functions ~w(
-    group_concat typeof julianday unixepoch instr printf total hex randomblob
-    zeroblob likelihood unlikely iif changes total_changes sqlite_version date time
+    typeof printf total hex randomblob zeroblob likelihood unlikely iif changes
+    total_changes sqlite_version
   )
 
   @unsupported [
@@ -124,7 +124,8 @@ defmodule OptimalEngine.Store.Dialect do
                   "the SQLite catalog; PostgreSQL has information_schema"},
                  {"FTS5 MATCH", ~r/\bMATCH\b/i,
                   "an FTS5 statement; the PostgreSQL store searches through optimal_fts_match (OptimalEngine.Store.FullText)"},
-                 {"GLOB", ~r/\bGLOB\b/i, "case-sensitive wildcard matching; port the call site"},
+                 {"GLOB", ~r/\bGLOB\b/i,
+                  "GLOB with an operand other than a column, a literal or a placeholder"},
                  {"SQLite collation", ~r/\bCOLLATE\s+"?(NOCASE|RTRIM|BINARY)\b/i,
                   "a SQLite collation; the store's text compares in the C collation"},
                  {"rowid", ~r/\b(rowid|_rowid_)\b/i, "PostgreSQL tables have no rowid"},
@@ -132,9 +133,7 @@ defmodule OptimalEngine.Store.Dialect do
                   "DDL identity syntax, rewritten with the schema"},
                  {"last_insert_rowid", ~r/\blast_insert_rowid\s*\(/i,
                   "needs RETURNING at the call site"},
-                 {"WITHOUT ROWID", ~r/\bWITHOUT\s+ROWID\b/i, "DDL, rewritten with the schema"},
-                 {"unmapped date/time function", ~r/\b(strf|date)time\s*\(/i,
-                  "a format or modifier this module does not map"}
+                 {"WITHOUT ROWID", ~r/\bWITHOUT\s+ROWID\b/i, "DDL, rewritten with the schema"}
                ] ++
                  Enum.map(@sqlite_json_functions, fn name ->
                    {name, Regex.compile!("\\b#{name}\\s*\\(", "i"),
@@ -214,9 +213,12 @@ defmodule OptimalEngine.Store.Dialect do
          {:ok, rewritten} <- rewrite_insert_or_ignore(rewritten),
          {:ok, masked, literals} <- masked_sql(rewritten),
          masked = rewrite_text_before(masked),
+         masked = rewrite_glob(masked),
+         {:ok, masked} <- rewrite_sqlite_calls(masked),
          :ok <- reject_unsupported(masked),
          masked = rewrite_simple(masked),
          {:ok, masked} <- rewrite_like(masked),
+         masked = rewrite_null_test(masked),
          masked = rewrite_is_placeholder(masked),
          {:ok, masked} <- rewrite_order_by(masked),
          {:ok, masked} <- rewrite_placeholders(masked, rewritten),
@@ -272,9 +274,6 @@ defmodule OptimalEngine.Store.Dialect do
     cond do
       Regex.match?(~r/\bjson_extract\s*\(/i, masked) ->
         {:error, {:unsupported, "json_extract form"}}
-
-      Regex.match?(~r/\bjson_valid\s*\(/i, masked) ->
-        {:error, {:unsupported, "json_valid of an expression"}}
 
       true ->
         :ok
@@ -336,10 +335,10 @@ defmodule OptimalEngine.Store.Dialect do
     pattern = ~r/strftime\(\s*'([^']+)'\s*,\s*'now'\s*\)/i
 
     replace_all(sql, pattern, fn
-      [_, format] ->
+      [full, format] ->
         case Map.fetch(@strftime_formats, format) do
           {:ok, postgres_format} -> {:ok, "to_char(#{@utc_now_ts}, #{postgres_format})"}
-          :error -> {:error, {:unsupported, "strftime format #{format}"}}
+          :error -> {:ok, full}
         end
 
       _ ->
@@ -397,6 +396,241 @@ defmodule OptimalEngine.Store.Dialect do
     )
   end
 
+  # ---------------------------------------------------------------------------
+  # SQLite functions
+  # ---------------------------------------------------------------------------
+
+  # SQLite's JSON, date and text functions run as the functions of
+  # OptimalEngine.Store.Postgres.SQLiteFunctions, under names PostgreSQL does
+  # not use. Every argument is passed as text, as SQLite reads it; a value of a
+  # JSON function is JSON when it is another JSON function's result, and
+  # otherwise the SQL value as JSON (sqlite_json_value), so a number stays a
+  # number. group_concat is string_agg, and instr strpos.
+  @json_results ~w(json json_set json_insert json_replace json_remove json_object json_array
+                   json_group_array)
+  @renamed %{
+    "json" => "sqlite_json",
+    "json_type" => "sqlite_json_type",
+    "json_array_length" => "sqlite_json_array_length",
+    "json_each" => "sqlite_json_each",
+    "datetime" => "sqlite_datetime",
+    "date" => "sqlite_date",
+    "time" => "sqlite_time",
+    "julianday" => "sqlite_julianday",
+    "unixepoch" => "sqlite_unixepoch",
+    "strftime" => "sqlite_strftime",
+    "instr" => "strpos"
+  }
+  @sqlite_call Regex.compile!(
+                 "(?<![\\w.\"$])(" <>
+                   Enum.join(
+                     ~w(json_set json_insert json_replace json_remove json_object json_array
+                        json_group_array json_valid group_concat char) ++ Map.keys(@renamed),
+                     "|"
+                   ) <> ")\\s*\\(",
+                 "i"
+               )
+
+  defp rewrite_sqlite_calls(masked) do
+    case Regex.run(@sqlite_call, masked, return: :index) do
+      nil ->
+        {:ok, masked}
+
+      [{start, length}, {name_start, name_length}] ->
+        name = masked |> binary_part(name_start, name_length) |> String.downcase()
+        open = start + length
+
+        with {:ok, args, close} <- call_args(masked, open),
+             {:ok, args} <- map_ok(args, &rewrite_sqlite_calls/1),
+             {:ok, replacement} <- sqlite_call(name, args, raw_args(masked, open, close)),
+             {:ok, rest} <-
+               rewrite_sqlite_calls(binary_part(masked, close + 1, byte_size(masked) - close - 1)) do
+          {:ok, binary_part(masked, 0, start) <> replacement <> rest}
+        end
+    end
+  end
+
+  defp map_ok(list, fun) do
+    Enum.reduce_while(list, {:ok, []}, fn item, {:ok, acc} ->
+      case fun.(item) do
+        {:ok, value} -> {:cont, {:ok, acc ++ [value]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp raw_args(masked, open, close) do
+    {:ok, args, ^close} = call_args(masked, open)
+    args
+  end
+
+  # The arguments of the call whose "(" is just before `open`, split at
+  # top-level commas, and the index of its ")". Literals are masked, so a
+  # parenthesis or comma is always SQL.
+  defp call_args(masked, open), do: call_args(masked, open, 0, open, [])
+
+  defp call_args(masked, i, _depth, _from, _args) when i >= byte_size(masked),
+    do: {:error, {:unsupported, "an unbalanced function call"}}
+
+  defp call_args(masked, i, depth, from, args) do
+    case :binary.at(masked, i) do
+      ?( ->
+        call_args(masked, i + 1, depth + 1, from, args)
+
+      ?) when depth > 0 ->
+        call_args(masked, i + 1, depth - 1, from, args)
+
+      ?) ->
+        last = String.trim(binary_part(masked, from, i - from))
+        args = if last == "" and args == [], do: [], else: args ++ [last]
+        {:ok, args, i}
+
+      ?, when depth == 0 ->
+        call_args(
+          masked,
+          i + 1,
+          0,
+          i + 1,
+          args ++ [String.trim(binary_part(masked, from, i - from))]
+        )
+
+      _ ->
+        call_args(masked, i + 1, depth, from, args)
+    end
+  end
+
+  defp as_text(arg), do: "CAST((#{arg}) AS text)"
+
+  defp distinct(arg) do
+    case Regex.run(~r/\A(DISTINCT\s+)(.*)\z/is, arg) do
+      [_, prefix, rest] -> {prefix, rest}
+      nil -> {"", arg}
+    end
+  end
+
+  defp sqlite_call(name, args, raw) when name in ~w(json_set json_insert json_replace) do
+    case args do
+      [doc | pairs] when rem(length(pairs), 2) == 0 and pairs != [] ->
+        pairs =
+          pairs
+          |> Enum.zip(Enum.drop(raw, 1))
+          |> Enum.chunk_every(2)
+          |> Enum.flat_map(fn [{path, _}, {value, raw_value}] ->
+            [as_text(path), json_argument(value, raw_value)]
+          end)
+
+        {:ok, "sqlite_#{name}(#{Enum.join([as_text(doc) | pairs], ", ")})"}
+
+      _ ->
+        {:error, {:unsupported, name}}
+    end
+  end
+
+  defp sqlite_call("json_remove", [doc | paths], _raw) when paths != [],
+    do: {:ok, "sqlite_json_remove(#{Enum.map_join([doc | paths], ", ", &as_text/1)})"}
+
+  defp sqlite_call("json_object", [], _raw), do: {:ok, "'{}'"}
+
+  defp sqlite_call("json_object", args, raw) when rem(length(args), 2) == 0 do
+    pairs =
+      args
+      |> Enum.zip(raw)
+      |> Enum.chunk_every(2)
+      |> Enum.flat_map(fn [{key, _}, {value, raw_value}] ->
+        [as_text(key), json_argument(value, raw_value)]
+      end)
+
+    {:ok, "sqlite_json_object(#{Enum.join(pairs, ", ")})"}
+  end
+
+  defp sqlite_call("json_array", [], _raw), do: {:ok, "'[]'"}
+
+  defp sqlite_call("json_array", args, raw) do
+    values =
+      args
+      |> Enum.zip(raw)
+      |> Enum.map(fn {value, raw_value} -> json_argument(value, raw_value) end)
+
+    {:ok, "sqlite_json_array(#{Enum.join(values, ", ")})"}
+  end
+
+  defp sqlite_call("json_group_array", [arg], [raw]) do
+    {prefix, value} = distinct(arg)
+    {_prefix, raw_value} = distinct(raw)
+    {:ok, "sqlite_json_group_array(#{prefix}#{json_argument(value, raw_value)})"}
+  end
+
+  defp sqlite_call("json_valid", [arg], _raw) do
+    if Regex.match?(~r/\A#{@identifier}\z/, arg),
+      do: {:ok, "(#{arg} IS JSON)"},
+      else: {:ok, "(#{as_text(arg)} IS JSON)"}
+  end
+
+  defp sqlite_call("group_concat", [arg], _raw) do
+    {prefix, value} = distinct(arg)
+    {:ok, "string_agg(#{prefix}#{as_text(value)}, ',')"}
+  end
+
+  defp sqlite_call("group_concat", [arg, separator], _raw),
+    do: {:ok, "string_agg(#{as_text(arg)}, #{as_text(separator)})"}
+
+  defp sqlite_call("char", args, _raw) when args != [],
+    do: {:ok, "(" <> Enum.map_join(args, " || ", &"chr(CAST((#{&1}) AS int4))") <> ")"}
+
+  defp sqlite_call(name, [], _raw) when name in ~w(datetime date time julianday unixepoch),
+    do: {:ok, "#{@renamed[name]}('now')"}
+
+  defp sqlite_call("strftime", [format], _raw),
+    do: {:ok, "sqlite_strftime(#{as_text(format)}, 'now')"}
+
+  defp sqlite_call(name, args, _raw) when is_map_key(@renamed, name) and args != [],
+    do: {:ok, "#{@renamed[name]}(#{Enum.map_join(args, ", ", &as_text/1)})"}
+
+  defp sqlite_call(name, _args, _raw), do: {:error, {:unsupported, name}}
+
+  # A JSON function's value: JSON when SQLite would pass it on as JSON (the
+  # result of another JSON function, or json_extract's), else the SQL value.
+  defp json_argument(value, raw) do
+    cond do
+      Regex.match?(~r/\A(#{Enum.join(@json_results, "|")})\s*\(/i, raw) ->
+        value
+
+      opening = Regex.run(~r/\Ajson_extract\s*\(/i, raw) ->
+        case call_args(raw, byte_size(hd(opening))) do
+          {:ok, [doc, path], close} when close == byte_size(raw) - 1 ->
+            "sqlite_json_extract_json(#{as_text(doc)}, #{as_text(path)})"
+
+          _ ->
+            "sqlite_json_value(#{value})"
+        end
+
+      String.upcase(raw) == "NULL" ->
+        "'null'"
+
+      Regex.match?(~r/\A(\?\d*|#{@sentinel})\z/, raw) ->
+        "sqlite_json_value(#{as_text(value)})"
+
+      true ->
+        "sqlite_json_value(#{value})"
+    end
+  end
+
+  # `x GLOB p` with a column or a placeholder on the left and a literal or a
+  # placeholder on the right is SQLite's case-sensitive wildcard match as a
+  # regular expression: * is any text, ? one character, [...] a class, and
+  # [^...] its complement.
+  @glob_operand "(?:#{@sentinel}|\\?\\d*|#{@identifier})"
+  defp rewrite_glob(masked) do
+    Regex.replace(
+      ~r/(?<![\w."])(#{@glob_operand})\s+(NOT\s+)?GLOB\s+(#{@glob_operand})(?![\w(.])/i,
+      masked,
+      fn _whole, value, negated, pattern ->
+        match = "(CAST((#{value}) AS text) ~ sqlite_glob_regex(CAST((#{pattern}) AS text)))"
+        if negated == "", do: match, else: "NOT #{match}"
+      end
+    )
+  end
+
   # IFNULL is COALESCE with two arguments, json_valid of a column is
   # PostgreSQL's IS JSON predicate (PostgreSQL 16), and SQLite's INTEGER and
   # REAL are eight bytes, PostgreSQL's BIGINT and DOUBLE PRECISION. SQLite's
@@ -406,7 +640,6 @@ defmodule OptimalEngine.Store.Dialect do
     masked
     |> then(&Regex.replace(~r/\s+(?:INDEXED\s+BY\s+#{@identifier}|NOT\s+INDEXED)\b/i, &1, ""))
     |> then(&Regex.replace(~r/\bIFNULL\s*\(/i, &1, "COALESCE("))
-    |> then(&Regex.replace(~r/\bjson_valid\s*\(\s*(#{@identifier})\s*\)/i, &1, "(\\1 IS JSON)"))
     |> then(&Regex.replace(~r/\bAS\s+INTEGER\s*\)/i, &1, "AS BIGINT)"))
     |> then(&Regex.replace(~r/\bAS\s+REAL\s*\)/i, &1, "AS DOUBLE PRECISION)"))
   end
@@ -476,6 +709,18 @@ defmodule OptimalEngine.Store.Dialect do
   # The pattern decides the collation, so ILIKE folds only ASCII letters, as
   # SQLite's LIKE does, whatever the collation of the value it matches.
   defp pattern(operand), do: ~s| (#{String.trim(operand)}) COLLATE "C"|
+
+  # ---------------------------------------------------------------------------
+  # A placeholder tested for NULL
+  # ---------------------------------------------------------------------------
+
+  # `?5 IS NULL OR col = ?5`: PostgreSQL types a parameter where it is first
+  # compared, and a NULL test is not a comparison, so the test's parameter has
+  # no type and the statement is rejected. The engine tests text parameters
+  # this way (an optional filter), so the test reads the parameter as text.
+  defp rewrite_null_test(masked) do
+    Regex.replace(~r/(?<![\w.])(\?\d*)(\s+IS\s+(?:NOT\s+)?NULL\b)/i, masked, "CAST(\\1 AS text)\\2")
+  end
 
   # ---------------------------------------------------------------------------
   # IS with a placeholder
