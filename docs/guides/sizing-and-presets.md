@@ -85,7 +85,7 @@ At 70 percent of any limit the recommendation is `resize` to the next profile, w
 | --- | --- | --- |
 | `vectors` | `qdrant` | Reached and proved; the Engine's vector search still reads the embedded vectors. |
 | `disk_bytes` | `s3` | Wired. Moves assets and backups off the disk. |
-| `writes_per_minute` | `postgres`, `nats_jetstream` | `postgres` is wired but partial; `nats_jetstream` is reached and proved, but no Engine writes flow through it yet. |
+| `writes_per_minute` | `postgres`, `nats_jetstream` | `postgres` is wired but partial; `nats_jetstream` publishes the change ledger to subscribers (`OPTIMAL_NATS_FLOWS=ledger`), but Engine writes still land in SQLite first, so it adds no write capacity. |
 | any other gauge | `postgres` | Wired but partial. |
 
 The recommendation names a provider whether or not the Engine can use it, so check `GET /api/storage/providers` (`adapter_implemented`) before acting on it.

@@ -12,7 +12,7 @@ defmodule OptimalEngine.Storage.NATS.Adapter do
   @behaviour OptimalEngine.Storage.Provider
 
   alias OptimalEngine.Storage.NATS
-  alias OptimalEngine.Storage.NATS.Connection
+  alias OptimalEngine.Storage.NATS.{Connection, LedgerPublisher}
 
   @capabilities ~w(event_stream jobs replication coordination)a
 
@@ -63,11 +63,30 @@ defmodule OptimalEngine.Storage.NATS.Adapter do
   @doc """
   The Engine's own long-lived client as it is now
   (`OptimalEngine.Storage.NATS.Connection.status/1`): its state, how often the
-  connection was lost, the last error and the server's version. Never the URL
-  or its credential.
+  connection was lost, the last error and the server's version; and each flow
+  that runs on it (`flows.ledger`: `off`, `buffering` with each workspace's
+  backlog, `publishing`, `caught_up`). Never the URL or its credential.
   """
   @spec runtime() :: map()
-  def runtime, do: %{client: Connection.status()}
+  def runtime do
+    %{
+      client: Connection.status(),
+      flows: %{ledger: LedgerPublisher.status()}
+    }
+  end
+
+  @doc """
+  What the Engine routes through NATS when it is configured: the flows named
+  in `OPTIMAL_NATS_FLOWS`. None by default, and the adapter then only checks
+  and proves the server.
+  """
+  @spec serves() :: [String.t()]
+  def serves do
+    Enum.flat_map(NATS.flows(), fn
+      "ledger" -> ["change_ledger_stream"]
+      _other -> []
+    end)
+  end
 
   @doc "Provider health from a PING and a JetStream account answer. Never raises."
   @spec health(keyword()) :: OptimalEngine.Storage.Provider.health()

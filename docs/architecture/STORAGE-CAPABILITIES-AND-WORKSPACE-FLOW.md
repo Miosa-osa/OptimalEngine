@@ -93,7 +93,7 @@ Canonical cutover requires an explicit migration, validation, and rollback plan.
 ### Tier 2: Cloud Scale
 
 Managed S3-compatible object storage (AWS S3, R2) and managed PostgreSQL (with the limits above) can replace self-hosted equivalents today.
-Valkey, NATS JetStream, Qdrant and DuckDB with Parquet all have adapters; no Engine projection is written to them yet.
+Valkey, NATS JetStream, Qdrant and DuckDB with Parquet all have adapters; no Engine projection is written to them yet. NATS carries the flows named in `OPTIMAL_NATS_FLOWS`, copies of what the Engine already stored.
 
 Qdrant is an optional high-scale semantic projection and never becomes accepted truth.
 
@@ -147,7 +147,7 @@ A provider has one of six lifecycle states.
 It outranks configuration and probes: a reachable endpoint the engine cannot talk to is not available storage.
 Every provider reports `adapter_implemented`.
 The embedded local providers, `s3`, and `postgres` have adapters (`postgres` is partial: a compile-time build that refuses full-text search, replication, and app data collections).
-`nats_jetstream`, `qdrant`, `duckdb`, and `openbao` have adapters that check and prove the service, and no Engine feature uses them yet; `valkey` carries the shared rate limits and caches when it is configured; `fractal` has none.
+`qdrant`, `duckdb`, and `openbao` have adapters that check and prove the service, and no Engine feature uses them yet; `nats_jetstream` has one too and carries the flows named in `OPTIMAL_NATS_FLOWS`; `valkey` carries the shared rate limits and caches when it is configured; `fractal` has none.
 
 `active` means a default local provider is currently part of the running engine.
 RocksDB is `active` only when the knowledge store runs on it (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`); on an ETS knowledge store it reports `available`.
@@ -179,7 +179,7 @@ Replica cursors can only move forward.
 
 The ledger provides the durable contract needed for multi-device synchronization.
 Today peers carry it over HTTP, or through the MIOSA relay for an Engine that cannot be dialed (see [Replication](../guides/replication.md)).
-NATS JetStream is a planned transport for the same mutations: its adapter reaches and proves a JetStream server, and replication does not send changes over it yet.
+The same mutations can be published to NATS JetStream for subscribers (`OPTIMAL_NATS_FLOWS=ledger`, stream `<NAMESPACE>_LEDGER`); replication between Engines does not send changes over it.
 
 Transport delivery does not replace the ledger.
 

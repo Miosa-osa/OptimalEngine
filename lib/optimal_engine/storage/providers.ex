@@ -166,7 +166,7 @@ defmodule OptimalEngine.Storage.Providers do
       probe: :nats,
       serves: [],
       required_env: ["OPTIMAL_NATS_URL"],
-      optional_env: []
+      optional_env: ~w(OPTIMAL_NATS_FLOWS OPTIMAL_NATS_NAMESPACE OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS)
     },
     %{
       id: "valkey",
