@@ -33,9 +33,9 @@ defmodule OptimalEngine.Store.Postgres do
 
   ## Features not on PostgreSQL
 
-  Replication, app data collections, full-text search and the statements that
-  use SQLite's JSON functions, date arithmetic, catalog, `rowid` and other
-  SQLite-only functions are not on PostgreSQL yet
+  Replication, app data collections and the statements that use SQLite's JSON
+  functions, date arithmetic, catalog, `rowid` and other SQLite-only functions
+  are not on PostgreSQL yet
   (`OptimalEngine.Storage.Postgres.unavailable/0`). Each is refused by name
   when used. A database that holds replication or app data collection data
   stops the store from starting, rather than letting it run without them.
@@ -45,9 +45,11 @@ defmodule OptimalEngine.Store.Postgres do
   - There is no hot cache: a per-process cache cannot see another engine's
     writes, so every read goes to the database and `evict_cached/1` has
     nothing to drop.
-  - Full-text search is unavailable on PostgreSQL until a slice ports it to
-    `tsvector`: the FTS5 tables are not derived, and a statement that uses
-    `MATCH` is refused by the dialect with `{:error, {:unsupported, "FTS5 MATCH"}}`.
+  - Full-text indexes are posting lists ranked with FTS5's BM25
+    (`OptimalEngine.Store.Postgres.FullText`), brought up to date before a
+    statement reads them and by a timer; a statement that uses `MATCH` is
+    refused by the dialect with `{:error, {:unsupported, "FTS5 MATCH"}}`, and
+    a search calls `optimal_fts_match` instead.
   - A failed statement inside a transaction ends it, unless the statement
     passes `recoverable: true` (`OptimalEngine.Store.Adapter`). No call site
     goes on after a failed statement today except through a savepoint of its
@@ -60,7 +62,7 @@ defmodule OptimalEngine.Store.Postgres do
 
   alias OptimalEngine.{Context, Graph, Signal, Store}
   alias OptimalEngine.Store.ContextTenant
-  alias OptimalEngine.Store.Postgres.{Connection, Schema}
+  alias OptimalEngine.Store.Postgres.{Connection, FullText, Schema}
   alias OptimalEngine.Store.SQLite
 
   @pool __MODULE__.Pool
@@ -148,7 +150,8 @@ defmodule OptimalEngine.Store.Postgres do
          {:ok, pool} <- Connection.start_link(Keyword.put(opts, :name, @pool)) do
       case ready(schema) do
         {:ok, report} ->
-          {:ok, %{pool: pool, schema: schema, report: report}}
+          schedule_full_text(opts)
+          {:ok, %{pool: pool, schema: schema, report: report, opts: opts}}
 
         {:error, reason} ->
           stop_pool(pool)
@@ -161,6 +164,7 @@ defmodule OptimalEngine.Store.Postgres do
 
   defp ready(schema) do
     with {:ok, report} <- Schema.sync(@pool, schema: schema),
+         :ok <- FullText.ensure(@pool),
          :ok <- nothing_unsupported_in_use(),
          do: {:ok, report}
   end
@@ -194,12 +198,28 @@ defmodule OptimalEngine.Store.Postgres do
   def handle_call(:schema_report, _from, state), do: {:reply, state.report, state}
 
   @impl GenServer
+  def handle_info(:full_text, state) do
+    # Background indexing only shortens the refresh a search makes itself;
+    # a failure here is retried on the next tick.
+    _ = FullText.refresh(@pool, Map.keys(OptimalEngine.Store.FullText.indexes()))
+    schedule_full_text(state.opts)
+    {:noreply, state}
+  end
+
   def handle_info({:EXIT, pool, reason}, %{pool: pool} = state), do: {:stop, reason, state}
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl GenServer
   def terminate(_reason, %{pool: pool}), do: stop_pool(pool)
   def terminate(_reason, _state), do: :ok
+
+  # `full_text_interval_ms` (default 2,000; 0 turns the timer off).
+  defp schedule_full_text(opts) do
+    case Keyword.get(opts, :full_text_interval_ms, 2_000) do
+      0 -> :ok
+      interval -> Process.send_after(self(), :full_text, interval)
+    end
+  end
 
   defp stop_pool(pool) do
     GenServer.stop(pool, :normal, 5_000)
@@ -408,11 +428,16 @@ defmodule OptimalEngine.Store.Postgres do
   # Statements and transactions
   # ---------------------------------------------------------------------------
 
-  @doc "Runs one statement written for SQLite and returns its rows."
+  @doc """
+  Runs one statement written for SQLite and returns its rows. A statement that
+  reads a full-text index (`contexts_fts`, `memories_fts`, `optimal_fts_match`)
+  first brings that index up to date (`refresh_full_text/1`).
+  """
   @spec raw_query(String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
   def raw_query(sql, params \\ []) do
-    with {:ok, %{rows: rows}} <-
+    with :ok <- refresh_read_indexes(sql),
+         {:ok, %{rows: rows}} <-
            Connection.query(@pool, sql, params, timeout: Store.call_timeout()) do
       {:ok, rows}
     end
@@ -467,6 +492,42 @@ defmodule OptimalEngine.Store.Postgres do
   end
 
   defp recoverable(opts), do: Keyword.take(opts, [:recoverable])
+
+  # ---------------------------------------------------------------------------
+  # Full-text indexes
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Indexes the rows written since each named full-text index was last brought
+  up to date (`OptimalEngine.Store.Postgres.FullText`).
+  """
+  @spec refresh_full_text([String.t()]) :: :ok | {:error, term()}
+  def refresh_full_text(names) when is_list(names) do
+    with {:ok, _count} <- FullText.refresh(@pool, names, timeout: Store.call_timeout()), do: :ok
+  end
+
+  @doc "Empties a full-text index and indexes every row of its table again."
+  @spec rebuild_full_text(String.t()) :: :ok | {:error, term()}
+  def rebuild_full_text(name) do
+    with :ok <- FullText.rebuild(@pool, name), do: refresh_full_text([name])
+  end
+
+  @index_names Map.keys(OptimalEngine.Store.FullText.indexes())
+  @index_reference Regex.compile!("\\b(" <> Enum.join(@index_names, "|") <> ")\\b")
+
+  defp refresh_read_indexes(sql) do
+    case Regex.scan(@index_reference, sql, capture: :all_but_first) do
+      [] ->
+        if String.contains?(sql, "optimal_fts_match(") do
+          refresh_full_text(@index_names)
+        else
+          :ok
+        end
+
+      found ->
+        found |> List.flatten() |> Enum.uniq() |> refresh_full_text()
+    end
+  end
 
   # ---------------------------------------------------------------------------
   # Pipeline rows

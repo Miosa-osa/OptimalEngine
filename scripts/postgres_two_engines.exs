@@ -25,8 +25,6 @@ defmodule ProofTwoEngines do
 
   # What the PostgreSQL store does not have yet is refused by name.
   @refusals %{
-    search: {:error, {:unsupported, "full-text search is not available on the PostgreSQL store"}},
-    ask: {:error, {:unsupported, "full-text search is not available on the PostgreSQL store"}},
     replication: {:error, {:unsupported, "replication is not available on the PostgreSQL store"}}
   }
 
@@ -69,7 +67,8 @@ defmodule ProofTwoEngines do
     report =
       Map.merge(report, %{
         publish_errors: for({:error, reason} <- Task.await(publishing, 120_000), do: reason),
-        refused: refused(writer)
+        refused: refused(writer),
+        found: found(writer)
       })
 
     File.write!(path("report-#{writer}.etf"), :erlang.term_to_binary(report))
@@ -101,6 +100,9 @@ defmodule ProofTwoEngines do
 
       if report.refused != @refusals,
         do: IO.inspect(report.refused, label: "engine #{writer} refusals")
+
+      if report.found != {:ok, true},
+        do: IO.inspect(report.found, label: "engine #{writer} search")
     end
 
     claimed = Enum.flat_map(reports, & &1.claimed)
@@ -118,8 +120,9 @@ defmodule ProofTwoEngines do
       {"the engines really conflicted", Enum.sum(Enum.map(reports, & &1.retried_transactions)) > 0},
       {"#{2 * @packs} policy packs published at once took #{2 * @packs} versions, one active",
        Enum.all?(reports, &(&1.publish_errors == [])) and packs_versioned?(pg, workspace)},
-      {"search, asking and replication are refused by name",
-       Enum.all?(reports, &(&1.refused == @refusals))}
+      {"each engine's full-text search finds its own contexts",
+       Enum.all?(reports, &(&1.found == {:ok, true}))},
+      {"replication is refused by name", Enum.all?(reports, &(&1.refused == @refusals))}
     ]
 
     :ok = PostgresWriter.replay(OptimalEngine.Store.SQLite, pg, workspace, @rounds)
@@ -150,10 +153,24 @@ defmodule ProofTwoEngines do
     end
   end
 
+  # Every context a writer wrote says "Written by writer <n>"; the search runs
+  # through the PostgreSQL full-text index (OptimalEngine.Store.FullText).
+  defp found(writer) do
+    case OptimalEngine.Retrieval.Search.search("writer #{writer}",
+           workspace_id: workspace(),
+           mode: :lexical,
+           limit: 5
+         ) do
+      {:ok, [_ | _] = results} ->
+        {:ok, Enum.all?(results, &String.contains?(&1.content, "writer"))}
+
+      other ->
+        other
+    end
+  end
+
   defp refused(writer) do
     %{
-      search: OptimalEngine.Retrieval.Search.search("proof"),
-      ask: OptimalEngine.Retrieval.RAG.ask("proof"),
       replication: OptimalEngine.Sync.enable("default", workspace(), "engine-#{writer}")
     }
   end

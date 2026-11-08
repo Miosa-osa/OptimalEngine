@@ -123,7 +123,7 @@ defmodule OptimalEngine.Store.Dialect do
                  {"SQLite catalog function", ~r/\bpragma_\w+\s*\(/i,
                   "the SQLite catalog; PostgreSQL has information_schema"},
                  {"FTS5 MATCH", ~r/\bMATCH\b/i,
-                  "full-text search is not available on the PostgreSQL store"},
+                  "an FTS5 statement; the PostgreSQL store searches through optimal_fts_match (OptimalEngine.Store.FullText)"},
                  {"GLOB", ~r/\bGLOB\b/i, "case-sensitive wildcard matching; port the call site"},
                  {"SQLite collation", ~r/\bCOLLATE\s+"?(NOCASE|RTRIM|BINARY)\b/i,
                   "a SQLite collation; the store's text compares in the C collation"},

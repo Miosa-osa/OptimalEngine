@@ -144,14 +144,10 @@ defmodule OptimalEngine.Retrieval.RAG do
   end
 
   defp do_ask(query, opts) do
-    if Search.available?() do
-      with {:ok, opts} <- AsOf.put_if_given(opts) do
-        if Keyword.get(opts, :context_package, false),
-          do: ask_context_package(query, opts),
-          else: ask_legacy(query, opts)
-      end
-    else
-      Search.unavailable()
+    with {:ok, opts} <- AsOf.put_if_given(opts) do
+      if Keyword.get(opts, :context_package, false),
+        do: ask_context_package(query, opts),
+        else: ask_legacy(query, opts)
     end
   end
 

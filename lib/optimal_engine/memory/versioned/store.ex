@@ -11,6 +11,7 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   """
 
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.FullText
 
   @select_cols """
   id, tenant_id, workspace_id, content, is_static, is_forgotten,
@@ -192,16 +193,28 @@ defmodule OptimalEngine.Memory.Versioned.Store do
     # ?1 = fts_query; build the rest of the conditions starting at ?2.
     {conditions, base_params} = build_filter_conditions(filters, "m", 2)
 
-    params = [fts_query | base_params]
-    param_idx = length(params) + 1
+    param_idx = length(base_params) + 2
     where = Enum.join(conditions, " AND ")
 
+    # On PostgreSQL the index is read through optimal_fts_match, whose score is
+    # -bm25() (OptimalEngine.Store.FullText): best first either way.
+    {source, rank, fts_param} =
+      if FullText.postgres?() do
+        {:ok, param} = FullText.query_param("memories_fts", fts_query)
+
+        {"optimal_fts_match('memories_fts', ?1) memories_fts JOIN memories m ON m.id = memories_fts.doc_key WHERE TRUE",
+         "memories_fts.score DESC", param}
+      else
+        {"memories_fts JOIN memories m ON m.rowid = memories_fts.rowid WHERE memories_fts MATCH ?1",
+         "bm25(memories_fts) ASC", fts_query}
+      end
+
+    params = [fts_param | base_params]
+
     sql = """
-    SELECT #{prefixed_select_cols("m")} FROM memories_fts
-    JOIN memories m ON m.rowid = memories_fts.rowid
-    WHERE memories_fts MATCH ?1
+    SELECT #{prefixed_select_cols("m")} FROM #{source}
       AND #{where}
-    ORDER BY bm25(memories_fts) ASC, m.id
+    ORDER BY #{rank}, m.id
     LIMIT ?#{param_idx} OFFSET ?#{param_idx + 1}
     """
 

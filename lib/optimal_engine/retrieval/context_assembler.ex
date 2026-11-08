@@ -76,10 +76,6 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   """
   @spec assemble(String.t(), keyword()) :: {:ok, assembled()} | {:error, term()}
   def assemble(query, opts \\ []) do
-    if SearchEngine.available?(), do: do_assemble(query, opts), else: SearchEngine.unavailable()
-  end
-
-  defp do_assemble(query, opts) do
     with {:ok, opts} <- AsOf.put_resolved(opts),
          budgets = Keyword.get(opts, :tier_budgets, @default_budgets),
          # L1 — per-file summaries for matching files (query-driven)
@@ -115,14 +111,10 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   @doc "Returns L1 — per-file summaries for a query."
   @spec l1(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def l1(query, opts \\ []) do
-    if SearchEngine.available?() do
-      with {:ok, opts} <- AsOf.put_resolved(opts),
-           budget = Keyword.get(opts, :budget, @default_budgets.l1),
-           {:ok, {content, _scores}} <- build_l1(query, budget, opts) do
-        {:ok, content}
-      end
-    else
-      SearchEngine.unavailable()
+    with {:ok, opts} <- AsOf.put_resolved(opts),
+         budget = Keyword.get(opts, :budget, @default_budgets.l1),
+         {:ok, {content, _scores}} <- build_l1(query, budget, opts) do
+      {:ok, content}
     end
   end
 
@@ -147,10 +139,6 @@ defmodule OptimalEngine.Retrieval.ContextAssembler do
   """
   @spec fused_search(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def fused_search(query, opts \\ []) do
-    if SearchEngine.available?(), do: do_fused_search(query, opts), else: SearchEngine.unavailable()
-  end
-
-  defp do_fused_search(query, opts) do
     # Both searches below measure age against one instant, so the lists agree on
     # how old everything is and a request is repeatable with `:as_of`. An
     # explicit nil or blank `:as_of` counts as absent.

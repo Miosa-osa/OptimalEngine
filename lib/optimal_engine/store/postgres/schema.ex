@@ -35,9 +35,10 @@ defmodule OptimalEngine.Store.Postgres.Schema do
   silently keeps the old definition.
 
   Not derived: FTS5 virtual tables, their shadow tables, and the triggers that
-  maintain them. Each one is listed in the plan's `skipped` entries; full-text
-  search is not available on the PostgreSQL store. A trigger that writes any
-  other table is not skipped: the derivation fails.
+  maintain them. Each one is listed in the plan's `skipped` entries; the
+  PostgreSQL store keeps its own full-text indexes in their place
+  (`OptimalEngine.Store.Postgres.FullText`). A trigger that writes any other
+  table is not skipped: the derivation fails.
 
   ## Failing loudly
 

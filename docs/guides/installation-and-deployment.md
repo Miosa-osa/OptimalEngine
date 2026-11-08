@@ -28,7 +28,7 @@ Providers are things a deployment grows onto, not the default shape:
 | Provider | Status | Use |
 | --- | --- | --- |
 | S3-compatible storage (Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Assets and offsite backups |
-| PostgreSQL | Wired but partial: a compile-time `OPTIMAL_STORE=postgres` build that refuses full-text search, replication, and app data collections | The canonical relational store for engines that share one database |
+| PostgreSQL | Wired but partial: a compile-time `OPTIMAL_STORE=postgres` build that refuses replication and app data collections | The canonical relational store for engines that share one database |
 | NATS JetStream | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS`, each sent after the Engine stored it in SQLite; nothing without them |
 | Valkey | Adapter, health-checked and proved, in the data path | Shared rate limits, the verified API key cache and the sync gate cache, with ETS as the fallback ([Valkey](storage-providers.md#valkey)) |
 | Qdrant, DuckDB and Parquet, OpenBao | Adapter, health-checked and proved | Nothing yet: no Engine feature reads or writes them |
@@ -323,7 +323,7 @@ Give each Engine its own prefix or bucket and write nothing else under it, becau
 Use the Postgres build from mode 2 with the managed database's connection string and `sslmode=require` or stricter.
 Give each Engine its own schema.
 Back the database up with the provider's backups; the Engine's backup routes do not cover it.
-Managed Postgres does not remove any limit above: full-text search, replication, and app data collections stay refused.
+Managed Postgres does not remove any limit above: replication and app data collections stay refused.
 
 ### Backup, upgrade, verify
 

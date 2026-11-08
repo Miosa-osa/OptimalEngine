@@ -85,6 +85,7 @@ defmodule OptimalEngine.Retrieval.Search do
   alias OptimalEngine.Retrieval.IntentAnalyzer, as: IntentAnalyzer
   alias OptimalEngine.Embed.Text, as: TextEmbedder
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.FullText
   alias OptimalEngine.Routing
   alias OptimalEngine.Store.Vectors, as: VectorStore
   alias OptimalEngine.Bridge.Knowledge, as: BridgeKnowledge
@@ -156,20 +157,6 @@ defmodule OptimalEngine.Retrieval.Search do
     search(query, Keyword.put(opts, :node, node))
   end
 
-  @doc """
-  True when this build's store has full-text search. The PostgreSQL store does
-  not until a tsvector slice (`OptimalEngine.Storage.Postgres.unavailable/0`);
-  search, context assembly and asking refuse with `unavailable/0` there rather
-  than answer as if nothing matched.
-  """
-  @spec available?() :: boolean()
-  def available?, do: Store.selected?(OptimalEngine.Store.SQLite)
-
-  @doc "The refusal a search returns where full-text search is not available."
-  @spec unavailable() :: {:error, {:unsupported, String.t()}}
-  def unavailable,
-    do: {:error, {:unsupported, "full-text search is not available on the PostgreSQL store"}}
-
   # ---------------------------------------------------------------------------
   # GenServer Callbacks
   # ---------------------------------------------------------------------------
@@ -238,9 +225,6 @@ defmodule OptimalEngine.Retrieval.Search do
 
     raw_result =
       cond do
-        not available?() ->
-          unavailable()
-
         memory_only ->
           {:ok, []}
 
@@ -366,10 +350,8 @@ defmodule OptimalEngine.Retrieval.Search do
 
     sql = """
     SELECT m.id, m.content, m.metadata, m.created_at, m.updated_at,
-           -bm25(memories_fts) AS lexical_score
-    FROM memories_fts
-    JOIN memories m ON m.rowid = memories_fts.rowid
-    WHERE memories_fts MATCH ?1
+           #{fts_score("memories_fts")} AS lexical_score
+    #{memory_fts_source()}
       AND m.workspace_id = ?2
       AND m.tenant_id = ?3
       AND m.is_latest = 1
@@ -381,7 +363,12 @@ defmodule OptimalEngine.Retrieval.Search do
     tenant_id = Keyword.get(opts, :tenant_id, "default")
 
     lexical_hits =
-      case Store.raw_query(sql, [fts_query, workspace_id, tenant_id, limit]) do
+      case Store.raw_query(sql, [
+             fts_param("memories_fts", fts_query),
+             workspace_id,
+             tenant_id,
+             limit
+           ]) do
         {:ok, rows} -> Enum.map(rows, &memory_context(&1, workspace_id, query))
         _ -> []
       end
@@ -1005,10 +992,8 @@ defmodule OptimalEngine.Retrieval.Search do
       c.node, c.sn_ratio, c.entities,
       c.created_at, c.modified_at, c.valid_from, c.valid_until, c.supersedes,
       c.routed_to, c.metadata, c.workspace_id,
-      -bm25(contexts_fts) as bm25_rank
-    FROM contexts_fts
-    CROSS JOIN contexts c ON c.id = contexts_fts.id
-    WHERE contexts_fts MATCH ?1
+      #{fts_score("contexts_fts")} as bm25_rank
+    #{contexts_fts_source()}
       AND c.archived_at IS NULL
     """
 
@@ -1042,8 +1027,55 @@ defmodule OptimalEngine.Retrieval.Search do
         conditions_sql <>
         " ORDER BY bm25_rank DESC, c.uri, c.id LIMIT ?#{limit_n} OFFSET ?#{offset_n}"
 
-    params = [fts_query] ++ extra_values ++ [limit, offset]
+    params = [fts_param("contexts_fts", fts_query)] ++ extra_values ++ [limit, offset]
     {final_sql, params}
+  end
+
+  # On PostgreSQL the FTS5 tables are posting lists read through
+  # optimal_fts_match, which ranks with FTS5's bm25() and returns the score
+  # -bm25() gives here (OptimalEngine.Store.FullText).
+  defp contexts_fts_source do
+    if FullText.postgres?() do
+      """
+      FROM optimal_fts_match('contexts_fts', ?1) contexts_fts
+      JOIN contexts c ON c.id = contexts_fts.doc_key
+      WHERE TRUE
+      """
+    else
+      """
+      FROM contexts_fts
+      CROSS JOIN contexts c ON c.id = contexts_fts.id
+      WHERE contexts_fts MATCH ?1
+      """
+    end
+  end
+
+  defp memory_fts_source do
+    if FullText.postgres?() do
+      """
+      FROM optimal_fts_match('memories_fts', ?1) memories_fts
+      JOIN memories m ON m.id = memories_fts.doc_key
+      WHERE TRUE
+      """
+    else
+      """
+      FROM memories_fts
+      JOIN memories m ON m.rowid = memories_fts.rowid
+      WHERE memories_fts MATCH ?1
+      """
+    end
+  end
+
+  defp fts_score(index),
+    do: if(FullText.postgres?(), do: "#{index}.score", else: "-bm25(#{index})")
+
+  defp fts_param(index, fts_query) do
+    if FullText.postgres?() do
+      {:ok, param} = FullText.query_param(index, fts_query)
+      param
+    else
+      fts_query
+    end
   end
 
   defp build_result(row, now, topology) do

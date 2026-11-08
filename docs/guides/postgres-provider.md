@@ -158,7 +158,6 @@ These features are not on the PostgreSQL store yet.
 | --- | --- |
 | Replication | Capture is SQLite triggers and applying reads SQLite's catalog. Enabling sync and adding a peer return `{:error, {:unsupported, "replication is not available on the PostgreSQL store"}}`, and the API answers 501. |
 | App data collections | A collection creates a table, a full-text index and triggers at runtime. Creating one is refused, and so is any schema change outside the migrations. |
-| Full-text search | The FTS5 tables are not created. Search, context assembly and asking return `{:error, {:unsupported, "full-text search is not available on the PostgreSQL store"}}`, and a `MATCH` statement is refused, until a slice ports search to `tsvector`. |
 | SQLite JSON functions | `json_set`, `json_each`, `json()`, `json_array_length` and the rest, and the `json_extract` forms PostgreSQL cannot compare as SQLite does (an ordered comparison, `ORDER BY` on it, a comparison to an expression or a non-text value), are refused at their call sites (routing placement, memory partition and security label filters, reconstruction learning, and the facts that accepted a deleted claim in an erasure or a retention delete, so those two are refused by name on a PostgreSQL store until that step is ported). |
 | Date arithmetic | A `datetime` or `strftime` with a computed modifier or another format, `julianday`, `unixepoch`, `date()` and `time()` are refused (viability metrics, retention windows). |
 | The SQLite catalog | `PRAGMA`, `sqlite_master` and the `pragma_*` functions are refused (workspace bundles, the data steward's table list, a workspace slug change, replication). |
@@ -167,7 +166,19 @@ These features are not on the PostgreSQL store yet.
 | Replace writes | `INSERT OR REPLACE`, `REPLACE INTO`, an `UPDATE` with a conflict clause (`UPDATE OR REPLACE` and the like) and an `INSERT OR IGNORE` with its own `ON CONFLICT` are refused at their call sites; the store's context and chunk writes replace rows as SQLite does. |
 | Schema and transaction statements | The schema comes from the migrations, so a schema change and SQLite-only table options (`AUTOINCREMENT`, `WITHOUT ROWID`) are refused. A transaction statement sent as a statement raises `ArgumentError` on both stores. |
 
-`OptimalEngine.Store.Dialect.refusals/0` lists every refused construct with its reason, and `test/store/postgres/unavailable_test.exs` checks both ways: every refusal of the dialect is under a feature here, and every name a feature lists is one the dialect or the store refuses with.
+`OptimalEngine.Store.Dialect.refusals/0` lists every refused construct with its reason, and `test/store/postgres/unavailable_test.exs` checks both ways: every refusal of the dialect is under a feature here or under a ported feature (`OptimalEngine.Storage.Postgres.ported/0`, a feature that works on PostgreSQL through statements of its own while the SQLite statements behind it stay refused), and every name a feature lists is one the dialect or the store refuses with.
+
+### Full-Text Search
+
+Search, context assembly and asking work on a PostgreSQL store, with the tokens and the ranking of SQLite's FTS5 (`OptimalEngine.Store.FullText`, `OptimalEngine.Store.Postgres.FullText`).
+
+- `contexts_fts` and `memories_fts` are posting lists: one row per indexed row with its token count (`optimal_fts_docs`), one row per term of a row with its positions (`optimal_fts_postings`), and the row and token totals of each index (`optimal_fts_totals`).
+- A row is tokenized by SQLite itself: an in-memory FTS5 table with the index's own `tokenize` option, read back through `fts5vocab`. The case folding, the diacritics and the Porter stemming of `memories_fts` are FTS5's, with no second tokenizer to keep in step. A query's phrases are tokenized the same way.
+- `optimal_fts_match(index, query)` returns the rows a query matches with FTS5's `bm25()` score (k1 = 1.2, b = 0.75, every column weighted 1, IDF floored at 1e-6, over the whole index as FTS5 computes it), negated as `-bm25()` is. The phrases are summed in query order in double precision, so a score matches SQLite's to the last few bits; `test/store/postgres/full_text_test.exs` compares every query of a corpus with an FTS5 table to 1e-12.
+- A row trigger on `contexts` and `memories` appends the key of every inserted, deleted or updated row (an update of its key or an indexed column) to `optimal_fts_queue` in the writer's transaction, so every write path, cascade and engine is covered. Before a statement reads an index, the store indexes the queued rows as they are then and deletes exactly the entries it read; a key a writer queues meanwhile waits for the next refresh. A timer in the store does the same every 2 seconds (`full_text_interval_ms`, 0 turns it off), so a search rarely has to.
+- The views `contexts_fts` and `memories_fts` give the indexed keys as `id`, so the storage audit's and the health checks' counts run unchanged.
+- The index is a projection: `OptimalEngine.Store.Postgres.rebuild_full_text/1` empties it and indexes every row again.
+- The engine builds every `MATCH` string from quoted phrases joined by ` OR ` or by spaces, the last optionally a prefix; any other syntax is refused by name (`FTS5 query syntax`), and a `MATCH` statement sent to the PostgreSQL store is still refused (`FTS5 MATCH`).
 
 A store that finds replication or app data collection data in its database does not start: `{:postgres_store_failed, {:unsupported_in_use, features}}`.
 An engine moved there from SQLite would otherwise run on and silently stop replicating, or stop serving its collections.
@@ -221,14 +232,14 @@ OPTIMAL_POSTGRES_URL=postgres://user:secret@host:5432/database scripts/proof-pos
 
 It builds the engine with `OPTIMAL_STORE=postgres`, boots two engine processes with their full supervision tree against one fresh PostgreSQL schema, has each write the workspace through `OptimalEngine.Store`, and then runs the same checks and the same 20 queries against an embedded SQLite copy in a third process.
 While they write, both engines publish ten policy packs each for one scope; the 20 packs must take versions 1 to 20 with exactly one active, because each publish reads the active pack and the next version inside its own transaction.
-Each engine also checks that search, asking and enabling replication are refused by name.
+Each engine also searches the workspace through the full-text index and must find the contexts it wrote, and checks that enabling replication is refused by name.
 The schema is dropped at the end.
 
 ### What Is On PostgreSQL
 
 | On PostgreSQL | Not on PostgreSQL |
 | --- | --- |
-| Every table, key, unique index, foreign key, check, index, and view the SQLite migrations create, with their seeded rows. | The FTS5 tables (`contexts_fts`, `memories_fts`) and the triggers that maintain them: full-text search is unavailable, and search is refused by name. |
+| Every table, key, unique index, foreign key, check, index, and view the SQLite migrations create, with their seeded rows. | The FTS5 virtual tables and their triggers: their PostgreSQL counterparts are the full-text posting lists above. |
 | The whole store contract: contexts and signals, entities and edges written with them, node listings, stats, raw statements, transactions, chunks, classifications, intents, chunk embeddings, clusters. | The ETS hot cache, by decision. |
 | Vector and embedding rows, stored as `BYTEA` with the same float32 bytes. | Vector search on the database: the engine keeps ranking vectors itself until pgvector is available. |
 | Any engine statement the dialect translates and PostgreSQL accepts. | Statements written with SQLite-only constructs, listed below. |

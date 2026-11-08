@@ -54,12 +54,20 @@ defmodule OptimalEngine.ContextHealth do
 
     {:ok, [[searchable]]} =
       Store.raw_query(
-        "SELECT COUNT(*) FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid WHERE m.workspace_id = ?1 AND m.is_latest = 1 AND m.is_forgotten = 0",
+        "SELECT COUNT(*) FROM memories_fts JOIN memories m ON #{memories_fts_join()} WHERE m.workspace_id = ?1 AND m.is_latest = 1 AND m.is_forgotten = 0",
         [workspace_id]
       )
 
     ok = searchable == durable
     {ok, if(ok, do: 100, else: 35), %{durable_memories: durable, searchable_memories: searchable}}
+  end
+
+  # The PostgreSQL index of memories is keyed by id, not SQLite's rowid
+  # (OptimalEngine.Store.FullText).
+  defp memories_fts_join do
+    if OptimalEngine.Store.FullText.postgres?(),
+      do: "m.id = memories_fts.id",
+      else: "m.rowid = memories_fts.rowid"
   end
 
   defp routing_concentration(tenant_id) do
