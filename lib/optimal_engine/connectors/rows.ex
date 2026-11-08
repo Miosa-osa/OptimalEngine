@@ -27,13 +27,23 @@ defmodule OptimalEngine.Connectors.Rows do
   require Logger
 
   alias OptimalEngine.Authority.Evidence
-  alias OptimalEngine.Connectors.{Cadence, CredentialSource, PullScheduler, Registry, Runner}
+
+  alias OptimalEngine.Connectors.{
+    Cadence,
+    CredentialSource,
+    CredentialVault,
+    PullScheduler,
+    Registry,
+    Runner
+  }
+
   alias OptimalEngine.{CorpusOrganizer, Scope, Store, Workspace}
   alias OptimalEngine.Tenancy.Tenant
 
   @id ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/
   @secret_key ~r/(secret|password|passwd|token|api_?key|private_?key|bearer|\Apat\z)/i
-  @sealed ~w(credentials credentials_ciphertext)
+  # Credentials sealed into the row, or the marker that they are in OpenBao.
+  @sealed ~w(credentials credentials_ciphertext credentials_store)
   @reference "broker_reference"
   @sealed_reference "broker_reference_ciphertext"
   @redacted "[redacted]"
@@ -235,6 +245,8 @@ defmodule OptimalEngine.Connectors.Rows do
              enabled: plan.enabled,
              check_review_workspace: plan.check_review_workspace
            }) do
+      release_vaulted(row, plan.config)
+
       record(tenant_id, "connector.changed", id, kind, plan.workspace_id, opts, %{
         "fields" => plan.fields,
         "config_keys" => plan.config_keys,
@@ -246,22 +258,58 @@ defmodule OptimalEngine.Connectors.Rows do
     end
   end
 
-  @doc "Deletes a connector and its run history. A running connector is not deleted."
+  @doc """
+  Deletes a connector and its run history. A running connector is not deleted.
+  Credentials kept in OpenBao are deleted with it; OpenBao refusing that
+  refuses the delete with its reason, so no secret outlives its connector
+  unseen.
+  """
   @spec delete(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def delete(tenant_id, id, opts \\ []) do
     with {:ok, row} <- fetch(tenant_id, id) do
       if Runner.running?(id) do
         {:error, :already_running}
       else
-        {:ok, _} = Store.raw_query("DELETE FROM connector_runs WHERE connector_id = ?1", [id])
+        with :ok <- delete_vaulted(row) do
+          {:ok, _} = Store.raw_query("DELETE FROM connector_runs WHERE connector_id = ?1", [id])
 
-        {:ok, _} =
-          Store.raw_query("DELETE FROM connectors WHERE id = ?1 AND tenant_id = ?2", [id, tenant_id])
+          {:ok, _} =
+            Store.raw_query("DELETE FROM connectors WHERE id = ?1 AND tenant_id = ?2", [
+              id,
+              tenant_id
+            ])
 
-        record(tenant_id, "connector.deleted", id, row.kind, row.workspace_id, opts, %{})
-        :ok
+          record(tenant_id, "connector.deleted", id, row.kind, row.workspace_id, opts, %{})
+          :ok
+        end
       end
     end
+  end
+
+  # Credentials removed by a change leave nothing behind in OpenBao. The row
+  # is already changed, so a secret that could not be deleted is logged.
+  defp release_vaulted(row, config) do
+    # New credentials in the change were written over the same secret.
+    if CredentialVault.stored?(row.config) and not CredentialVault.stored?(config) and
+         not is_map(Map.get(config, "credentials")) do
+      case CredentialVault.delete(row.tenant_id, row.id) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "Connector #{row.id}: its removed credentials are still in OpenBao: #{OptimalEngine.Secrets.describe(reason)}."
+          )
+      end
+    end
+
+    :ok
+  end
+
+  defp delete_vaulted(row) do
+    if CredentialVault.stored?(row.config),
+      do: CredentialVault.delete(row.tenant_id, row.id),
+      else: :ok
   end
 
   @doc "Records a run asked for by hand (`POST /api/connectors/:id/run`)."

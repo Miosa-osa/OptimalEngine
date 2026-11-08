@@ -31,6 +31,7 @@ defmodule OptimalEngine.Connectors.Runner do
     Cadence,
     Credential,
     CredentialSource,
+    CredentialVault,
     Registry,
     Routing,
     Rows
@@ -419,9 +420,8 @@ defmodule OptimalEngine.Connectors.Runner do
   # operator sees the broker's reason rather than a confusing "missing
   # credentials" from the adapter.
   defp init_adapter(mod, row) do
-    config = maybe_decrypt_credentials(row.config)
-
-    with {:ok, config} <- CredentialSource.hydrate(config, credential_scope(row, mod)) do
+    with {:ok, config} <- stored_credentials(row),
+         {:ok, config} <- CredentialSource.hydrate(config, credential_scope(row, mod)) do
       case mod.init(config) do
         {:ok, state} -> {:ok, state}
         {:error, _} = err -> err
@@ -599,6 +599,20 @@ defmodule OptimalEngine.Connectors.Runner do
     _ -> nil
   end
 
+  # Credentials kept in OpenBao are read from the path the row's own tenant
+  # and id name. OpenBao sealed, unreachable or refusing fails the sync with
+  # that reason instead of starting the adapter without its credentials.
+  defp stored_credentials(row) do
+    if CredentialVault.stored?(row.config) do
+      case CredentialVault.get(row.config, row.tenant_id, row.id) do
+        {:ok, config} -> {:ok, config}
+        {:error, reason} -> {:error, {:credentials_unavailable, reason}}
+      end
+    else
+      {:ok, maybe_decrypt_credentials(row.config)}
+    end
+  end
+
   defp maybe_decrypt_credentials(%{"credentials_ciphertext" => envelope} = config) do
     case Credential.decrypt(envelope) do
       {:ok, creds} -> Map.merge(config, creds)
@@ -753,6 +767,10 @@ defmodule OptimalEngine.Connectors.Runner do
   encrypted `credentials_ciphertext` envelope, and a `broker_reference` only
   as a `broker_reference_ciphertext` envelope. Without a configured
   `CONNECTOR_KEY` the write is refused with `{:error, :connector_key_missing}`.
+  With OpenBao configured the credentials are written to OpenBao instead and
+  the row keeps only a marker (`OptimalEngine.Connectors.CredentialVault`);
+  OpenBao refusing the write refuses the upsert with its reason
+  (`:openbao_sealed`, `:openbao_unreachable`, ...).
   A broker URL the Engine may not call is refused with
   `{:error, :broker_url_not_allowed}`.
   A cadence the scheduler could not honour is refused with
@@ -775,6 +793,16 @@ defmodule OptimalEngine.Connectors.Runner do
   @spec provision_row(map()) :: {:ok, :created | :exists} | {:error, term()}
   def provision_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
+    # Credentials bound for OpenBao are written before the row, so an existing
+    # row is answered first: its secret must not be replaced by a provision.
+    if vault_bound?(config) and row_exists?(id) do
+      {:ok, :exists}
+    else
+      provision_new_row(id, kind, config, attrs)
+    end
+  end
+
+  defp provision_new_row(id, kind, config, attrs) do
     with {:ok, workspace_id} <- row_workspace(id, attrs),
          {:ok, sanitized} <- validate_and_seal(id, config, attrs) do
       write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :keep)
@@ -789,7 +817,8 @@ defmodule OptimalEngine.Connectors.Runner do
              review_workspace: Map.get(attrs, :check_review_workspace, true)
            ),
          :ok <- Cadence.validate(config),
-         {:ok, config} <- encrypt_credentials(config) do
+         {:ok, config} <-
+           encrypt_credentials(config, Map.get(attrs, :tenant_id, Tenant.default_id()), id) do
       CredentialSource.seal_reference(config, %{id: id})
     end
   end
@@ -853,7 +882,7 @@ defmodule OptimalEngine.Connectors.Runner do
   # Credentials may arrive under a string or an atom key; both are lifted into
   # one envelope. Without a master key the row is refused: auth material is
   # never written to the connectors table in plaintext.
-  defp encrypt_credentials(config) do
+  defp encrypt_credentials(config, tenant_id, id) do
     # The persistable check runs before the credentials are lifted out, so a
     # broker-sourced connector that also carries auth material is refused
     # rather than quietly storing a second copy of the account.
@@ -862,14 +891,44 @@ defmodule OptimalEngine.Connectors.Runner do
       {atom_creds, config} = Map.pop(config, :credentials)
 
       with {:ok, creds} <- merge_credentials(atom_creds, string_creds) do
-        seal_credentials(config, creds)
+        seal_credentials(config, creds, tenant_id, id)
       end
     end
   end
 
-  defp seal_credentials(config, nil), do: {:ok, config}
+  defp seal_credentials(config, nil, _tenant_id, _id), do: {:ok, config}
 
-  defp seal_credentials(config, creds) do
+  defp seal_credentials(config, creds, tenant_id, id) do
+    case CredentialVault.mode() do
+      :openbao -> vault_credentials(config, creds, tenant_id, id)
+      :engine -> envelope_credentials(config, creds)
+    end
+  end
+
+  defp vault_credentials(config, creds, tenant_id, id) do
+    case CredentialVault.put(config, tenant_id, id, creds) do
+      {:ok, config} ->
+        {:ok, config}
+
+      {:error, reason} ->
+        Logger.error(
+          "Connector credentials refused: OpenBao could not store them: #{OptimalEngine.Secrets.describe(reason)}."
+        )
+
+        {:error, reason}
+    end
+  end
+
+  defp vault_bound?(config) do
+    (is_map(Map.get(config, "credentials")) or is_map(Map.get(config, :credentials))) and
+      CredentialVault.mode() == :openbao
+  end
+
+  defp row_exists?(id) do
+    match?({:ok, [_ | _]}, Store.raw_query("SELECT 1 FROM connectors WHERE id = ?1", [id]))
+  end
+
+  defp envelope_credentials(config, creds) do
     case Credential.encrypt(creds) do
       {:ok, envelope} ->
         {:ok, Map.put(config, "credentials_ciphertext", envelope)}

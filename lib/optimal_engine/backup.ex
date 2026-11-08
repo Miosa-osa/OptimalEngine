@@ -126,8 +126,12 @@ defmodule OptimalEngine.Backup do
   Encrypt a cataloged, verified backup, copy the ciphertext to the object
   store, and mark its catalog row offsite and encrypted.
 
-  The backup key comes from `OPTIMAL_BACKUP_KEY`; without it nothing is
-  uploaded and `{:error, :backup_key_missing}` is returned. The backup must
+  The copy is sealed under `OptimalEngine.Backup.Envelope.sealing_key/0`: the
+  OpenBao transit key named by `OPTIMAL_OPENBAO_TRANSIT_KEY` when one is, or
+  else the backup key from `OPTIMAL_BACKUP_KEY` (a value or an OpenBao
+  reference). Without either nothing is uploaded and
+  `{:error, :backup_key_missing}` is returned; a sealed or unreachable
+  OpenBao is `{:error, {:backup_key_unavailable, reason}}`. The backup must
   already be a verified `backup_records` row: the local file is re-hashed
   while it is encrypted and must match the catalog checksum before anything is
   uploaded, and the checksum the object store reports back must match the
@@ -145,7 +149,7 @@ defmodule OptimalEngine.Backup do
   """
   @spec ship_offsite(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def ship_offsite(backup_id, opts \\ []) when is_binary(backup_id) do
-    with {:ok, backup_key} <- Envelope.backup_key(),
+    with {:ok, backup_key} <- Envelope.sealing_key(),
          {:ok, row} <- catalog_row(backup_id, opts),
          :ok <- ensure_local_copy(row),
          key <- offsite_key(row.target, opts),
@@ -396,7 +400,8 @@ defmodule OptimalEngine.Backup do
 
   This is the path after losing the machine: the catalog went with it, but the
   sealed object carries its own plaintext checksum and the id of the key that
-  sealed it. The object is decrypted with `OPTIMAL_BACKUP_KEY`, every chunk is
+  sealed it. The object is decrypted with the configured key the object names
+  (the OpenBao transit key or `OPTIMAL_BACKUP_KEY`), every chunk is
   authenticated, and the plaintext must match the checksum sealed into the
   object before `restore/2` applies its usual checks. Only sealed copies are
   accepted; find the keys with `list_offsite_objects/1`.
@@ -406,7 +411,7 @@ defmodule OptimalEngine.Backup do
   """
   @spec restore_offsite_object(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def restore_offsite_object(object_key, opts \\ []) when is_binary(object_key) do
-    with {:ok, backup_key} <- Envelope.backup_key(),
+    with {:ok, _key} <- Envelope.sealing_key(),
          {:ok, target} <- restore_target(opts) do
       name = "object-" <> (S3.sha256(object_key) |> binary_part(0, 16))
       download = download_path(name, ".enc")
@@ -414,7 +419,7 @@ defmodule OptimalEngine.Backup do
 
       try do
         with {:ok, object} <- S3.get_object_to_file(object_key, download),
-             {:ok, opened} <- Envelope.open_file(download, plaintext, backup_key),
+             {:ok, opened} <- Envelope.open_file(download, plaintext),
              {:ok, restored} <-
                restore(plaintext, [checksum_sha256: opened.plaintext_sha256] ++ target) do
           {:ok,
@@ -454,6 +459,14 @@ defmodule OptimalEngine.Backup do
   def explain(:backup_key_invalid),
     do: "OPTIMAL_BACKUP_KEY must be 64 hex characters (32 bytes)."
 
+  def explain({:backup_key_unavailable, reason}),
+    do:
+      "The backup key could not be read from OpenBao: #{OptimalEngine.Secrets.describe(reason)}. Nothing was sealed or opened."
+
+  def explain({:backup_key_mismatch, "transit:" <> name}),
+    do:
+      "This copy was sealed with the OpenBao transit key #{name}. Set OPTIMAL_OPENBAO_TRANSIT_KEY (and OPTIMAL_OPENBAO_TRANSIT_MOUNT) to that key, with OpenBao reachable, to restore it."
+
   def explain({:backup_key_mismatch, key_id}),
     do:
       "This copy was sealed with a different backup key (key id #{key_id}). Set OPTIMAL_BACKUP_KEY to that key to restore it."
@@ -478,6 +491,10 @@ defmodule OptimalEngine.Backup do
     do:
       "OPTIMAL_S3_CREDENTIALS_FILE must hold the access key id and the secret, as two lines or as KEY=VALUE lines."
 
+  def explain(:credentials_unavailable),
+    do:
+      "The object store credentials name an OpenBao secret that could not be read; the log names the variable and the reason."
+
   def explain(reason), do: inspect(reason)
 
   # An encrypted copy needs the key that sealed it; checking the key id first
@@ -485,16 +502,9 @@ defmodule OptimalEngine.Backup do
   defp restore_key(%{encrypted: false}), do: {:ok, nil}
 
   defp restore_key(%{metadata: metadata}) do
-    with {:ok, key} <- Envelope.backup_key() do
-      case metadata["offsite_key_id"] do
-        sealed_with when is_binary(sealed_with) ->
-          if Envelope.key_id(key) == sealed_with,
-            do: {:ok, key},
-            else: {:error, {:backup_key_mismatch, sealed_with}}
-
-        _ ->
-          {:ok, key}
-      end
+    case metadata["offsite_key_id"] do
+      sealed_with when is_binary(sealed_with) -> Envelope.key_for(sealed_with)
+      _ -> Envelope.sealing_key()
     end
   end
 

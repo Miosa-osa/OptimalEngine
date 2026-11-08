@@ -10,7 +10,12 @@ defmodule OptimalEngine.Connectors.Credential do
   ## Key management
 
   Phase 9 uses an `AES-256-GCM` key loaded from the `CONNECTOR_KEY`
-  env var (hex-encoded 32 bytes). In production the master key should
+  env var (hex-encoded 32 bytes), or from OpenBao when the variable is a
+  reference (`openbao:<path>#<field>`, `OptimalEngine.Secrets`). A reference
+  OpenBao cannot answer is treated as no key: every encrypt and decrypt is
+  refused (`:key_missing`) and the reason is logged, never a plaintext write.
+  With OpenBao configured, connector credentials themselves are kept in
+  OpenBao rather than in this envelope (`OptimalEngine.Connectors.CredentialVault`). In production the master key should
   come from a KMS / HSM — this module exposes `encrypt/1` + `decrypt/1`
   as the only code paths that touch the key, so swapping providers is
   a one-module change. See `docs/architecture/COMPLIANCE.md` for the
@@ -82,10 +87,14 @@ defmodule OptimalEngine.Connectors.Credential do
   # ─── private ─────────────────────────────────────────────────────────────
 
   defp master_key do
-    case System.get_env("CONNECTOR_KEY") do
-      nil ->
-        {:error, :key_missing}
+    case OptimalEngine.Secrets.fetch("CONNECTOR_KEY") do
+      {:ok, hex} -> decode_master_key(hex)
+      {:error, _not_set_or_unavailable} -> {:error, :key_missing}
+    end
+  end
 
+  defp decode_master_key(hex) do
+    case hex do
       hex when byte_size(hex) == 64 ->
         case Base.decode16(hex, case: :mixed) do
           {:ok, key} when byte_size(key) == 32 -> {:ok, key}

@@ -49,7 +49,7 @@ bin/optimal close "what changed and how verified"
 | `OPTIMAL_BUNDLE_MAX_BYTES` | `5368709120` (5 GiB) | Largest raw bundle upload `POST /api/bundles/import` accepts; a larger one is refused with 413 before or while it is read. |
 | `OPTIMAL_BUNDLE_URL_HOSTS` | none | Comma-separated hosts a bundle import job may download its bundle from (`source_url`); with none, `source_url` is refused. A `*.` entry covers a domain's hosts. |
 | `OPTIMAL_BUNDLE_RETENTION_HOURS` | `168` | How long a finished bundle export job's bundle is kept before it is removed. |
-| `OPTIMAL_BACKUP_KEY` | none | 64 hex characters; encrypts every offsite backup copy with AES-256-GCM. Offsite copies are refused without it. Losing it loses every copy sealed with it. |
+| `OPTIMAL_BACKUP_KEY` | none | 64 hex characters, or an OpenBao reference `openbao:<path>#<field>`; encrypts every offsite backup copy with AES-256-GCM. Offsite copies are refused without it (or a transit key, below). Losing it loses every copy sealed with it. |
 | `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS` | unset (off) | Interval for scheduled encrypted offsite backups; 0 or unset disables, otherwise at least 60000. |
 | `OPTIMAL_OFFSITE_BACKUP_KEEP` | `14` | Scheduled offsite copies kept; older ones are deleted from the bucket. |
 | `OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL` | `3` | Scheduled local backup files kept in `OPTIMAL_BACKUP_DIR`. |
@@ -57,7 +57,7 @@ bin/optimal close "what changed and how verified"
 | `OPTIMAL_ASSET_RECONCILE_INTERVAL_MS` | `600000` (10 minutes) | How often assets kept on the local disk during an object store outage are put in the bucket, while any are pending and S3 is configured; `0` turns it off. |
 | `OPTIMAL_ENGINE_ROOT` | repo root | Engine root for source-checkout usage. |
 | `OPTIMAL_KNOWLEDGE_BACKEND` | `ets` | Backend of the triple-store mirror of `graph_edges`: `ets`, `rocksdb`, or `mnesia`. `scripts/run-engine.sh` defaults it to `rocksdb`; the Docker image and MIOSA template set nothing. |
-| `CONNECTOR_KEY` | generated into `.optimal/connector_key` | Local connector secret. Connector credentials are refused without it; they are never stored in plaintext. |
+| `CONNECTOR_KEY` | generated into `.optimal/connector_key` | Local connector secret, or an OpenBao reference. Connector credentials are refused without it unless OpenBao holds them; they are never stored in plaintext. |
 | `OPTIMAL_CLAIM_PROMOTION_MODE` | `auto_threshold` | `auto_threshold`: the Engine promotes Claims whose confidence meets the workspace threshold every 30 minutes, as `system:promotion-scheduler`. `manual` or `agent_review`: it promotes nothing, and every Claim waits for a reviewer with `claims:review`. Other values fail startup configuration. |
 
 Keep private values in environment variables, local secret stores, or deployment secret managers.
@@ -77,7 +77,7 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 | `OPTIMAL_S3_ENDPOINT` | none | S3-compatible endpoint base URL. |
 | `OPTIMAL_S3_BUCKET` | none | Bucket name. |
 | `OPTIMAL_S3_REGION` | `us-east-1` | Region of the credential scope; must match the provider (Garage's `s3_region`, the AWS region, `auto` for R2). |
-| `OPTIMAL_S3_ACCESS_KEY_ID`, `OPTIMAL_S3_SECRET_ACCESS_KEY` | none | Credentials. |
+| `OPTIMAL_S3_ACCESS_KEY_ID`, `OPTIMAL_S3_SECRET_ACCESS_KEY` | none | Credentials, each a value or an OpenBao reference `openbao:<path>#<field>`. |
 | `OPTIMAL_S3_CREDENTIALS_FILE` | none | File holding the credentials; environment values win. |
 | `OPTIMAL_S3_PREFIX` | none | Key prefix owned by this Engine. |
 | `OPTIMAL_S3_PATH_STYLE` | path style | `false` selects virtual-hosted addressing. |
@@ -93,14 +93,19 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 | `OPTIMAL_KNOWLEDGE_BACKEND` | `ets` | Mirror backend: `ets`, `rocksdb`, or `mnesia` (`ram_copies` only). |
 | `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` | `.optimal/knowledge-rocksdb` | Where RocksDB keeps the mirror, relative to the working directory; set an absolute path on the data volume. |
 | `OPTIMAL_BACKUP_DIR` | `backups/` beside the database | The only directory `POST /api/backup` writes into. |
-| `OPTIMAL_BACKUP_KEY` | none | 64 hex characters; seals offsite backups. |
+| `OPTIMAL_BACKUP_KEY` | none | 64 hex characters, or `openbao:<path>#<field>`; seals offsite backups. |
 | `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS`, `OPTIMAL_OFFSITE_BACKUP_KEEP`, `OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL` | off, `14`, `3` | Scheduled offsite backups and how many copies are kept. |
-| `CONNECTOR_KEY` | none | 64 hex characters; seals connector and peer credentials in the database. |
-| `OPTIMAL_AUTHORITY_KEY` | none | 64 hex characters; wraps the authority signing keys. |
+| `CONNECTOR_KEY` | none | 64 hex characters, or `openbao:<path>#<field>`; seals connector and peer credentials in the database. |
+| `OPTIMAL_AUTHORITY_KEY` | none | 64 hex characters, or `openbao:<path>#<field>`; wraps the authority signing keys. |
+| `OPTIMAL_OPENBAO_ADDR`, `OPTIMAL_OPENBAO_TOKEN` | none | OpenBao address and token. With both set, connector credentials are kept in OpenBao and the secret references above resolve. |
+| `OPTIMAL_OPENBAO_KV_MOUNT` | `secret` | KV version 2 mount for references and connector credentials; enabled on first write when the token may. |
+| `OPTIMAL_OPENBAO_TRANSIT_KEY`, `OPTIMAL_OPENBAO_TRANSIT_MOUNT` | none, `transit` | Transit key that wraps each offsite backup's data key instead of `OPTIMAL_BACKUP_KEY`. |
+| `OPTIMAL_CONNECTOR_CREDENTIAL_STORE` | `openbao` when OpenBao is configured, else `engine` | `engine` keeps connector credentials as database envelopes; `openbao` refuses writes without OpenBao. |
 
 The mirror is not what retrieval reads: the graph that search and assembly read is the `graph_edges` table in SQLite.
 
-Providers with an adapter that no Engine feature uses yet: `OPTIMAL_VALKEY_URL`, `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`, `OPTIMAL_ANALYTICS_PATH` (DuckDB and Parquet), and `OPTIMAL_OPENBAO_ADDR` with `OPTIMAL_OPENBAO_TOKEN` and `OPTIMAL_OPENBAO_KV_MOUNT`.
+Providers with an adapter that no Engine feature uses yet: `OPTIMAL_VALKEY_URL`, `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`, and `OPTIMAL_ANALYTICS_PATH` (DuckDB and Parquet).
+OpenBao (above) is in the data path: see [Storage providers](docs/guides/storage-providers.md#openbao).
 Setting them lets `GET /api/storage/providers?probe=true` check each service and the provider proofs prove it with a round trip; the Engine's data stays where it is.
 NATS JetStream is reached the same way, and runs the flows it is given:
 
