@@ -53,14 +53,17 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     name = :"nats_ledger_pub_#{System.unique_integer([:positive])}"
 
     opts =
-      [
-        name: name,
-        connection: ctx.conn,
-        namespace: "optimal",
-        enabled: true,
-        interval_ms: 0,
-        workspaces: [ctx.ws]
-      ] ++ extra
+      Keyword.merge(
+        [
+          name: name,
+          connection: ctx.conn,
+          namespace: "optimal",
+          enabled: true,
+          interval_ms: 0,
+          workspaces: [ctx.ws]
+        ],
+        extra
+      )
 
     start_supervised!({LedgerPublisher, opts}, id: name)
     name
@@ -189,6 +192,69 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     assert "contexts" in types
     refute "source_packages" in types
     refute Enum.any?(NATSStub.messages(ctx.stub, "OPTIMAL_LEDGER"), &(&1.data =~ "secret"))
+  end
+
+  describe "a pass that fails" do
+    defp second_workspace(ctx) do
+      {:ok, ws} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: "second",
+          name: "Second"
+        })
+
+      {:ok, _} = Sync.enable(ctx.tenant, ws.id, "user:owner")
+      ws.id
+    end
+
+    # Reads a workspace's changes as `Sync.changes/3` does, except `failing`,
+    # whose read raises or exits as a seal that fails or times out would.
+    defp changes_failing(failing, how) do
+      fn tenant, ws, opts ->
+        if ws == failing do
+          case how do
+            :raise -> raise "seal failed"
+            :exit -> exit({:timeout, {GenServer, :call, [:seal]}})
+          end
+        else
+          Sync.changes(tenant, ws, opts)
+        end
+      end
+    end
+
+    test "keeps the cursors it moved before the failure", ctx do
+      second = second_workspace(ctx)
+      insert_context(ctx, "kept-#{ctx.n}", "Kept")
+      pub = publisher(ctx, workspaces: [ctx.ws, second], changes: changes_failing(second, :raise))
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, _} = LedgerPublisher.publish_now(pub)
+      end)
+
+      status = LedgerPublisher.status(pub)
+      assert status.state == "error"
+      first = Enum.find(status.workspaces, &(&1.workspace_id == ctx.ws))
+      assert is_integer(first.published_through) and first.published_through > 0
+      assert first.backlog == 0
+    end
+
+    test "an exit ends the pass, not the publisher, and failures that keep coming are reported",
+         ctx do
+      pub = publisher(ctx, changes: changes_failing(ctx.ws, :exit))
+      pid = Process.whereis(pub)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        for _ <- 1..4, do: assert({:error, _} = LedgerPublisher.publish_now(pub))
+        assert LedgerPublisher.health(pub) == :ok
+
+        assert {:error, _} = LedgerPublisher.publish_now(pub)
+      end)
+
+      assert Process.whereis(pub) == pid
+      assert %{state: "error", consecutive_failures: 5} = LedgerPublisher.status(pub)
+      assert {:degraded, 5, _last_error} = LedgerPublisher.health(pub)
+    end
   end
 
   test "off unless the ledger flow is enabled, and the inventory says which" do

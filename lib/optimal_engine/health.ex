@@ -8,7 +8,10 @@ defmodule OptimalEngine.Health do
   are configured, migration state current, the API not open to the
   network without authentication (`network_auth`, which warns
   `auth_open_on_network`; see `OptimalEngine.API.Exposure`), and OpenBao
-  able to answer when the Engine takes secrets from it (`secrets`).
+  able to answer when the Engine takes secrets from it (`secrets`), and the
+  change ledger in order and published (`ledger`: a PostgreSQL ledger sequence
+  that caches values the Engine could not set back, or a NATS ledger publisher
+  whose passes keep failing, warns).
 
   A sealed or unreachable OpenBao is a warning (`openbao_unavailable`), not
   an error: the Engine boots and serves without it, the features that need a
@@ -29,6 +32,7 @@ defmodule OptimalEngine.Health do
           credential_key: :ok,
           network_auth: :ok,
           secrets: :ok,
+          ledger: :ok,
           embedder: :ok
         },
         degraded: []
@@ -84,6 +88,7 @@ defmodule OptimalEngine.Health do
         :credential_key,
         :network_auth,
         :secrets,
+        :ledger,
         :intake_removals,
         :connector_ids,
         :embedder
@@ -163,6 +168,20 @@ defmodule OptimalEngine.Health do
     case OptimalEngine.API.Exposure.unacknowledged_interface() do
       nil -> :ok
       interface -> {:warn, {:auth_open_on_network, interface}}
+    end
+  end
+
+  # The change ledger: on PostgreSQL its sequence must draw in order
+  # (`Sync.Postgres.ensure_ledger_sequence/1`), and the NATS ledger publisher,
+  # when on, must not keep failing its passes. Either is a warning: the Engine
+  # serves, and what it writes is kept.
+  defp run_check(:ledger) do
+    with :ok <- OptimalEngine.Sync.Postgres.ledger_order(),
+         :ok <- OptimalEngine.Storage.NATS.LedgerPublisher.health() do
+      :ok
+    else
+      {:degraded, failures, last_error} -> {:warn, {:nats_ledger_failing, failures, last_error}}
+      other -> other
     end
   end
 

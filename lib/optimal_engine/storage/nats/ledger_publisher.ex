@@ -106,6 +106,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   @max_age_env "OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS"
   @default_max_age_hours 168
   @empty %{published: 0, purged: 0, forgotten: 0}
+  @degraded_after 5
 
   @doc false
   def child_spec(opts) do
@@ -196,6 +197,15 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
     :exit, _ -> %{state: "down", workspaces: []}
   end
 
+  @doc """
+  `:ok`, or `{:degraded, failures, last_error}` once #{@degraded_after} passes
+  in a row have failed (readiness warns, `OptimalEngine.Health`). Read without
+  calling the publisher, so a pass in progress never holds it up.
+  """
+  @spec health(GenServer.server()) :: :ok | {:degraded, pos_integer(), String.t() | nil}
+  def health(server \\ __MODULE__),
+    do: :persistent_term.get({__MODULE__, :health, server}, :ok)
+
   # ---------------------------------------------------------------------------
 
   @impl GenServer
@@ -214,6 +224,10 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
       connection: Keyword.get(opts, :connection, Connection),
       interval: Keyword.get(opts, :interval_ms, @interval),
       only: Keyword.get(opts, :workspaces),
+      name: Keyword.get(opts, :name, __MODULE__),
+      # How a workspace's changes are read (tests stand in a failing read).
+      changes: Keyword.get(opts, :changes, &Sync.changes/3),
+      failures: 0,
       state: if(enabled, do: "starting", else: "off"),
       epoch: nil,
       more: false,
@@ -279,6 +293,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
        purges_pending: if(state.enabled, do: length(pending_requests(state)), else: 0),
        last_published_at: state.last_published_at,
        last_error: state.last_error,
+       consecutive_failures: state.failures,
        workspaces: if(state.enabled, do: backlogs(state), else: [])
      }, state}
   end
@@ -300,14 +315,36 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   # each, in ledger order.
   # ---------------------------------------------------------------------------
 
+  # A pass, and the count of passes in a row that failed: health degrades after
+  # @degraded_after of them, and the first pass that goes through clears it.
   defp pass(state, only) do
+    {reply, state} = run_pass(state, only)
+
+    failures =
+      case {reply, state.state} do
+        {{:error, _reason}, "error"} -> state.failures + 1
+        {{:error, _reason}, _buffering} -> state.failures
+        {{:ok, _totals}, _settled} -> 0
+      end
+
+    put_health(state.name, failures, state.last_error)
+    {reply, %{state | failures: failures}}
+  end
+
+  defp put_health(name, failures, last_error) do
+    health = if failures >= @degraded_after, do: {:degraded, failures, last_error}, else: :ok
+    key = {__MODULE__, :health, name}
+    if :persistent_term.get(key, :ok) != health, do: :persistent_term.put(key, health)
+  end
+
+  defp run_pass(state, only) do
     with {:ok, state} <- provision(state) do
       {done, state} = process_requests(state)
       requested = done |> Map.values() |> Enum.sum()
 
       {totals, state} =
         Enum.reduce_while(workspaces(state, only), {@empty, state}, fn workspace, {totals, state} ->
-          case publish_workspace(state, workspace, @pages_per_pass, @empty) do
+          case guarded_workspace(state, workspace) do
             {:ok, counts, state} ->
               {:cont, {add(totals, counts), state}}
 
@@ -341,9 +378,8 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
         {{:error, reason}, failed(state, reason)}
     end
   rescue
-    # A seal that fails or times out (a long apply holding the ledger lock)
-    # raises in `Sync.changes/3`; the pass ends, the cursors stay where they
-    # were, and the next pass goes on from them.
+    # Anything outside a workspace's publishing (the workspace purges, the
+    # list of workspaces): nothing of this pass was published yet.
     error ->
       Logger.warning("[NATS] ledger pass failed: #{Exception.message(error)}")
       {{:error, :pass_failed}, failed(state, :pass_failed)}
@@ -351,6 +387,39 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
     kind, reason ->
       Logger.warning("[NATS] ledger pass failed: #{kind} #{inspect(reason)}")
       {{:error, :pass_failed}, failed(state, :pass_failed)}
+  end
+
+  # A workspace that raises or exits part way ends the pass with the state the
+  # pass had before it: the workspaces published earlier in the pass keep the
+  # cursors they moved. (A read that fails is caught page by page in
+  # `read_page/4`, which keeps this workspace's earlier pages too.)
+  defp guarded_workspace(state, workspace) do
+    publish_workspace(state, workspace, @pages_per_pass, @empty)
+  rescue
+    error ->
+      Logger.warning("[NATS] ledger publish failed: #{Exception.message(error)}")
+      {:error, {:raised, Exception.message(error)}, @empty, state}
+  catch
+    kind, reason ->
+      Logger.warning("[NATS] ledger publish failed: #{kind} #{inspect(reason)}")
+      {:error, {kind, reason}, @empty, state}
+  end
+
+  # One page of a workspace's changes and the later forgets of its rows. The
+  # read seals first, and a seal that fails or waits past its timeout (a long
+  # apply holding the ledger lock) raises or exits: that ends this workspace's
+  # pass, not the publisher.
+  defp read_page(state, tenant, ws, cursor) do
+    page = state.changes.(tenant, ws, since: cursor, limit: @page)
+    {:ok, page, later_forgets(tenant, ws, page["mutations"])}
+  rescue
+    error ->
+      Logger.warning("[NATS] ledger read failed: #{Exception.message(error)}")
+      {:error, {:read_failed, Exception.message(error)}}
+  catch
+    kind, reason ->
+      Logger.warning("[NATS] ledger read failed: #{kind} #{inspect(reason)}")
+      {:error, {:read_failed, {kind, reason}}}
   end
 
   defp add(a, b), do: Map.merge(a, b, fn _key, x, y -> x + y end)
@@ -386,10 +455,8 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   defp publish_workspace(state, _workspace, 0, counts), do: {:ok, counts, %{state | more: true}}
 
   defp publish_workspace(state, {tenant, ws} = workspace, pages, counts) do
-    with {:ok, cursor, state} <- cursor(state, workspace) do
-      page = Sync.changes(tenant, ws, since: cursor, limit: @page)
-      forgets = later_forgets(tenant, ws, page["mutations"])
-
+    with {:ok, cursor, state} <- cursor(state, workspace),
+         {:ok, page, forgets} <- read_page(state, tenant, ws, cursor) do
       case publish_all(state, workspace, page["mutations"], forgets) do
         {:ok, page_counts} ->
           state = put_in(state, [:cursors, workspace], page["cursor"])
@@ -678,32 +745,25 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   defp only(rows, nil), do: rows
   defp only(rows, ids), do: Enum.filter(rows, fn {_tenant, ws} -> ws in ids end)
 
-  # Sealed first, so a write the triggers captured counts before a pass ran.
+  # The ledger rows past the cursor and the writes captured but not sealed
+  # yet, read without sealing: a seal can wait on the ledger lock, and a status
+  # must not (it runs in this process, and its caller waits 5 s).
   defp backlogs(state) do
-    seal_for_status()
-
     for {tenant, ws} = workspace <- workspaces(state, nil) do
       through = Map.get(state.cursors, workspace)
 
       {:ok, [[backlog]]} =
         Store.raw_query(
-          "SELECT COUNT(*) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3",
+          """
+          SELECT (SELECT COUNT(*) FROM sync_mutations
+                  WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3)
+               + (SELECT COUNT(*) FROM sync_capture WHERE workspace_id = ?2)
+          """,
           [tenant, ws, through || 0]
         )
 
       %{tenant_id: tenant, workspace_id: ws, published_through: through, backlog: backlog}
     end
-  end
-
-  # A status never fails over a seal: one that cannot run now leaves the
-  # backlog counting the ledger as it stands.
-  defp seal_for_status do
-    OptimalEngine.Sync.Capture.seal()
-  rescue
-    error -> Logger.warning("[NATS] ledger status could not seal: #{Exception.message(error)}")
-  catch
-    kind, reason ->
-      Logger.warning("[NATS] ledger status could not seal: #{kind} #{inspect(reason)}")
   end
 
   defp settled(%{more: true} = state), do: %{state | state: "publishing", last_error: nil}

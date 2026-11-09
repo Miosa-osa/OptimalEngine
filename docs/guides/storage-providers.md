@@ -400,7 +400,8 @@ Past it, a resume point older than what was already published sends those change
 Consumers are therefore idempotent on the workspace and `Optimal-Ledger-Seq`: keep the highest sequence applied per workspace and skip a message at or below it, or key on `Nats-Msg-Id` (the change's id, which never changes).
 No epoch is needed: a sequence belongs to the ledger, is never reused, and only grows within a workspace.
 
-`runtime.flows.ledger` in `GET /api/storage/providers/nats_jetstream` says where it stands: `state` (`off`, `buffering` while NATS is down, `publishing` while a backlog remains, `caught_up`, `error` with `last_error`), the changes published since start, and each workspace's `published_through` and `backlog`.
+`runtime.flows.ledger` in `GET /api/storage/providers/nats_jetstream` says where it stands: `state` (`off`, `buffering` while NATS is down, `publishing` while a backlog remains, `caught_up`, `error` with `last_error`), `consecutive_failures` (passes in a row that failed; after 5, readiness warns `nats_ledger_failing`), the changes published since start, and each workspace's `published_through` and `backlog` (the ledger past it and the writes captured but not sealed yet, read without sealing, so the status answers while a seal waits).
+A pass that fails part way, a seal that fails or times out for one, keeps the cursors it moved before the failure.
 
 The stream is a copy for subscribers, not a replication transport: Engines still replicate over HTTP or the MIOSA relay (see [Replication](replication.md)), and a peer's conflict detection, gates and version checks do not apply to a reader of the stream.
 The stream follows what the Engine forgets (next section); the age limit bounds the rest.

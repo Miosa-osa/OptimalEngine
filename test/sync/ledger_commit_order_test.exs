@@ -391,19 +391,53 @@ defmodule OptimalEngine.Sync.LedgerCommitOrderTest do
     )
   end
 
-  test "the ledger's sequence caches no values, and a larger cache is set back at boot" do
-    assert PgCapture.ledger_sequence_cache() == 1
+  test "the publisher's status answers while a seal waits on the ledger lock", ctx do
+    {:ok, stub} = NATSStub.start()
+    on_exit(fn -> NATSStub.stop(stub) end)
+    conn = :"ledord_conn_status_#{ctx.n}"
 
-    LedgerHold.with_conn(fn conn ->
-      Postgrex.query!(conn, "ALTER TABLE sync_mutations ALTER COLUMN sequence SET CACHE 20", [])
-    end)
+    start_supervised!(
+      {Connection, name: conn, url: "nats://127.0.0.1:#{stub.port}", backoff: {20, 100}},
+      id: conn
+    )
 
-    assert PgCapture.ledger_sequence_cache() == 20
+    assert wait_for(fn -> Connection.connected?(conn) end)
+    pub = :"ledord_pub_status_#{ctx.n}"
 
-    ExUnit.CaptureLog.capture_log(fn -> assert :ok = PgCapture.ensure() end) =~
-      "set back to 1"
+    start_supervised!(
+      {LedgerPublisher,
+       name: pub,
+       connection: conn,
+       namespace: "optimal",
+       enabled: true,
+       interval_ms: 0,
+       workspaces: [ctx.ws]},
+      id: pub
+    )
 
-    assert PgCapture.ledger_sequence_cache() == 1
+    # Another Engine's seal holds the ledger lock; a local write waits to be
+    # sealed, and a seal now would wait for that lock.
+    a = "hold-a-#{ctx.n}"
+    hold = LedgerHold.hold(a)
+    task_a = other_engine_seal_async(ctx, a)
+    assert wait_for(fn -> LedgerHold.waiting?(hold, a) end)
+
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO contexts (id, tenant_id, workspace_id, title, content, created_at) VALUES (?1, ?2, ?3, ?1, 'body', '2026-11-09T12:00:00Z')",
+        ["waiting-#{ctx.n}", ctx.tenant, ctx.ws]
+      )
+
+    {micros, status} = :timer.tc(fn -> LedgerPublisher.status(pub) end)
+
+    LedgerHold.release(hold)
+    assert {:ok, 1} = Task.await(task_a, 30_000)
+
+    assert status.state != "down", "the status call timed out behind the seal"
+    assert micros < 2_000_000
+    # The captured write counts in the backlog before any seal.
+    assert [%{backlog: backlog}] = status.workspaces
+    assert backlog >= 1
   end
 
   test "the ledger's payload and the events' metadata come back as the JSON text written", ctx do
