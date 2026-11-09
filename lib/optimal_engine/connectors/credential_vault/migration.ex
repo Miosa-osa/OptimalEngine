@@ -148,9 +148,8 @@ defmodule OptimalEngine.Connectors.CredentialVault.Migration do
   end
 
   defp migrate_row(id, tenant_id, raw, config, envelope, report) do
-    path = CredentialVault.path(tenant_id, id)
-
-    with {:ok, credentials} <- open_envelope(envelope),
+    with {:ok, path} <- CredentialVault.path(tenant_id, id),
+         {:ok, credentials} <- open_envelope(envelope),
          :ok <- OpenBao.kv_write(path, credentials),
          :ok <- verify(path, credentials),
          :ok <- mark(id, tenant_id, raw, config) do

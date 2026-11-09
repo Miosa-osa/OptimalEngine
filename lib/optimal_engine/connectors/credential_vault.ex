@@ -60,9 +60,24 @@ defmodule OptimalEngine.Connectors.CredentialVault do
   def stored?(config) when is_map(config), do: Map.get(config, @marker_key) == @marker
   def stored?(_config), do: false
 
-  @doc "The KV path (under the mount) for a connector's credentials."
-  @spec path(String.t(), String.t()) :: String.t()
-  def path(tenant_id, connector_id), do: "optimal/connectors/#{tenant_id}/#{connector_id}"
+  # The form connector ids take (`OptimalEngine.Connectors.Rows`); a tenant id
+  # is held to it too. No `/`, so a segment cannot address another secret.
+  @segment ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/
+
+  @doc """
+  The KV path (under the mount) for a connector's credentials, or
+  `{:error, :invalid_connector_id}` when the tenant or the id is not in the
+  form ids take (no `/`, no `..`).
+  """
+  @spec path(String.t(), String.t()) :: {:ok, String.t()} | {:error, :invalid_connector_id}
+  def path(tenant_id, connector_id) do
+    if segment?(tenant_id) and segment?(connector_id),
+      do: {:ok, "optimal/connectors/#{tenant_id}/#{connector_id}"},
+      else: {:error, :invalid_connector_id}
+  end
+
+  defp segment?(value),
+    do: is_binary(value) and Regex.match?(@segment, value) and not String.contains?(value, "..")
 
   @doc """
   Writes `credentials` (a map) for the connector and returns `config` marked
@@ -72,7 +87,8 @@ defmodule OptimalEngine.Connectors.CredentialVault do
   def put(config, tenant_id, connector_id, credentials) when is_map(credentials) do
     # KV version 2 stores any JSON object, so a nested credential (an OAuth
     # token set) reads back exactly as it was written.
-    with :ok <- OpenBao.kv_write(path(tenant_id, connector_id), credentials) do
+    with {:ok, path} <- path(tenant_id, connector_id),
+         :ok <- OpenBao.kv_write(path, credentials) do
       {:ok, config |> Map.delete("credentials_ciphertext") |> Map.put(@marker_key, @marker)}
     end
   end
@@ -83,16 +99,20 @@ defmodule OptimalEngine.Connectors.CredentialVault do
   """
   @spec get(map(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def get(config, tenant_id, connector_id) do
-    case OpenBao.kv_read(path(tenant_id, connector_id)) do
-      {:ok, data} -> {:ok, config |> Map.delete(@marker_key) |> Map.merge(data)}
-      {:error, :not_found} -> {:error, :credentials_not_found}
-      {:error, reason} -> {:error, reason}
+    with {:ok, path} <- path(tenant_id, connector_id) do
+      case OpenBao.kv_read(path) do
+        {:ok, data} -> {:ok, config |> Map.delete(@marker_key) |> Map.merge(data)}
+        {:error, :not_found} -> {:error, :credentials_not_found}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
   @doc "Deletes the connector's credentials (every version). Nothing stored is `:ok`."
   @spec delete(String.t(), String.t()) :: :ok | {:error, term()}
-  def delete(tenant_id, connector_id), do: OpenBao.kv_delete(path(tenant_id, connector_id))
+  def delete(tenant_id, connector_id) do
+    with {:ok, path} <- path(tenant_id, connector_id), do: OpenBao.kv_delete(path)
+  end
 
   @doc """
   Moves credentials already sealed into connector rows (`CONNECTOR_KEY`

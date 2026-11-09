@@ -864,10 +864,14 @@ defmodule OptimalEngine.Connectors.Runner do
       {:ok, [[raw]]} ->
         with {:ok, row_config} when is_map(row_config) <- Jason.decode(raw || ""),
              true <- CredentialVault.stored?(row_config) do
-          case OptimalEngine.Storage.OpenBao.kv_read(CredentialVault.path(tenant_id, id)) do
-            {:ok, data} -> {:restore, data}
-            {:error, :not_found} -> :none
-            {:error, _reason} -> :unknown
+          with {:ok, path} <- CredentialVault.path(tenant_id, id) do
+            case OptimalEngine.Storage.OpenBao.kv_read(path) do
+              {:ok, data} -> {:restore, data}
+              {:error, :not_found} -> :none
+              {:error, _reason} -> :unknown
+            end
+          else
+            {:error, :invalid_connector_id} -> :none
           end
         else
           _not_vaulted -> :none
@@ -879,13 +883,17 @@ defmodule OptimalEngine.Connectors.Runner do
   end
 
   defp restore_vault(id, tenant_id, prior) do
-    path = CredentialVault.path(tenant_id, id)
-
     result =
       case prior do
-        {:restore, data} -> OptimalEngine.Storage.OpenBao.kv_write(path, data)
-        :none -> CredentialVault.delete(tenant_id, id)
-        :unknown -> :ok
+        {:restore, data} ->
+          with {:ok, path} <- CredentialVault.path(tenant_id, id),
+               do: OptimalEngine.Storage.OpenBao.kv_write(path, data)
+
+        :none ->
+          CredentialVault.delete(tenant_id, id)
+
+        :unknown ->
+          :ok
       end
 
     case result do

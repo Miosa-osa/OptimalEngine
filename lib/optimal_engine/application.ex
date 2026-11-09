@@ -17,8 +17,6 @@ defmodule OptimalEngine.Application do
 
   @impl true
   def start(_type, _args) do
-    # Owned by the application: the fields read from OpenBao, kept a minute.
-    OptimalEngine.Secrets.init_cache()
     OptimalEngine.Sizing.boot_started()
     sweep_bundle_leftovers()
 
@@ -100,6 +98,9 @@ defmodule OptimalEngine.Application do
     [
       # ── Recent log lines for GET /api/maintenance/log (first, so boot is kept) ─
       OptimalEngine.LogBuffer,
+
+      # ── The fields read from OpenBao, kept a minute (OptimalEngine.Secrets) ─
+      OptimalEngine.Secrets.Cache,
 
       # ── Observability (comes up early so every other child's metrics are captured) ─
       OptimalEngine.Telemetry,
