@@ -20,6 +20,10 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   created_at, updated_at
   """
 
+  @doc false
+  # The columns `OptimalEngine.Memory.Versioned.row_to_struct/1` reads, in order.
+  def select_cols, do: @select_cols
+
   # Columns used in the dedup lookup — must match @select_cols order exactly.
   @dedup_select_cols @select_cols
 

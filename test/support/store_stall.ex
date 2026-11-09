@@ -46,6 +46,38 @@ defmodule OptimalEngine.Test.StoreStall do
     end
   end
 
+  @doc """
+  On PostgreSQL, holds `tables` in ACCESS EXCLUSIVE mode from a connection of
+  its own for `ms`, and returns once they are held; the task answers
+  `{:ok, :released}` when they are let go.
+  """
+  def hold_tables(tables, ms) do
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        conn = connect()
+
+        try do
+          Postgrex.query!(conn, "BEGIN", [])
+          list = Enum.map_join(tables, ", ", &~s("#{&1}"))
+          Postgrex.query!(conn, "LOCK TABLE #{list} IN ACCESS EXCLUSIVE MODE", [], timeout: 60_000)
+          send(parent, {__MODULE__, :holding})
+          Process.sleep(ms)
+          {:ok, :released}
+        after
+          _ = Postgrex.query(conn, "ROLLBACK", [])
+          GenServer.stop(conn)
+        end
+      end)
+
+    receive do
+      {__MODULE__, :holding} -> task
+    after
+      5_000 -> raise "the tables were not held"
+    end
+  end
+
   def stalled(fun) do
     if Store.selected?(OptimalEngine.Store.Postgres), do: postgres(fun), else: sqlite(fun)
   end

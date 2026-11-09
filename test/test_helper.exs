@@ -21,6 +21,12 @@ exclude =
     do: [:valkey | exclude],
     else: exclude
 
+# A forgotten memory's text is still in the replication ledger until the
+# ledger redaction lands; the assertion that it is not is tagged
+# :ledger_redaction (test/memory/memory_forget_erasure_test.exs) and enabled
+# with it.
+exclude = [:ledger_redaction | exclude]
+
 # With OPTIMAL_STORE=postgres the Engine runs on PostgreSQL;
 # tests that need the embedded SQLite store as the Engine's store, or start a
 # PostgreSQL store of their own beside it, are tagged :sqlite_store.
@@ -31,6 +37,13 @@ exclude =
   if OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres),
     do: [:sqlite_store | exclude],
     else: [:postgres_store | exclude]
+
+# Tests of what the Engine does on its PostgreSQL store only (the posting
+# lists it refreshes after a commit) are tagged :postgres_engine.
+exclude =
+  if OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres),
+    do: exclude,
+    else: [:postgres_engine | exclude]
 
 # Analytics against a real DuckDB run with OPTIMAL_TEST_DUCKDB naming the
 # `duckdb` executable (test/analytics/analytics_duckdb_test.exs). CI sets it

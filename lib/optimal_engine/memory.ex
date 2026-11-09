@@ -326,20 +326,21 @@ defmodule OptimalEngine.Memory do
   defdelegate derive(id, attrs), to: Versioned
 
   @doc """
-  Soft-forgets a versioned memory (sets is_forgotten=1).
+  Forgets a versioned memory: sets is_forgotten=1 and erases its text from the
+  row and everything derived from it (`OptimalEngine.Memory.Versioned.forget/2`).
 
   Options:
     - `:reason` — stored in `forget_reason`
     - `:forget_after` — ISO8601 timestamp
 
   Dispatches on the second argument type:
-    - `forget(id, keyword_list)` — versioned memory soft-forget
+    - `forget(id, keyword_list)` — versioned memory forget
     - `forget(id, binary)` — alias for legacy `forget_key/2`
   """
   @spec forget(String.t(), keyword() | String.t()) :: :ok | {:error, term()}
   def forget(id, opts \\ [])
 
-  # Versioned soft-forget: forget(memory_id, keyword_opts)
+  # Versioned forget: forget(memory_id, keyword_opts)
   def forget(id, opts) when is_binary(id) and is_list(opts) do
     Versioned.forget(id, opts)
   end

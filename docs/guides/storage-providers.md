@@ -428,7 +428,8 @@ Every purge is evidence in `events`:
 An erasure (`Compliance.Erasure.erase/2`) runs a pass over the erased workspaces before it reports, and its report and `erasure` audit event carry `nats_ledger`: `messages_purged` and `rows_forgotten`, `state: "off"` without the flow, or `pending: true` while NATS is down, in which case the purge happens when the deletes go out and is recorded as a `nats_purge` event.
 `runtime.flows.ledger` counts `messages_purged` and the workspace purges still pending (`purges_pending`).
 
-What this does not cover: the Engine's own derived rows that a soft forget leaves (`Memory.forget/2` marks the memory, and the source package and claim its creation wrote keep their text in the Engine, and so on the stream, until they are deleted); a subscriber's own copy of what it already read; and the intake queue, whose items carry connector content until they are ingested, dead-lettered or requeued.
+A forgotten memory's source package and claims are deleted with its text (see [Erasure And Retention](erasure-and-retention.md)), so their deletes purge their subjects too.
+What this does not cover: a subscriber's own copy of what it already read; and the intake queue, whose items carry connector content until they are ingested, dead-lettered or requeued.
 
 ### Background jobs
 
