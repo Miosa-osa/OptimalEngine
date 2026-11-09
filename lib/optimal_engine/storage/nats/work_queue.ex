@@ -154,7 +154,8 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
         terminated: 0,
         failed: 0,
         dead_lettered: 0,
-        fallback: 0
+        fallback: 0,
+        unsent_dropped: 0
       },
       last_error: nil
     }
@@ -321,7 +322,21 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   # likely to reach it. A queue, so a failed publish at the cap costs O(1).
   def keep_unsent(%{unsent_count: count} = state, message) when count >= @max_unsent do
     {_oldest, rest} = :queue.out(state.unsent)
-    %{state | unsent: :queue.in(message, rest)}
+    dropped = Map.get(state.counts, :unsent_dropped, 0)
+
+    # One line when the list first fills, then one per 1,000 dropped.
+    if rem(dropped, 1_000) == 0 do
+      Logger.warning(
+        "[NATS] #{state.callback.flow()} kept announcements are full (#{@max_unsent}): " <>
+          "the oldest is dropped (#{dropped + 1} so far); its job is announced by a later sweep or run at its worker's next poll"
+      )
+    end
+
+    %{
+      state
+      | unsent: :queue.in(message, rest),
+        counts: Map.put(state.counts, :unsent_dropped, dropped + 1)
+    }
   end
 
   def keep_unsent(state, message),

@@ -193,4 +193,70 @@ defmodule OptimalEngine.Storage.NATSClientTest do
     NATSStub.drop(stub)
     assert {:error, :disconnected} = Task.await(task, 2_000)
   end
+
+  describe "a message larger than the server's max_payload" do
+    # The stub's INFO says max_payload 1_048_576. The server closes a connection
+    # that sends more, so the client refuses it before sending, on every path,
+    # and counts the header block only when there is one: a plain PUB has none.
+    @max 1_048_576
+
+    test "a request with no headers is measured by its payload alone", %{stub: stub} do
+      name = start_client(stub)
+
+      for size <- [@max, @max - 1, @max - 12] do
+        refute match?(
+                 {:error, {:payload_too_large, _, _}},
+                 Connection.request(name, "nobody.here", :binary.copy("x", size), %{}, 500)
+               ),
+               "a #{size}-byte request without headers was refused"
+      end
+
+      assert {:error, {:payload_too_large, size, @max}} =
+               Connection.request(name, "nobody.here", :binary.copy("x", @max + 1), %{}, 500)
+
+      assert size == @max + 1
+    end
+
+    test "a request with headers counts the header block it sends", %{stub: stub} do
+      name = start_client(stub)
+      headers = %{"Nats-Msg-Id" => "m1"}
+      block = byte_size(OptimalEngine.Storage.NATS.Protocol.header_block(headers))
+
+      refute match?(
+               {:error, {:payload_too_large, _, _}},
+               Connection.request(
+                 name,
+                 "nobody.here",
+                 :binary.copy("x", @max - block),
+                 headers,
+                 500
+               )
+             )
+
+      assert {:error, {:payload_too_large, size, @max}} =
+               Connection.request(
+                 name,
+                 "nobody.here",
+                 :binary.copy("x", @max - block + 1),
+                 headers,
+                 500
+               )
+
+      assert size == @max + 1
+    end
+
+    test "a plain publish and a pull are refused too, and the connection stays up", %{stub: stub} do
+      name = start_client(stub)
+      too_big = :binary.copy("x", @max + 1)
+
+      assert {:error, {:payload_too_large, _, @max}} = Connection.publish(name, "a.b", too_big)
+      assert :ok = Connection.publish(name, "a.b", :binary.copy("x", @max))
+
+      assert {:error, {:payload_too_large, _, @max}} =
+               Connection.pull(name, "$JS.API.CONSUMER.MSG.NEXT.S.c", too_big, 1, 500)
+
+      assert Connection.status(name).state == "connected"
+      assert Connection.status(name).reconnects == 0
+    end
+  end
 end

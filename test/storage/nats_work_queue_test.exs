@@ -320,18 +320,30 @@ defmodule OptimalEngine.Storage.NATSWorkQueueTest do
       assert :sys.get_state(queue).unsent_count == 0
     end
 
-    test "the background publishes kept while NATS is down are capped, oldest dropped first" do
-      state = %{unsent: :queue.new(), unsent_count: 0}
+    test "the background publishes kept while NATS is down are capped, oldest dropped first and counted" do
+      state = %{
+        callback: JobQueue,
+        unsent: :queue.new(),
+        unsent_count: 0,
+        counts: %{unsent_dropped: 0}
+      }
 
-      state =
-        Enum.reduce(1..10_005, state, fn i, state ->
-          WorkQueue.keep_unsent(state, {"t", "p", "id-#{i}"})
+      {state, log} =
+        ExUnit.CaptureLog.with_log(fn ->
+          Enum.reduce(1..10_005, state, fn i, state ->
+            WorkQueue.keep_unsent(state, {"t", "p", "id-#{i}"})
+          end)
         end)
 
       ids = state.unsent |> :queue.to_list() |> Enum.map(&elem(&1, 2))
       assert length(ids) == 10_000
       assert hd(ids) == "id-6"
       assert List.last(ids) == "id-10005"
+      assert state.counts.unsent_dropped == 5
+
+      # One line for the first drop, not one per drop.
+      lines = log |> String.split("\n") |> Enum.filter(&(&1 =~ "kept announcements are full"))
+      assert length(lines) == 1
     end
 
     test "Jobs.enqueue announces to the Engine's queue, and an enqueue with the flow off still works",
