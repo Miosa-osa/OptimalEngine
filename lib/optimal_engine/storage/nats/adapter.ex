@@ -12,6 +12,7 @@ defmodule OptimalEngine.Storage.NATS.Adapter do
   @behaviour OptimalEngine.Storage.Provider
 
   alias OptimalEngine.Storage.NATS
+  alias OptimalEngine.Storage.NATS.Connection
 
   @capabilities ~w(event_stream jobs replication coordination)a
 
@@ -29,8 +30,10 @@ defmodule OptimalEngine.Storage.NATS.Adapter do
       kind: "service",
       role: "transport",
       capabilities: Enum.map(@capabilities, &Atom.to_string/1),
-      operations: ~w(publish stream_create stream_msg_get stream_delete),
-      protocol: "NATS text protocol over TCP, TLS with tls://; JetStream through $JS.API",
+      operations:
+        ~w(publish stream_create stream_update stream_info stream_msg_get stream_delete consumer_create consumer_pull ack nak term),
+      protocol:
+        "NATS text protocol over TCP, TLS with tls://; JetStream through $JS.API; one supervised connection that reconnects with backoff",
       durability: "replayable transport; canonical state stays in the governed ledgers"
     }
   end
@@ -52,9 +55,19 @@ defmodule OptimalEngine.Storage.NATS.Adapter do
       health: Atom.to_string(health),
       lifecycle_state: lifecycle_state(configured, health),
       capabilities: Enum.map(@capabilities, &Atom.to_string/1),
-      tls: tls_configured?()
+      tls: tls_configured?(),
+      client: Connection.status()
     }
   end
+
+  @doc """
+  The Engine's own long-lived client as it is now
+  (`OptimalEngine.Storage.NATS.Connection.status/1`): its state, how often the
+  connection was lost, the last error and the server's version. Never the URL
+  or its credential.
+  """
+  @spec runtime() :: map()
+  def runtime, do: %{client: Connection.status()}
 
   @doc "Provider health from a PING and a JetStream account answer. Never raises."
   @spec health(keyword()) :: OptimalEngine.Storage.Provider.health()

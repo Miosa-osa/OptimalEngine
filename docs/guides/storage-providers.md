@@ -340,6 +340,37 @@ An entry's entity type is free-form, but it may not name a table of the engine o
 The Engine gives each entry its id, and the same key with the same change returns the entry already written, an entry written before these checks included.
 Replication never serves or pushes an entry: see "Storage mutation entries share the ledger" in `docs/guides/replication.md`.
 
+## NATS JetStream
+
+`OPTIMAL_NATS_URL` is `nats://[user:password@|token@]host[:port]`, or `tls://` for TLS with the server's certificate and host name verified against the system's roots.
+The URL carries the credential, so the Engine never logs it, describes it or returns it from the API.
+
+The provider has two halves:
+
+* The probe and the proof (`OptimalEngine.Storage.NATS`) each open a connection of their own: the probe is a PONG and a JetStream account answer, the proof a memory stream created, a message published, read back by sequence, and the stream deleted.
+* The Engine's own client (`OptimalEngine.Storage.NATS.Connection`) is one long-lived connection, started at boot under `OptimalEngine.Storage.NATS.Supervisor` and kept for the life of the Engine.
+  It answers the server's PINGs and sends its own every 30 seconds, and treats two unanswered ones as a dead connection.
+  When the connection goes, every request still waiting is answered at once, and the client reconnects after an exponential backoff with jitter, from half a second up to 30 seconds, without ever giving up.
+  While it is down, every call answers `not_connected` at once: nothing that runs through NATS waits on a server that is not there.
+  Without `OPTIMAL_NATS_URL` it idles as `not_configured`. It reads the URL when it starts, so a changed URL takes a restart.
+
+On that client, `OptimalEngine.Storage.NATS.JetStream` provisions streams (created when missing, left alone when they already hold the settings asked for, updated when one differs) and durable pull consumers with explicit acks, publishes with the stream's acknowledgement and a `Nats-Msg-Id` (a second publish of the same id within the stream's duplicate window is stored once), and pulls messages that are acknowledged, refused for redelivery (`-NAK`, at once or after a delay) or terminated one at a time.
+It needs a server with JetStream enabled, 2.9 or later (the tests run against 2.11).
+
+`GET /api/storage/providers` shows the client under the provider's `runtime.client`: `state` (`connected`, `connecting`, `disconnected`, `not_configured`), `reconnects` (connections lost since the Engine started), `last_error`, `connected_since`, `server` (`version`, `jetstream`) and `pending` (requests waiting on an answer).
+
+```console
+$ curl -s localhost:4200/api/storage/providers/nats_jetstream | jq -c .runtime.client
+{"connected_since":"2026-11-08T10:00:00Z","last_error":null,"pending":0,"reconnects":0,"server":{"jetstream":true,"version":"2.11.17"},"state":"connected"}
+```
+
+The integration tests run the client against a real server and are skipped without one:
+
+```bash
+docker run --rm -d -p 127.0.0.1:4222:4222 nats:2.11 -js
+OPTIMAL_TEST_NATS_URL=nats://127.0.0.1:4222 mix test test/storage/nats_jetstream_integration_test.exs
+```
+
 ## Provider Status
 
 One Engine instance is the default data layer: it holds every store inside it and runs no Postgres, Qdrant, or Redis next to it.
@@ -352,7 +383,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | RocksDB | Wired, opt in | A persistent triple-store mirror of `graph_edges` (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`) | Falls back to ETS when the native library is missing |
 | `s3` (S3-compatible: Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Asset bytes, offsite backups, the probe and the placement reconciler | |
 | `postgres` | Wired, partial | The canonical relational store of a compile-time `OPTIMAL_STORE=postgres` build | Full-text search, replication, app data collections, and the engine's backup routes; moving an existing Engine to it |
-| `nats_jetstream` | Wired | The probe (PONG and a JetStream account answer) and the proof (a stream created, a message published and read back by sequence, the stream deleted) over `OPTIMAL_NATS_URL` | Engine events, jobs and replication do not flow through it yet |
+| `nats_jetstream` | Wired | The probe (PONG and a JetStream account answer), the proof (a stream created, a message published and read back by sequence, the stream deleted), and a supervised JetStream client that reconnects with backoff, over `OPTIMAL_NATS_URL` | Engine events, jobs and replication do not flow through it yet |
 | `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
 | `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`) and the proof (a Parquet file written and read back) | No Engine projection is written to it yet |

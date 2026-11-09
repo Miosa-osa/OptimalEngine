@@ -360,7 +360,18 @@ defmodule OptimalEngine.Storage.Providers do
     |> Map.put(:required_environment, provider.required_env)
     |> Map.put(:optional_environment, provider.optional_env)
     |> Map.put(:missing_environment, missing)
+    |> put_runtime(provider.adapter, adapter_implemented)
   end
+
+  # An adapter that keeps a live client (the NATS connection) reports it as it
+  # is now: connected, reconnecting, or idle without configuration.
+  defp put_runtime(inspected, adapter, true) do
+    if function_exported?(adapter, :runtime, 0),
+      do: Map.put(inspected, :runtime, adapter.runtime()),
+      else: inspected
+  end
+
+  defp put_runtime(inspected, _adapter, _implemented), do: inspected
 
   defp put_selected(inspected, %{id: "postgres", store: store}) do
     inspected

@@ -144,6 +144,9 @@ defmodule OptimalEngine.Application do
       # to each owner's ETS table when it is not (Storage.Shared).
       OptimalEngine.Storage.Valkey.Pool,
 
+      # ── NATS JetStream client and its flows (idle without OPTIMAL_NATS_URL) ─
+      OptimalEngine.Storage.NATS.Supervisor,
+
       # ── HTTP API rate limiter (owns the local ETS bucket table) ──────────
       OptimalEngine.API.RateLimiter,
 

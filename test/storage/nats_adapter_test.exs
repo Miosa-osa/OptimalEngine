@@ -149,6 +149,56 @@ defmodule OptimalEngine.Storage.NATSAdapterTest do
     assert {:error, _} = NATS.round_trip()
   end
 
+  describe "the Engine's own client in the inventory" do
+    alias OptimalEngine.Storage.NATS.Connection
+
+    # The client reads OPTIMAL_NATS_URL when it starts, so a test that points it
+    # somewhere restarts it, and puts it back unconfigured afterwards.
+    defp restart_client do
+      :ok = Supervisor.terminate_child(OptimalEngine.Storage.NATS.Supervisor, Connection)
+      {:ok, _} = Supervisor.restart_child(OptimalEngine.Storage.NATS.Supervisor, Connection)
+    end
+
+    defp wait_for(fun, tries \\ 100) do
+      cond do
+        fun.() -> true
+        tries == 0 -> false
+        true -> Process.sleep(20) && wait_for(fun, tries - 1)
+      end
+    end
+
+    setup do
+      on_exit(fn ->
+        System.delete_env(NATS.env_name())
+        restart_client()
+      end)
+    end
+
+    test "unconfigured, the inventory shows the client idle" do
+      assert {:ok, %{runtime: %{client: %{state: "not_configured", reconnects: 0}}}} =
+               Providers.get("nats_jetstream")
+    end
+
+    test "configured, it shows the client connected, then reconnecting after the server drops it" do
+      {:ok, stub} = NATSStub.start(token: "tok3n")
+      on_exit(fn -> NATSStub.stop(stub) end)
+      point_at(stub, "tok3n@")
+      restart_client()
+
+      assert wait_for(fn -> Connection.status().state == "connected" end)
+      assert {:ok, provider} = Providers.get("nats_jetstream")
+      assert %{state: "connected", server: %{jetstream: true}} = provider.runtime.client
+      refute inspect(provider) =~ "tok3n"
+
+      NATSStub.stop(stub)
+      assert wait_for(fn -> Connection.status().state != "connected" end)
+      assert {:ok, %{runtime: %{client: client}}} = Providers.get("nats_jetstream")
+      assert client.state in ~w(disconnected connecting)
+      assert client.reconnects >= 1
+      assert is_binary(client.last_error)
+    end
+  end
+
   test "a closed port is unreachable" do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listener)
