@@ -188,6 +188,35 @@ defmodule OptimalEngine.Connectors.CredentialVaultTest do
     refute Map.has_key?(OpenBaoStub.secrets(stub), path)
   end
 
+  test "a row that cannot be written leaves no new secret behind in OpenBao", %{
+    stub: stub,
+    id: id
+  } do
+    path = "optimal/connectors/default/#{id}"
+    # A value the row cannot be encoded with fails the write after the
+    # credentials were vaulted.
+    unwritable = %{
+      "workspace_id" => "T01",
+      "channels" => ["C01"],
+      "credentials" => %{"bot_token" => "xoxb-orphan"},
+      "unencodable" => {:not, :json}
+    }
+
+    assert catch_error(Runner.upsert_row(%{id: id, kind: :slack, config: unwritable}))
+    assert {:ok, []} = Store.raw_query("SELECT 1 FROM connectors WHERE id = ?1", [id])
+    refute Map.has_key?(OpenBaoStub.secrets(stub), path)
+
+    # A connector that already has a secret keeps the one its row still names.
+    {:ok, ^id} = register(id)
+    assert OpenBaoStub.secrets(stub)[path] == %{"bot_token" => "xoxb-vaulted"}
+
+    changed = put_in(unwritable, ["credentials"], %{"bot_token" => "xoxb-new"})
+    assert catch_error(Runner.upsert_row(%{id: id, kind: :slack, config: changed}))
+    assert OpenBaoStub.secrets(stub)[path] == %{"bot_token" => "xoxb-vaulted"}
+    assert {:ok, %{status: :success}} = Runner.run(id, adapter: CaptureAdapter, governed: false)
+    assert_received {:init, %{"bot_token" => "xoxb-vaulted"}}
+  end
+
   test "a delete OpenBao refuses keeps the connector, so its secret is never orphaned", %{
     stub: stub,
     id: id

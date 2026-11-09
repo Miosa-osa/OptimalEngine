@@ -779,9 +779,12 @@ defmodule OptimalEngine.Connectors.Runner do
   @spec upsert_row(map()) :: {:ok, String.t()} | {:error, term()}
   def upsert_row(%{id: id, kind: kind, config: config} = attrs)
       when is_binary(id) and is_atom(kind) and is_map(config) do
-    with {:ok, workspace_id} <- row_workspace(id, attrs),
-         {:ok, sanitized} <- validate_and_seal(id, config, attrs) do
-      write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :update)
+    with {:ok, workspace_id} <- row_workspace(id, attrs) do
+      compensating_vault(id, config, attrs, fn ->
+        with {:ok, sanitized} <- validate_and_seal(id, config, attrs) do
+          write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :update)
+        end
+      end)
     end
   end
 
@@ -803,9 +806,85 @@ defmodule OptimalEngine.Connectors.Runner do
   end
 
   defp provision_new_row(id, kind, config, attrs) do
-    with {:ok, workspace_id} <- row_workspace(id, attrs),
-         {:ok, sanitized} <- validate_and_seal(id, config, attrs) do
-      write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :keep)
+    with {:ok, workspace_id} <- row_workspace(id, attrs) do
+      compensating_vault(id, config, attrs, fn ->
+        with {:ok, sanitized} <- validate_and_seal(id, config, attrs) do
+          write_row(id, kind, sanitized, Map.put(attrs, :workspace_id, workspace_id), :keep)
+        end
+      end)
+    end
+  end
+
+  # Credentials bound for OpenBao are vaulted before the row is written. When
+  # anything after that fails (the row write, the reference seal, or a raise),
+  # OpenBao is put back as the row still describes it: the secret the existing
+  # row names is written back, and a secret no row names is deleted. A prior
+  # secret that could not be read is left alone rather than risk deleting what
+  # a row still needs.
+  defp compensating_vault(id, config, attrs, fun) do
+    if vault_bound?(config) do
+      tenant_id = Map.get(attrs, :tenant_id, Tenant.default_id())
+      prior = prior_secret(id, tenant_id)
+
+      try do
+        case fun.() do
+          {:error, _reason} = error ->
+            restore_vault(id, tenant_id, prior)
+            error
+
+          ok ->
+            ok
+        end
+      rescue
+        error ->
+          restore_vault(id, tenant_id, prior)
+          reraise error, __STACKTRACE__
+      end
+    else
+      fun.()
+    end
+  end
+
+  defp prior_secret(id, tenant_id) do
+    case Store.raw_query("SELECT config FROM connectors WHERE id = ?1 AND tenant_id = ?2", [
+           id,
+           tenant_id
+         ]) do
+      {:ok, [[raw]]} ->
+        with {:ok, row_config} when is_map(row_config) <- Jason.decode(raw || ""),
+             true <- CredentialVault.stored?(row_config) do
+          case OptimalEngine.Storage.OpenBao.kv_read(CredentialVault.path(tenant_id, id)) do
+            {:ok, data} -> {:restore, data}
+            {:error, :not_found} -> :none
+            {:error, _reason} -> :unknown
+          end
+        else
+          _not_vaulted -> :none
+        end
+
+      _no_row ->
+        :none
+    end
+  end
+
+  defp restore_vault(id, tenant_id, prior) do
+    path = CredentialVault.path(tenant_id, id)
+
+    result =
+      case prior do
+        {:restore, data} -> OptimalEngine.Storage.OpenBao.kv_write(path, data)
+        :none -> CredentialVault.delete(tenant_id, id)
+        :unknown -> :ok
+      end
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Connector #{id}: the write failed after its credentials reached OpenBao, and OpenBao could not be put back: #{OptimalEngine.Secrets.describe(reason)}."
+        )
     end
   end
 

@@ -550,6 +550,7 @@ Restoring an Engine backup without that OpenBao gives connectors that fail every
 The path comes from the row's own tenant and id, never from its config.
 A sync reads the secret just before the adapter starts, for that cycle only; OpenBao sealed or unreachable fails the run with `credentials_unavailable` and the reason, before any adapter code runs.
 A write OpenBao refuses is refused (`503 openbao_sealed`, `openbao_unreachable`, ...), and no row is left claiming credentials.
+A write that fails after the credentials reached OpenBao (the row write, or anything after the vault write) puts OpenBao back as the row still describes it: the secret an existing row names is written back, and a secret no row names is deleted.
 Removing a connector's credentials or deleting the connector deletes the secret; a delete OpenBao refuses keeps the connector, so no secret outlives it unseen.
 Rows sealed with `CONNECTOR_KEY` before the opt-in keep being read the way they were written, until they are migrated.
 
