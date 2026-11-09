@@ -35,7 +35,7 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   require Logger
 
   alias OptimalEngine.Connectors.{PullScheduler, Rows}
-  alias OptimalEngine.Signal
+  alias OptimalEngine.{Signal, Store}
   alias OptimalEngine.Storage.NATS.{Protocol, WorkQueue}
 
   @doc false
@@ -80,6 +80,7 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
              "tenant_id" => tenant,
              "connector_id" => connector,
              "workspace_id" => Map.get(scope, :workspace_id),
+             "run_id" => Map.get(scope, :run_id),
              "signal" => encode_signal(signal)
            }),
          {:ok, _ack} <- WorkQueue.publish(server, token, payload, msg_id(connector, signal)) do
@@ -125,10 +126,27 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   @impl WorkQueue
   def consumer, do: %{ack_wait_ms: 600_000, max_deliver: -1}
 
+  # Ten deliveries that fail (about seventeen minutes of backoff), then the
+  # dead letters. `:dead_letter_after` overrides it (tests).
   @impl WorkQueue
-  def handle_message(message, _context) do
+  def dead_letter_after(context), do: Map.get(context, :dead_letter_after, 10)
+
+  # The pull that queued it counts it, as it counts a refusal in process.
+  @impl WorkQueue
+  def on_dead_letter(message, _error, _context) do
+    with {:ok, %{"run_id" => run_id}} when is_integer(run_id) <- Jason.decode(message.payload) do
+      record_run(run_id, "dead_lettered")
+    end
+
+    :ok
+  end
+
+  @impl WorkQueue
+  def handle_message(message, context) do
     %{"tenant_id" => tenant, "connector_id" => connector, "signal" => encoded} =
-      Jason.decode!(message.payload)
+      decoded = Jason.decode!(message.payload)
+
+    ingest = Map.get(context, :ingest, &PullScheduler.ingest_signal/2)
 
     case Rows.get(tenant, connector) do
       {:ok, row} ->
@@ -140,16 +158,12 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
           config: row.config || %{}
         }
 
-        case PullScheduler.ingest_signal(decode_signal(encoded), scope) do
+        case ingest.(decode_signal(encoded), scope) do
           :ok ->
             :ack
 
           :refused ->
-            Logger.warning(
-              "[NATS] intake refused a queued Signal of connector #{inspect(connector)}"
-            )
-
-            :term
+            refused(decoded["run_id"], connector, context)
         end
 
       {:error, :not_found} ->
@@ -158,6 +172,66 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
         )
 
         :term
+    end
+  end
+
+  # A refusal is counted in the run row of the pull that queued it. That row is
+  # written when the pull ends, so while the pull is still running the count
+  # waits: the message comes back shortly instead of the count being lost.
+  defp refused(run_id, connector, context) when is_integer(run_id) do
+    case record_run(run_id, "queue_refused") do
+      :running ->
+        {:retry, Map.get(context, :retry_ms, 2_000)}
+
+      _recorded_or_gone ->
+        Logger.warning("[NATS] intake refused a queued Signal of connector #{inspect(connector)}")
+        :term
+    end
+  end
+
+  defp refused(_run_id, connector, _context) do
+    Logger.warning("[NATS] intake refused a queued Signal of connector #{inspect(connector)}")
+    :term
+  end
+
+  # One more error on the run, and the count under `key` in its error detail.
+  @doc false
+  @spec record_run(integer(), String.t()) :: :recorded | :running | :no_run
+  def record_run(run_id, key) do
+    {:ok, outcome} =
+      Store.transaction(fn txn ->
+        case Store.txn_query(txn, "SELECT status, error_detail FROM connector_runs WHERE id = ?1", [
+               run_id
+             ]) do
+          {:ok, []} ->
+            {:ok, :no_run}
+
+          {:ok, [["running", _detail]]} ->
+            {:ok, :running}
+
+          {:ok, [[_status, detail]]} ->
+            detail = detail |> detail_map() |> Map.update(key, 1, &(&1 + 1))
+
+            {:ok, _} =
+              Store.txn_execute(
+                txn,
+                "UPDATE connector_runs SET errors_encountered = errors_encountered + 1, error_detail = ?2 WHERE id = ?1",
+                [run_id, Jason.encode!(detail)]
+              )
+
+            {:ok, :recorded}
+        end
+      end)
+
+    outcome
+  end
+
+  defp detail_map(nil), do: %{}
+
+  defp detail_map(text) do
+    case Jason.decode(text) do
+      {:ok, %{} = map} -> map
+      _ -> %{"detail" => text}
     end
   end
 

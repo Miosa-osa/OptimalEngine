@@ -55,6 +55,8 @@ These keep erased data until they are pruned, replaced or removed by an operator
 | Other hard links to a signal file (a backup tool that links files makes them) | The text of the file | Until an operator removes the other names; the Engine removes or rewrites its own name and counts the file in the log |
 | Objects in an object store, when an erasure or a retention delete does not reach them | The bytes of assets stored there | Until the objects are deleted: an archive and a move delete none (the workspace's assets on the Engine it moved to still point at them), and neither does an erasure when no object store is configured, when the asset's URI names another bucket or a key outside the asset's workspace prefix, or when another asset still uses the object |
 | Replication ledgers (`sync_capture`, `sync_mutations`) | The rows of a change, in the changes' payloads | Append-only |
+| The NATS ledger stream (`OPTIMAL_NATS_FLOWS=ledger`), while NATS is down | The erased rows' earlier messages | Until NATS is back: the erasure's deletes then purge each row's subject, and the report's `nats_ledger` says `pending: true` meanwhile (see [Storage Providers](storage-providers.md#what-the-engine-forgets-leaves-the-stream)) |
+| What a NATS subscriber already read | Whatever it kept | The subscriber's own retention |
 | Shared canonical entities and aliases | Names that more than one context mention | Until a steward removes them |
 | The legacy `edges` table, kept unread for one release after `graph_edges` replaced it | Context and entity ids, no text | Until the table is dropped; no path reads or writes it |
 

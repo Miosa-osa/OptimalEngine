@@ -75,6 +75,7 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
   end
 
   defp subject(ctx), do: "optimal.ledger.#{Protocol.token(ctx.tenant)}.#{Protocol.token(ctx.ws)}"
+  defp in_workspace?(ctx, message), do: String.starts_with?(message.subject, subject(ctx) <> ".")
 
   defp wait_for(fun, tries \\ 100) do
     cond do
@@ -92,7 +93,7 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     assert published >= 3
 
     messages = NATSStub.messages(ctx.stub, "OPTIMAL_LEDGER")
-    assert Enum.all?(messages, &(&1.subject == subject(ctx)))
+    assert Enum.all?(messages, &in_workspace?(ctx, &1))
 
     sequences = Enum.map(messages, &String.to_integer(&1.headers["Optimal-Ledger-Seq"]))
     assert sequences == Enum.sort(sequences)

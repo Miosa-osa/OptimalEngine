@@ -12,7 +12,7 @@ defmodule OptimalEngine.Storage.NATS.Adapter do
   @behaviour OptimalEngine.Storage.Provider
 
   alias OptimalEngine.Storage.NATS
-  alias OptimalEngine.Storage.NATS.{Connection, IntakeQueue, JobQueue, LedgerPublisher}
+  alias OptimalEngine.Storage.NATS.{Connection, DeadLetters, IntakeQueue, JobQueue, LedgerPublisher}
 
   @capabilities ~w(event_stream jobs replication coordination)a
 
@@ -76,8 +76,20 @@ defmodule OptimalEngine.Storage.NATS.Adapter do
         ledger: LedgerPublisher.status(),
         jobs: JobQueue.status(),
         intake: IntakeQueue.status()
-      }
+      },
+      dead_letters: dead_letters()
     }
+  end
+
+  # Counted only when a flow that dead-letters is on: the inventory does not
+  # reach for NATS for nothing.
+  defp dead_letters do
+    with true <- "intake" in NATS.flows(),
+         {:ok, namespace} <- NATS.namespace() do
+      DeadLetters.summary(Connection, namespace)
+    else
+      _ -> %{state: "off"}
+    end
   end
 
   @doc """

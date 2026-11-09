@@ -1011,6 +1011,30 @@ defmodule OptimalEngine.API.Router do
   # the trusted local operator on an Engine that requires no key.
   defp engine_operator?(conn), do: OptimalEngine.API.Actor.engine_operator?(conn)
 
+  defp operator_only(conn, why) do
+    conn
+    |> put_status(403)
+    |> json(%{
+      error: "operator_only",
+      message: "#{why}; it needs an admin key of the default tenant whose workspace scope is *"
+    })
+  end
+
+  defp nats_conn,
+    do:
+      Application.get_env(:optimal_engine, :nats_connection, OptimalEngine.Storage.NATS.Connection)
+
+  defp nats_namespace do
+    case OptimalEngine.Storage.NATS.namespace() do
+      {:ok, namespace} -> namespace
+      {:error, _} -> "optimal"
+    end
+  end
+
+  # The reason is the client's own term (not_connected, a JetStream error), never the URL.
+  defp nats_unavailable(conn, reason),
+    do: conn |> put_status(503) |> json(%{error: "nats_unavailable", reason: inspect(reason)})
+
   # Contexts that share an optimal:// URI (OptimalEngine.UriRepair). GET is the
   # plan and writes nothing: it lists every context that would get a new
   # address, what happens to the kept file and why, and the records that name
@@ -1144,6 +1168,45 @@ defmodule OptimalEngine.API.Router do
         message:
           "the Engine log covers every tenant; it needs an admin key of the default tenant whose workspace scope is *"
       })
+    end
+  end
+
+  # NATS dead letters (OptimalEngine.Storage.NATS.DeadLetters): work-queue items
+  # whose handling kept failing, from every tenant, so only the Engine operator
+  # lists or requeues them. `flow` (`intake`, `jobs`) narrows the list, `limit`
+  # (default 50) and `after` (a sequence) page it. A letter is listed without
+  # its payload. Requeueing puts it back on its work queue and removes it; 404
+  # when there is no such letter, 503 while NATS is not reachable.
+  get "/api/maintenance/nats/dead-letters" do
+    if engine_operator?(conn) do
+      opts =
+        [
+          flow: query_param(conn, "flow", nil),
+          limit: conn |> query_param("limit", "50") |> parse_int(50),
+          after: conn |> query_param("after", "0") |> parse_int(0)
+        ]
+        |> Keyword.reject(fn {_key, value} -> is_nil(value) end)
+
+      case OptimalEngine.Storage.NATS.DeadLetters.list(nats_conn(), nats_namespace(), opts) do
+        {:ok, letters} -> json(conn, %{dead_letters: letters, count: length(letters)})
+        {:error, reason} -> nats_unavailable(conn, reason)
+      end
+    else
+      operator_only(conn, "the NATS dead letters hold every tenant's queued items")
+    end
+  end
+
+  post "/api/maintenance/nats/dead-letters/:seq/requeue" do
+    with true <- engine_operator?(conn),
+         {seq, ""} when seq > 0 <- Integer.parse(seq) do
+      case OptimalEngine.Storage.NATS.DeadLetters.requeue(nats_conn(), nats_namespace(), seq) do
+        {:ok, result} -> json(conn, result)
+        {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "dead_letter_not_found"})
+        {:error, reason} -> nats_unavailable(conn, reason)
+      end
+    else
+      false -> operator_only(conn, "the NATS dead letters hold every tenant's queued items")
+      _ -> conn |> put_status(400) |> json(%{error: "invalid_sequence"})
     end
   end
 

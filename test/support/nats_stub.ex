@@ -40,7 +40,18 @@ defmodule OptimalEngine.TestSupport.NATSStub do
     }
 
     spawn(fn -> accept(listener, agent, settings) end)
-    {:ok, %{port: port, agent: agent, listener: listener}}
+    {:ok, %{port: port, agent: agent, listener: listener, settings: settings}}
+  end
+
+  @doc """
+  Listens again on `port` with the streams and consumers `stub` held, as a
+  server that restarts with its storage. Close the old listener first.
+  """
+  @spec restart(map(), :inet.port_number()) :: {:ok, map()}
+  def restart(%{agent: agent, settings: settings}, port) do
+    {:ok, listener} = :gen_tcp.listen(port, [:binary, active: false, reuseaddr: true])
+    spawn(fn -> accept(listener, agent, settings) end)
+    {:ok, %{port: port, agent: agent, listener: listener, settings: settings}}
   end
 
   @doc "Stops the listener and closes every connection it accepted."
@@ -360,10 +371,23 @@ defmodule OptimalEngine.TestSupport.NATSStub do
     end)
   end
 
-  defp answer("$JS.API.STREAM.INFO." <> name, _headers, _payload, agent, _settings) do
+  defp answer("$JS.API.STREAM.INFO." <> name, _headers, payload, agent, _settings) do
+    filter = if payload in ["", nil], do: nil, else: Jason.decode!(payload)["subjects_filter"]
+
     case Agent.get(agent, &get_in(&1, [:streams, name])) do
-      nil -> {:json, js_error(404, 10_059, "stream not found")}
-      stream -> {:json, stream_info(stream)}
+      nil ->
+        {:json, js_error(404, 10_059, "stream not found")}
+
+      stream when is_nil(filter) ->
+        {:json, stream_info(stream)}
+
+      stream ->
+        subjects =
+          stream.messages
+          |> Enum.filter(&covers?([filter], &1.subject))
+          |> Enum.frequencies_by(& &1.subject)
+
+        {:json, put_in(stream_info(stream), [:state, :subjects], subjects)}
     end
   end
 
@@ -374,11 +398,14 @@ defmodule OptimalEngine.TestSupport.NATSStub do
       %{messages: messages} ->
         found =
           case request do
+            %{"seq" => seq, "next_by_subj" => subject} ->
+              Enum.find(messages, &(&1.seq >= seq and covers?([subject], &1.subject)))
+
             %{"seq" => seq} ->
               Enum.find(messages, &(&1.seq == seq))
 
             %{"last_by_subj" => subject} ->
-              messages |> Enum.filter(&(&1.subject == subject)) |> List.last()
+              messages |> Enum.filter(&covers?([subject], &1.subject)) |> List.last()
           end
 
         case found do
@@ -402,6 +429,44 @@ defmodule OptimalEngine.TestSupport.NATSStub do
       nil ->
         {:json, js_error(404, 10_059, "stream not found")}
     end
+  end
+
+  # A purge, of the whole stream or of the subjects a filter covers.
+  defp answer("$JS.API.STREAM.PURGE." <> name, _headers, payload, agent, _settings) do
+    filter = if payload == "", do: nil, else: Jason.decode!(payload)["filter"]
+
+    Agent.get_and_update(agent, fn state ->
+      case state.streams[name] do
+        nil ->
+          {{:json, js_error(404, 10_059, "stream not found")}, state}
+
+        stream ->
+          {gone, kept} =
+            Enum.split_with(stream.messages, &(is_nil(filter) or covers?([filter], &1.subject)))
+
+          stream = %{stream | messages: kept}
+          {{:json, %{success: true, purged: length(gone)}}, put_in(state, [:streams, name], stream)}
+      end
+    end)
+  end
+
+  defp answer("$JS.API.STREAM.MSG.DELETE." <> name, _headers, payload, agent, _settings) do
+    %{"seq" => seq} = Jason.decode!(payload)
+
+    Agent.get_and_update(agent, fn state ->
+      case state.streams[name] do
+        %{messages: messages} = stream ->
+          if Enum.any?(messages, &(&1.seq == seq)) do
+            stream = %{stream | messages: Enum.reject(messages, &(&1.seq == seq))}
+            {{:json, %{success: true}}, put_in(state, [:streams, name], stream)}
+          else
+            {{:json, js_error(400, 10_057, "no message found")}, state}
+          end
+
+        nil ->
+          {{:json, js_error(404, 10_059, "stream not found")}, state}
+      end
+    end)
   end
 
   # `delete: :refused` answers as a server whose permissions do not allow it.
@@ -475,12 +540,14 @@ defmodule OptimalEngine.TestSupport.NATSStub do
   end
 
   defp covers?(patterns, subject) do
-    Enum.any?(patterns, fn pattern ->
-      if String.ends_with?(pattern, ".>"),
-        do: String.starts_with?(subject, String.trim_trailing(pattern, ">")),
-        else: pattern == subject
-    end)
+    Enum.any?(patterns, &matches?(String.split(&1, "."), String.split(subject, ".")))
   end
+
+  defp matches?([">"], [_ | _]), do: true
+  defp matches?(["*" | p], [_ | s]), do: matches?(p, s)
+  defp matches?([t | p], [t | s]), do: matches?(p, s)
+  defp matches?([], []), do: true
+  defp matches?(_pattern, _subject), do: false
 
   defp put_hdrs(message, headers) when map_size(headers) == 0, do: message
 

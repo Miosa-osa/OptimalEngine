@@ -260,7 +260,7 @@ defmodule OptimalEngine.Connectors.Runner do
 
   defp finalize({:ok, signals, next_cursor, payloads}, row, run_id, opts) do
     sink = Keyword.get(opts, :signal_sink, &default_sink/1)
-    refused = refused_count(invoke_sink(sink, signals, row))
+    refused = refused_count(invoke_sink(sink, signals, row, run_id))
     %{assets: assets, errors: asset_errors} = preserve_payload_assets(row, payloads, opts)
     errors = length(asset_errors) + refused
 
@@ -721,17 +721,20 @@ defmodule OptimalEngine.Connectors.Runner do
   # Sinks come in two arities: legacy arity-1 `(signals)`, and arity-2
   # `(signals, scope)` where scope carries the connector's workspace so
   # downstream ingest attributes the signals to the right workspace.
-  defp invoke_sink(sink, signals, row) when is_function(sink, 2) do
+  # `run_id` names the `connector_runs` row, so a sink that queues the Signals
+  # (the NATS intake queue) can count a later refusal in it.
+  defp invoke_sink(sink, signals, row, run_id) when is_function(sink, 2) do
     sink.(signals, %{
       workspace_id: row.workspace_id,
       tenant_id: row.tenant_id,
       connector_id: row.id,
       kind: row.kind,
-      config: row.config
+      config: row.config,
+      run_id: run_id
     })
   end
 
-  defp invoke_sink(sink, signals, _row) when is_function(sink, 1) do
+  defp invoke_sink(sink, signals, _row, _run_id) when is_function(sink, 1) do
     sink.(signals)
   end
 

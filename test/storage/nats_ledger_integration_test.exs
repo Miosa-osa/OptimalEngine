@@ -108,7 +108,7 @@ defmodule OptimalEngine.Storage.NATSLedgerIntegrationTest do
     assert %{state: "caught_up", workspaces: [%{backlog: 0}]} = LedgerPublisher.status(second)
 
     # Read the stream back through a durable consumer, as a subscriber would.
-    subject = "#{ctx.namespace}.ledger.#{Protocol.token(ctx.tenant)}.#{Protocol.token(ctx.ws)}"
+    subject = "#{ctx.namespace}.ledger.#{Protocol.token(ctx.tenant)}.#{Protocol.token(ctx.ws)}.>"
 
     {:ok, _} =
       JetStream.ensure_consumer(ctx.conn, ctx.stream, %{

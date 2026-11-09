@@ -793,6 +793,8 @@ defmodule OptimalEngine.Workspace do
            [id]
          ) do
       {:ok, _} ->
+        forget_in_nats(id)
+
         case Cache.purge_workspace(id, :archive) do
           {:ok, _purged} -> :ok
           {:error, cause} -> {:error, {:cache_purge_failed, Cache.reason(cause)}}
@@ -801,6 +803,27 @@ defmodule OptimalEngine.Workspace do
       other ->
         other
     end
+  end
+
+  # Its messages on the NATS ledger stream are purged (or the purge recorded
+  # until NATS is reachable); off without the `ledger` flow. Never fails the
+  # archive.
+  defp forget_in_nats(id) do
+    with {:ok, [[tenant]]} <-
+           Store.raw_query("SELECT tenant_id FROM workspaces WHERE id = ?1", [id]) do
+      publisher =
+        Application.get_env(
+          :optimal_engine,
+          :nats_ledger_publisher,
+          OptimalEngine.Storage.NATS.LedgerPublisher
+        )
+
+      OptimalEngine.Storage.NATS.LedgerPublisher.forget_workspace(publisher, tenant, id, "archived")
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # ── Membership ──────────────────────────────────────────────────────────
