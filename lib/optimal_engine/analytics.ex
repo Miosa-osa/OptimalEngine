@@ -33,6 +33,8 @@ defmodule OptimalEngine.Analytics do
   alias OptimalEngine.Telemetry
   alias OptimalEngine.Telemetry.History
 
+  require Logger
+
   @datasets ~w(metrics sync_runs ledger usage)
   @buckets ~w(hour day week month)
   @default_limit 200
@@ -192,8 +194,10 @@ defmodule OptimalEngine.Analytics do
 
   Only a definite answer removes a directory: no such workspace, or one
   that is not active. A lookup that fails (the store busy, a PostgreSQL
-  blip) is no verdict, and the directory is kept for the next prune.
-  Returns how many directories went and how many were skipped. `:lookup`
+  blip) is no verdict, and the directory is kept for the next prune. A store
+  that does not hold the default workspace active (a fresh or restored
+  database pointed at an old `OPTIMAL_ANALYTICS_PATH`) prunes nothing:
+  `{:error, :no_active_workspace}`, with a warning. Returns how many directories went and how many were skipped. `:lookup`
   replaces the store lookup (tests).
   """
   @spec prune_removed(keyword()) ::
@@ -201,7 +205,8 @@ defmodule OptimalEngine.Analytics do
   def prune_removed(opts \\ []) do
     lookup = Keyword.get(opts, :lookup, &workspace_state/1)
 
-    with {:ok, config} <- DuckDB.config() do
+    with {:ok, config} <- DuckDB.config(),
+         :ok <- knows_a_workspace(lookup) do
       root = Path.join(Path.expand(config.path), "workspaces")
 
       names =
@@ -233,6 +238,24 @@ defmodule OptimalEngine.Analytics do
     else
       {:error, :not_configured} -> {:ok, %{removed: 0, skipped: 0}}
       other -> other
+    end
+  end
+
+  # The default workspace always exists. A store that does not hold it active
+  # is not the one these files were exported from (a fresh or restored database
+  # pointed at an old OPTIMAL_ANALYTICS_PATH), and would read every workspace
+  # as removed: nothing is pruned.
+  defp knows_a_workspace(lookup) do
+    case lookup.(OptimalEngine.Workspace.default_id()) do
+      {:ok, :active} ->
+        :ok
+
+      other ->
+        Logger.warning(
+          "[Analytics] prune skipped: the store holds no active workspace, not even the default one (#{inspect(other)})"
+        )
+
+        {:error, :no_active_workspace}
     end
   end
 

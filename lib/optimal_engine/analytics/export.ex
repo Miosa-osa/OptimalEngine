@@ -142,8 +142,19 @@ defmodule OptimalEngine.Analytics.Export do
         end)
 
       manifest = Map.merge(manifest_scope, %{exported_at: exported_at, datasets: datasets})
-      :ok = AtomicFile.write(Path.join(dir, Analytics.manifest_name()), Jason.encode!(manifest))
-      {:ok, %{path: dir, exported_at: exported_at, datasets: datasets}}
+
+      # A purge beside the export may have removed the directory by now.
+      case AtomicFile.write(Path.join(dir, Analytics.manifest_name()), Jason.encode!(manifest)) do
+        :ok ->
+          {:ok, %{path: dir, exported_at: exported_at, datasets: datasets}}
+
+        {:error, reason} ->
+          Logger.warning(
+            "[Analytics] export of #{manifest_scope[:workspace_id] || "the Engine"} could not write its manifest: #{inspect(reason)}"
+          )
+
+          {:error, {:export_failed, {:manifest, reason}}}
+      end
     else
       Logger.warning(
         "[Analytics] export of #{manifest_scope[:workspace_id] || "the Engine"} failed for #{Enum.join(Map.keys(failed), ", ")}"

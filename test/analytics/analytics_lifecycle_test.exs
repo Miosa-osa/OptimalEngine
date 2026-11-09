@@ -252,11 +252,33 @@ defmodule OptimalEngine.AnalyticsLifecycleTest do
       File.mkdir_p!(orphan)
 
       # The store busy or a PostgreSQL blip: no answer is no verdict.
-      failing = fn _id -> {:error, :busy} end
+      failing = fn
+        "default" -> {:ok, :active}
+        _id -> {:error, :busy}
+      end
+
       assert {:ok, %{removed: 0, skipped: skipped}} = Analytics.prune_removed(lookup: failing)
       assert skipped >= 2
       assert File.regular?(Path.join(dir, "metrics.parquet"))
       assert File.dir?(orphan)
+    end
+
+    test "a store that knows no active workspace prunes nothing", ctx do
+      dir = Analytics.workspace_dir(ctx.root, workspace(ctx, "restored"))
+      File.mkdir_p!(dir)
+      File.write!(Path.join(dir, "metrics.parquet"), "x")
+
+      # A fresh or restored database pointed at an old OPTIMAL_ANALYTICS_PATH:
+      # every workspace reads as absent, the default one included.
+      empty = fn _id -> {:ok, :absent} end
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :no_active_workspace} = Analytics.prune_removed(lookup: empty)
+        end)
+
+      assert log =~ "no active workspace"
+      assert File.regular?(Path.join(dir, "metrics.parquet"))
     end
 
     test "the prune runs when the export cannot", ctx do
@@ -354,6 +376,26 @@ defmodule OptimalEngine.AnalyticsLifecycleTest do
       on_exit(fn -> System.put_env("PATH", path) end)
 
       assert {:error, {:export_failed, _}} = Export.run(ctx.tenant, ws)
+    end
+
+    test "an export whose manifest cannot be written fails, and does not raise", ctx do
+      ws = workspace(ctx, "no-manifest")
+      sample(ctx.tenant, ws, "x.latency")
+      dir = Analytics.workspace_dir(ctx.root, ws)
+
+      # The datasets land, and the manifest cannot: its path is a directory, as
+      # good as a directory a purge removed between the two.
+      File.mkdir_p!(Path.join([dir, Analytics.manifest_name(), "held"]))
+
+      assert {:error, {:export_failed, {:manifest, _reason}}} = Export.run(ctx.tenant, ws)
+    end
+
+    test "the Engine export whose manifest cannot be written fails, and does not raise", ctx do
+      dir = Analytics.engine_dir(ctx.root)
+      File.mkdir_p!(Path.join([dir, Analytics.manifest_name(), "held"]))
+      on_exit(fn -> File.rm_rf(Path.join(dir, Analytics.manifest_name())) end)
+
+      assert {:error, {:export_failed, {:manifest, _reason}}} = Export.run_engine()
     end
   end
 
