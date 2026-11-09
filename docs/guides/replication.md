@@ -5,7 +5,7 @@ There is never more than one writer on one data directory.
 
 ## How changes are captured
 
-Enabling a workspace (`POST /api/sync/enable {"workspace"}`) installs SQLite triggers on every table that carries a `workspace_id` column.
+Enabling a workspace (`POST /api/sync/enable {"workspace"}`) installs capture triggers on every table that carries a `workspace_id` column: SQLite triggers on a SQLite store, PL/pgSQL triggers that record the same rows on a PostgreSQL store (see Replication in `docs/guides/postgres-provider.md`).
 Every create, update, and delete of that workspace's rows is appended to `sync_capture` in the same transaction as the write, so no write path can skip it.
 The Engine seals captured changes into the ordered `sync_mutations` ledger with a SHA-256 of the payload, an idempotency key, and its replica id.
 BLOB values (embeddings) travel as hex, so vectors are copied, not recomputed.

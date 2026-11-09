@@ -8,6 +8,10 @@ defmodule OptimalEngine.Sync.SchedulerRetryTest do
 
   use ExUnit.Case, async: false
 
+  # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+  # test/sync/postgres_capture_test.exs.
+  @moduletag :sqlite_store
+
   alias OptimalEngine.Store
   alias OptimalEngine.Sync.Capture
 

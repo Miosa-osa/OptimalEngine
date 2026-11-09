@@ -374,8 +374,6 @@ defmodule OptimalEngine.Storage.PolicyStore do
   defp validate_entity_type_text(type) when is_binary(type), do: :ok
   defp validate_entity_type_text(_type), do: {:error, :invalid_entity_type}
 
-  # A table name is what replication and the gate read rows by; SQLite matches
-  # table names without regard to case.
   defp validate_entity_type(type) do
     cond do
       OptimalEngine.Store.Catalog.table_exists?(type, case_insensitive: true) ->

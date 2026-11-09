@@ -8,7 +8,7 @@
 # (test/support/postgres_writer.ex), while both publish policy packs for one
 # scope. A third process then checks that nothing was lost, that every pack
 # took its own version, that full-text search found what each engine wrote and
-# that replication was refused by name, and
+# that replication could be enabled on each engine, and
 # that the embedded SQLite store, given the same writes, answers 20 queries
 # exactly as PostgreSQL does.
 #

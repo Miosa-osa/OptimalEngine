@@ -31,15 +31,14 @@ defmodule OptimalEngine.Store.Postgres do
   `OptimalEngine.Store.Postgres.Connection` for how a transaction that
   PostgreSQL aborts is run again.
 
-  ## Features not on PostgreSQL
+  ## SQLite-only statements
 
-  Replication and the statements that use SQLite's catalog or `rowid` outside
-  their ported call sites are not on PostgreSQL yet; SQLite's JSON, date and
-  text functions run as PostgreSQL functions
-  (`OptimalEngine.Store.Postgres.SQLiteFunctions`)
-  (`OptimalEngine.Storage.Postgres.unavailable/0`). Each is refused by name
-  when used. A database that holds replication data stops the store from
-  starting, rather than letting it run without replicating.
+  Every feature of the SQLite store runs here through statements of its own
+  (`OptimalEngine.Storage.Postgres.ported/0`); SQLite's JSON, date and text
+  functions run as PostgreSQL functions
+  (`OptimalEngine.Store.Postgres.SQLiteFunctions`). A statement only SQLite
+  can run (an FTS5 `MATCH`, `PRAGMA`, `INSERT OR REPLACE`, SQLite DDL) is
+  refused by name when it reaches this store.
 
   ## Differences from the SQLite store
 
@@ -166,32 +165,8 @@ defmodule OptimalEngine.Store.Postgres do
   defp ready(schema) do
     with {:ok, report} <- Schema.sync(@pool, schema: schema),
          :ok <- FullText.ensure(@pool),
-         :ok <- nothing_unsupported_in_use(),
+         :ok <- OptimalEngine.Store.Postgres.SqliteJson.ensure(@pool),
          do: {:ok, report}
-  end
-
-  # Data of a feature this store cannot run (`Storage.Postgres.unavailable/0`)
-  # means an engine moved here would silently stop replicating; such an engine
-  # does not start.
-  @in_use [
-    {"replication",
-     "SELECT 1 FROM sync_workspaces UNION ALL SELECT 1 FROM sync_peers WHERE status <> 'disabled'"}
-  ]
-
-  defp nothing_unsupported_in_use do
-    @in_use
-    |> Enum.reduce_while([], fn {feature, sql}, in_use ->
-      case native("SELECT EXISTS (#{sql})", []) do
-        {:ok, [[0]]} -> {:cont, in_use}
-        {:ok, [[1]]} -> {:cont, in_use ++ [feature]}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-    |> case do
-      [] -> :ok
-      {:error, reason} -> {:error, reason}
-      in_use -> {:error, {:unsupported_in_use, in_use}}
-    end
   end
 
   @impl GenServer

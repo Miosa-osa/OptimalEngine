@@ -11,7 +11,7 @@ defmodule OptimalEngine.Store.Postgres.UnavailableTest do
   alias OptimalEngine.Store.Postgres.{Connection, Schema}
   alias OptimalEngine.Test.PostgresStore
 
-  @features ~w(replication runtime_schema_and_transactions)
+  @features ~w(runtime_schema_and_transactions)
 
   # Where the PostgreSQL store and its dialect refuse a statement or a feature.
   @refusing ~w(lib/optimal_engine/store/dialect.ex lib/optimal_engine/store/postgres/connection.ex
@@ -80,16 +80,15 @@ defmodule OptimalEngine.Store.Postgres.UnavailableTest do
       released()
     end
 
-    test "does not start with replication enabled", %{schema: schema, pool: pool} do
+    test "starts with replication enabled, which it serves", %{schema: schema, pool: pool} do
       {:ok, _} =
         Connection.query(
           pool,
           "INSERT INTO sync_workspaces (tenant_id, workspace_id, enabled_by) VALUES ('default', 'default', 'test')"
         )
 
-      assert {:error, {:postgres_store_failed, {:unsupported_in_use, ["replication"]}}} =
-               start_store(schema)
-
+      assert {:ok, store} = start_store(schema)
+      GenServer.stop(store)
       released()
     end
 

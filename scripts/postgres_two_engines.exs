@@ -23,10 +23,9 @@ defmodule ProofTwoEngines do
   # own version.
   @packs 10
 
-  # What the PostgreSQL store does not have yet is refused by name.
-  @refusals %{
-    replication: {:error, {:unsupported, "replication is not available on the PostgreSQL store"}}
-  }
+  # Replication works on the PostgreSQL store: enabling it captures the
+  # workspace's writes from then on (OptimalEngine.Sync.Postgres).
+  @refusals %{replication: :enabled}
 
   def main(["setup"]) do
     start_stores(sqlite: false)
@@ -122,7 +121,7 @@ defmodule ProofTwoEngines do
        Enum.all?(reports, &(&1.publish_errors == [])) and packs_versioned?(pg, workspace)},
       {"each engine's full-text search finds its own contexts",
        Enum.all?(reports, &(&1.found == {:ok, true}))},
-      {"replication is refused by name", Enum.all?(reports, &(&1.refused == @refusals))}
+      {"replication can be enabled on each engine", Enum.all?(reports, &(&1.refused == @refusals))}
     ]
 
     :ok = PostgresWriter.replay(OptimalEngine.Store.SQLite, pg, workspace, @rounds)
@@ -171,7 +170,11 @@ defmodule ProofTwoEngines do
 
   defp refused(writer) do
     %{
-      replication: OptimalEngine.Sync.enable("default", workspace(), "engine-#{writer}")
+      replication:
+        case OptimalEngine.Sync.enable("default", workspace(), "engine-#{writer}") do
+          {:ok, %{workspace_id: _}} -> :enabled
+          other -> other
+        end
     }
   end
 

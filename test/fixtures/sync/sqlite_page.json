@@ -1,0 +1,416 @@
+{
+  "expected": {
+    "contexts": [
+      [
+        "c1-fxtoken",
+        "renamed",
+        "body \"q\" \\\\ line\nnext",
+        0.75,
+        null
+      ]
+    ],
+    "memories": [
+      [
+        "m1-fxtoken",
+        "m one"
+      ],
+      [
+        "m2-fxtoken",
+        "m two"
+      ]
+    ],
+    "memory_embeddings": [
+      [
+        "m1-fxtoken",
+        "stub",
+        "h2",
+        "0A0B"
+      ]
+    ],
+    "memory_relations": [
+      [
+        "m1-fxtoken",
+        "m2-fxtoken",
+        "related"
+      ]
+    ],
+    "vectors": [
+      [
+        "c1-fxtoken",
+        "000102FF",
+        4
+      ]
+    ]
+  },
+  "mutations": [
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "c1-fxtoken",
+      "entity_type": "contexts",
+      "id": "mut_rep_fixture_sqlite_13",
+      "idempotency_key": "rep_fixture_sqlite:13",
+      "occurred_at": "2026-11-08T11:32:27.081",
+      "operation": "create",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "architecture_id": null,
+          "archived_at": null,
+          "content": "body \"q\" \\\\ line\nnext",
+          "created_at": "2026-10-14T10:00:00Z",
+          "created_by": null,
+          "entities": "[]",
+          "format": null,
+          "genre": null,
+          "id": "c1-fxtoken",
+          "indexed_at": "2026-11-08 11:32:27",
+          "l0_abstract": "",
+          "l1_overview": "",
+          "metadata": "{}",
+          "mode": null,
+          "modified_at": null,
+          "node": "inbox",
+          "path": null,
+          "routed_to": "[]",
+          "signal_type": null,
+          "sn_ratio": 1.0,
+          "structure": null,
+          "supersedes": null,
+          "tenant_id": "fx-fxtoken",
+          "title": "Café ✓",
+          "type": "resource",
+          "uri": "",
+          "valid_from": null,
+          "valid_until": null,
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "5cb3182a83273f6cc434d852c0a862022813a306b027a6a9508b09020b933c3a",
+      "sequence": 13
+    },
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "c2-fxtoken",
+      "entity_type": "contexts",
+      "id": "mut_rep_fixture_sqlite_14",
+      "idempotency_key": "rep_fixture_sqlite:14",
+      "occurred_at": "2026-11-08T11:32:27.082",
+      "operation": "create",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "architecture_id": null,
+          "archived_at": null,
+          "content": "",
+          "created_at": "2026-10-14T10:00:00Z",
+          "created_by": null,
+          "entities": "[]",
+          "format": null,
+          "genre": null,
+          "id": "c2-fxtoken",
+          "indexed_at": "2026-11-08 11:32:27",
+          "l0_abstract": "",
+          "l1_overview": "",
+          "metadata": "{}",
+          "mode": null,
+          "modified_at": null,
+          "node": "inbox",
+          "path": null,
+          "routed_to": "[]",
+          "signal_type": null,
+          "sn_ratio": 0.1,
+          "structure": null,
+          "supersedes": null,
+          "tenant_id": "fx-fxtoken",
+          "title": "second",
+          "type": "resource",
+          "uri": "",
+          "valid_from": null,
+          "valid_until": null,
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "5b344963ae64c3f17cee8d53ea6b666a1adbb2d6e0ba774d7f302885d0fed3b7",
+      "sequence": 14
+    },
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "c1-fxtoken",
+      "entity_type": "contexts",
+      "id": "mut_rep_fixture_sqlite_15",
+      "idempotency_key": "rep_fixture_sqlite:15",
+      "occurred_at": "2026-11-08T11:32:27.083",
+      "operation": "update",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "architecture_id": null,
+          "archived_at": null,
+          "content": "body \"q\" \\\\ line\nnext",
+          "created_at": "2026-10-14T10:00:00Z",
+          "created_by": null,
+          "entities": "[]",
+          "format": null,
+          "genre": null,
+          "id": "c1-fxtoken",
+          "indexed_at": "2026-11-08 11:32:27",
+          "l0_abstract": "",
+          "l1_overview": "",
+          "metadata": "{}",
+          "mode": null,
+          "modified_at": null,
+          "node": "inbox",
+          "path": null,
+          "routed_to": "[]",
+          "signal_type": null,
+          "sn_ratio": 0.75,
+          "structure": null,
+          "supersedes": null,
+          "tenant_id": "fx-fxtoken",
+          "title": "renamed",
+          "type": "resource",
+          "uri": "",
+          "valid_from": null,
+          "valid_until": null,
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "408be84722e4282281e20f163f92d110dc3e59a87786e0cc34dcef5fe0007541",
+      "sequence": 15
+    },
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "c1-fxtoken",
+      "entity_type": "vectors",
+      "id": "mut_rep_fixture_sqlite_16",
+      "idempotency_key": "rep_fixture_sqlite:16",
+      "occurred_at": "2026-11-08T11:32:27.085",
+      "operation": "create",
+      "payload": {
+        "blobs": {
+          "embedding": "000102FF"
+        },
+        "row": {
+          "context_id": "c1-fxtoken",
+          "created_at": "2026-11-08 11:32:27",
+          "dimensions": 4,
+          "embedding": null,
+          "model": "nomic-embed-text",
+          "tenant_id": "fx-fxtoken",
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "9701d957cfe973da015129388d64f2517dd2a7bb56207829340c73b6e6f1ed8e",
+      "sequence": 16
+    },
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "m1-fxtoken",
+      "entity_type": "memories",
+      "id": "mut_rep_fixture_sqlite_17",
+      "idempotency_key": "rep_fixture_sqlite:17",
+      "occurred_at": "2026-11-08T11:32:27.086",
+      "operation": "create",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "audience": "default",
+          "citation_uri": null,
+          "content": "m one",
+          "content_hash": null,
+          "created_at": "2026-11-08 11:32:27",
+          "forget_after": null,
+          "forget_reason": null,
+          "id": "m1-fxtoken",
+          "is_forgotten": 0,
+          "is_latest": 1,
+          "is_static": 0,
+          "metadata": "{}",
+          "parent_memory_id": null,
+          "root_memory_id": null,
+          "source_chunk_id": null,
+          "tenant_id": "fx-fxtoken",
+          "updated_at": "2026-11-08 11:32:27",
+          "version": 1,
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "037dc38fd42ffba1e851956c6082d1e08b145ca0c79cf9cbc71241844413ae18",
+      "sequence": 17
+    },
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "m2-fxtoken",
+      "entity_type": "memories",
+      "id": "mut_rep_fixture_sqlite_18",
+      "idempotency_key": "rep_fixture_sqlite:18",
+      "occurred_at": "2026-11-08T11:32:27.087",
+      "operation": "create",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "audience": "default",
+          "citation_uri": null,
+          "content": "m two",
+          "content_hash": null,
+          "created_at": "2026-11-08 11:32:27",
+          "forget_after": null,
+          "forget_reason": null,
+          "id": "m2-fxtoken",
+          "is_forgotten": 0,
+          "is_latest": 1,
+          "is_static": 0,
+          "metadata": "{}",
+          "parent_memory_id": null,
+          "root_memory_id": null,
+          "source_chunk_id": null,
+          "tenant_id": "fx-fxtoken",
+          "updated_at": "2026-11-08 11:32:27",
+          "version": 1,
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "a368d052300be56fac2733d589b15fdae4dab4438854dc578d7dd2a78cf86bc7",
+      "sequence": 18
+    },
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "[\"m1-fxtoken\",\"stub\"]",
+      "entity_type": "memory_embeddings",
+      "id": "mut_rep_fixture_sqlite_19",
+      "idempotency_key": "rep_fixture_sqlite:19",
+      "occurred_at": "2026-11-08T11:32:27.089",
+      "operation": "create",
+      "payload": {
+        "blobs": {
+          "embedding": "0A0B"
+        },
+        "row": {
+          "content_hash": "h",
+          "created_at": "2026-11-08 11:32:27",
+          "dimensions": 2,
+          "embedding": null,
+          "memory_id": "m1-fxtoken",
+          "model": "stub",
+          "tenant_id": "fx-fxtoken",
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "18a38df4e2c0d3187ebf0cba3543ca6ad35b82efafd32fb53183eb8d17350dc7",
+      "sequence": 19
+    },
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "[\"m2-fxtoken\",\"other\"]",
+      "entity_type": "memory_embeddings",
+      "id": "mut_rep_fixture_sqlite_20",
+      "idempotency_key": "rep_fixture_sqlite:20",
+      "occurred_at": "2026-11-08T11:32:27.089",
+      "operation": "create",
+      "payload": {
+        "blobs": {
+          "embedding": "0C0D"
+        },
+        "row": {
+          "content_hash": "h",
+          "created_at": "2026-11-08 11:32:27",
+          "dimensions": 2,
+          "embedding": null,
+          "memory_id": "m2-fxtoken",
+          "model": "other",
+          "tenant_id": "fx-fxtoken",
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "595a903ec8723a06e68a75c2447143a47abbcc80c8c91567f5b8c856f1f79851",
+      "sequence": 20
+    },
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "[\"m1-fxtoken\",\"stub\"]",
+      "entity_type": "memory_embeddings",
+      "id": "mut_rep_fixture_sqlite_21",
+      "idempotency_key": "rep_fixture_sqlite:21",
+      "occurred_at": "2026-11-08T11:32:27.092",
+      "operation": "update",
+      "payload": {
+        "blobs": {
+          "embedding": "0A0B"
+        },
+        "row": {
+          "content_hash": "h2",
+          "created_at": "2026-11-08 11:32:27",
+          "dimensions": 2,
+          "embedding": null,
+          "memory_id": "m1-fxtoken",
+          "model": "stub",
+          "tenant_id": "fx-fxtoken",
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "2b47437edc01cc8a2c5c0c55bf9175ffab3e5ec0a82e591d1749e003446c91b1",
+      "sequence": 21
+    },
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "row:22",
+      "entity_type": "memory_relations",
+      "id": "mut_rep_fixture_sqlite_22",
+      "idempotency_key": "rep_fixture_sqlite:22",
+      "occurred_at": "2026-11-08T11:32:27.093",
+      "operation": "create",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "created_at": "2026-10-14T10:00:00Z",
+          "id": 2,
+          "relation": "related",
+          "source_memory_id": "m1-fxtoken",
+          "target_memory_id": "m2-fxtoken",
+          "tenant_id": "fx-fxtoken",
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "679f9dbaae0c449a6cbd1533ec0b72e62fa99eb6a0585d790bcb7a00ea059081",
+      "sequence": 22
+    },
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "[\"m2-fxtoken\",\"other\"]",
+      "entity_type": "memory_embeddings",
+      "id": "mut_rep_fixture_sqlite_23",
+      "idempotency_key": "rep_fixture_sqlite:23",
+      "occurred_at": "2026-11-08T11:32:27.093",
+      "operation": "delete",
+      "payload": {
+        "blobs": {
+          "embedding": "0C0D"
+        },
+        "row": {
+          "memory_id": "m2-fxtoken",
+          "model": "other"
+        }
+      },
+      "payload_hash": "c4fc73d5b2fdade2b2e18089f9b0afed64c81dd8db93f233a181c45b83f9cd3e",
+      "sequence": 23
+    },
+    {
+      "device_id": "rep_fixture_sqlite",
+      "entity_id": "c2-fxtoken",
+      "entity_type": "contexts",
+      "id": "mut_rep_fixture_sqlite_24",
+      "idempotency_key": "rep_fixture_sqlite:24",
+      "occurred_at": "2026-11-08T11:32:27.094",
+      "operation": "delete",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "id": "c2-fxtoken"
+        }
+      },
+      "payload_hash": "2ef483176dcf99dd0bfc9172b5c1f4e460b182d78bf89d50e02f85949cee1994",
+      "sequence": 24
+    }
+  ],
+  "store": "sqlite"
+}

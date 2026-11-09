@@ -1,0 +1,416 @@
+{
+  "expected": {
+    "contexts": [
+      [
+        "c1-fxtoken",
+        "renamed",
+        "body \"q\" \\\\ line\nnext",
+        0.75,
+        null
+      ]
+    ],
+    "memories": [
+      [
+        "m1-fxtoken",
+        "m one"
+      ],
+      [
+        "m2-fxtoken",
+        "m two"
+      ]
+    ],
+    "memory_embeddings": [
+      [
+        "m1-fxtoken",
+        "stub",
+        "h2",
+        "0A0B"
+      ]
+    ],
+    "memory_relations": [
+      [
+        "m1-fxtoken",
+        "m2-fxtoken",
+        "related"
+      ]
+    ],
+    "vectors": [
+      [
+        "c1-fxtoken",
+        "000102FF",
+        4
+      ]
+    ]
+  },
+  "mutations": [
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "c1-fxtoken",
+      "entity_type": "contexts",
+      "id": "mut_rep_fixture_postgres_1",
+      "idempotency_key": "rep_fixture_postgres:1",
+      "occurred_at": "2026-11-08T11:51:47.345",
+      "operation": "create",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "architecture_id": null,
+          "archived_at": null,
+          "content": "body \"q\" \\\\ line\nnext",
+          "created_at": "2026-10-14T10:00:00Z",
+          "created_by": null,
+          "entities": "[]",
+          "format": null,
+          "genre": null,
+          "id": "c1-fxtoken",
+          "indexed_at": "2026-11-08 11:51:47",
+          "l0_abstract": "",
+          "l1_overview": "",
+          "metadata": "{}",
+          "mode": null,
+          "modified_at": null,
+          "node": "inbox",
+          "path": null,
+          "routed_to": "[]",
+          "signal_type": null,
+          "sn_ratio": 1,
+          "structure": null,
+          "supersedes": null,
+          "tenant_id": "fx-fxtoken",
+          "title": "Café ✓",
+          "type": "resource",
+          "uri": "",
+          "valid_from": null,
+          "valid_until": null,
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "2efffa16dadf8a7fb1fe044839c91084e74db29e73fa4df4d1d2ba2dc92a1ad1",
+      "sequence": 1
+    },
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "c2-fxtoken",
+      "entity_type": "contexts",
+      "id": "mut_rep_fixture_postgres_2",
+      "idempotency_key": "rep_fixture_postgres:2",
+      "occurred_at": "2026-11-08T11:51:47.354",
+      "operation": "create",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "architecture_id": null,
+          "archived_at": null,
+          "content": "",
+          "created_at": "2026-10-14T10:00:00Z",
+          "created_by": null,
+          "entities": "[]",
+          "format": null,
+          "genre": null,
+          "id": "c2-fxtoken",
+          "indexed_at": "2026-11-08 11:51:47",
+          "l0_abstract": "",
+          "l1_overview": "",
+          "metadata": "{}",
+          "mode": null,
+          "modified_at": null,
+          "node": "inbox",
+          "path": null,
+          "routed_to": "[]",
+          "signal_type": null,
+          "sn_ratio": 0.1,
+          "structure": null,
+          "supersedes": null,
+          "tenant_id": "fx-fxtoken",
+          "title": "second",
+          "type": "resource",
+          "uri": "",
+          "valid_from": null,
+          "valid_until": null,
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "829c47b99485ac2e8cd25a905cec4dbf8e877a7b5ff58b7d5304dfbe242d53bf",
+      "sequence": 2
+    },
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "c1-fxtoken",
+      "entity_type": "contexts",
+      "id": "mut_rep_fixture_postgres_3",
+      "idempotency_key": "rep_fixture_postgres:3",
+      "occurred_at": "2026-11-08T11:51:47.360",
+      "operation": "update",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "architecture_id": null,
+          "archived_at": null,
+          "content": "body \"q\" \\\\ line\nnext",
+          "created_at": "2026-10-14T10:00:00Z",
+          "created_by": null,
+          "entities": "[]",
+          "format": null,
+          "genre": null,
+          "id": "c1-fxtoken",
+          "indexed_at": "2026-11-08 11:51:47",
+          "l0_abstract": "",
+          "l1_overview": "",
+          "metadata": "{}",
+          "mode": null,
+          "modified_at": null,
+          "node": "inbox",
+          "path": null,
+          "routed_to": "[]",
+          "signal_type": null,
+          "sn_ratio": 0.75,
+          "structure": null,
+          "supersedes": null,
+          "tenant_id": "fx-fxtoken",
+          "title": "renamed",
+          "type": "resource",
+          "uri": "",
+          "valid_from": null,
+          "valid_until": null,
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "43b7bb793d5b923cb832accf6195b638a37eedd203380b771ee956d5ffdf7e7d",
+      "sequence": 3
+    },
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "c1-fxtoken",
+      "entity_type": "vectors",
+      "id": "mut_rep_fixture_postgres_4",
+      "idempotency_key": "rep_fixture_postgres:4",
+      "occurred_at": "2026-11-08T11:51:47.364",
+      "operation": "create",
+      "payload": {
+        "blobs": {
+          "embedding": "000102FF"
+        },
+        "row": {
+          "context_id": "c1-fxtoken",
+          "created_at": "2026-11-08 11:51:47",
+          "dimensions": 4,
+          "embedding": null,
+          "model": "nomic-embed-text",
+          "tenant_id": "fx-fxtoken",
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "9b31143cd76defc24caf9659f1aa03a90d2f0db82cec5899fa782d6a950beab3",
+      "sequence": 4
+    },
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "m1-fxtoken",
+      "entity_type": "memories",
+      "id": "mut_rep_fixture_postgres_5",
+      "idempotency_key": "rep_fixture_postgres:5",
+      "occurred_at": "2026-11-08T11:51:47.368",
+      "operation": "create",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "audience": "default",
+          "citation_uri": null,
+          "content": "m one",
+          "content_hash": null,
+          "created_at": "2026-11-08 11:51:47",
+          "forget_after": null,
+          "forget_reason": null,
+          "id": "m1-fxtoken",
+          "is_forgotten": 0,
+          "is_latest": 1,
+          "is_static": 0,
+          "metadata": "{}",
+          "parent_memory_id": null,
+          "root_memory_id": null,
+          "source_chunk_id": null,
+          "tenant_id": "fx-fxtoken",
+          "updated_at": "2026-11-08 11:51:47",
+          "version": 1,
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "aa36f0132cdb713433f09db537509b5555ab83cb25a5a2563816e8b5c31e01e6",
+      "sequence": 5
+    },
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "m2-fxtoken",
+      "entity_type": "memories",
+      "id": "mut_rep_fixture_postgres_6",
+      "idempotency_key": "rep_fixture_postgres:6",
+      "occurred_at": "2026-11-08T11:51:47.371",
+      "operation": "create",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "audience": "default",
+          "citation_uri": null,
+          "content": "m two",
+          "content_hash": null,
+          "created_at": "2026-11-08 11:51:47",
+          "forget_after": null,
+          "forget_reason": null,
+          "id": "m2-fxtoken",
+          "is_forgotten": 0,
+          "is_latest": 1,
+          "is_static": 0,
+          "metadata": "{}",
+          "parent_memory_id": null,
+          "root_memory_id": null,
+          "source_chunk_id": null,
+          "tenant_id": "fx-fxtoken",
+          "updated_at": "2026-11-08 11:51:47",
+          "version": 1,
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "c760e7bd8f24934480a5a4d7f53861e16b7b8f66c72bbb20832d3f97d5938721",
+      "sequence": 6
+    },
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "[\"m1-fxtoken\",\"stub\"]",
+      "entity_type": "memory_embeddings",
+      "id": "mut_rep_fixture_postgres_7",
+      "idempotency_key": "rep_fixture_postgres:7",
+      "occurred_at": "2026-11-08T11:51:47.375",
+      "operation": "create",
+      "payload": {
+        "blobs": {
+          "embedding": "0A0B"
+        },
+        "row": {
+          "content_hash": "h",
+          "created_at": "2026-11-08 11:51:47",
+          "dimensions": 2,
+          "embedding": null,
+          "memory_id": "m1-fxtoken",
+          "model": "stub",
+          "tenant_id": "fx-fxtoken",
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "953ec2dd1ef4d185920faaaaf8b2e425d60f2aa49599adac05294c1a70c7f251",
+      "sequence": 7
+    },
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "[\"m2-fxtoken\",\"other\"]",
+      "entity_type": "memory_embeddings",
+      "id": "mut_rep_fixture_postgres_8",
+      "idempotency_key": "rep_fixture_postgres:8",
+      "occurred_at": "2026-11-08T11:51:47.379",
+      "operation": "create",
+      "payload": {
+        "blobs": {
+          "embedding": "0C0D"
+        },
+        "row": {
+          "content_hash": "h",
+          "created_at": "2026-11-08 11:51:47",
+          "dimensions": 2,
+          "embedding": null,
+          "memory_id": "m2-fxtoken",
+          "model": "other",
+          "tenant_id": "fx-fxtoken",
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "92c2770ec8db2245263c7eb43d8c886607d97cd460d2878a7dabb2d823e37c8c",
+      "sequence": 8
+    },
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "[\"m1-fxtoken\",\"stub\"]",
+      "entity_type": "memory_embeddings",
+      "id": "mut_rep_fixture_postgres_9",
+      "idempotency_key": "rep_fixture_postgres:9",
+      "occurred_at": "2026-11-08T11:51:47.384",
+      "operation": "update",
+      "payload": {
+        "blobs": {
+          "embedding": "0A0B"
+        },
+        "row": {
+          "content_hash": "h2",
+          "created_at": "2026-11-08 11:51:47",
+          "dimensions": 2,
+          "embedding": null,
+          "memory_id": "m1-fxtoken",
+          "model": "stub",
+          "tenant_id": "fx-fxtoken",
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "58a7422d4503c299f2396d8d9ac1b847a196739dcfd384fbe4b9c16c7a983584",
+      "sequence": 9
+    },
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "row:10",
+      "entity_type": "memory_relations",
+      "id": "mut_rep_fixture_postgres_10",
+      "idempotency_key": "rep_fixture_postgres:10",
+      "occurred_at": "2026-11-08T11:51:47.387",
+      "operation": "create",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "created_at": "2026-10-14T10:00:00Z",
+          "id": 1,
+          "relation": "related",
+          "source_memory_id": "m1-fxtoken",
+          "target_memory_id": "m2-fxtoken",
+          "tenant_id": "fx-fxtoken",
+          "workspace_id": "fx-fxtoken:ws"
+        }
+      },
+      "payload_hash": "a4846075658b4ed08a10aa96c141a7e8fc2020aedaf5ea6d53cb12e7bed26665",
+      "sequence": 10
+    },
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "[\"m2-fxtoken\",\"other\"]",
+      "entity_type": "memory_embeddings",
+      "id": "mut_rep_fixture_postgres_11",
+      "idempotency_key": "rep_fixture_postgres:11",
+      "occurred_at": "2026-11-08T11:51:47.393",
+      "operation": "delete",
+      "payload": {
+        "blobs": {
+          "embedding": "0C0D"
+        },
+        "row": {
+          "memory_id": "m2-fxtoken",
+          "model": "other"
+        }
+      },
+      "payload_hash": "c4fc73d5b2fdade2b2e18089f9b0afed64c81dd8db93f233a181c45b83f9cd3e",
+      "sequence": 11
+    },
+    {
+      "device_id": "rep_fixture_postgres",
+      "entity_id": "c2-fxtoken",
+      "entity_type": "contexts",
+      "id": "mut_rep_fixture_postgres_12",
+      "idempotency_key": "rep_fixture_postgres:12",
+      "occurred_at": "2026-11-08T11:51:47.396",
+      "operation": "delete",
+      "payload": {
+        "blobs": {},
+        "row": {
+          "id": "c2-fxtoken"
+        }
+      },
+      "payload_hash": "2ef483176dcf99dd0bfc9172b5c1f4e460b182d78bf89d50e02f85949cee1994",
+      "sequence": 12
+    }
+  ],
+  "store": "postgres"
+}

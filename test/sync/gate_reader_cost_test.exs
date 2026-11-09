@@ -10,6 +10,7 @@ defmodule OptimalEngine.Sync.GateReaderCostTest do
 
   alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Store
+  alias OptimalEngine.Test.SyncSql
   alias OptimalEngine.Sync.Gate
   alias OptimalEngine.Workspace
 
@@ -38,7 +39,7 @@ defmodule OptimalEngine.Sync.GateReaderCostTest do
         WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < #{@rows})
         INSERT INTO memories (id, tenant_id, workspace_id, content, metadata)
         SELECT 'mem-cost-' || ?1 || '-' || i, 'default', ?2, 'Memory ' || i,
-               json_object('memory_core_source_package_id', 'sp-cost-' || ?1 || '-' || i)
+               #{SyncSql.json_object([{"memory_core_source_package_id", "'sp-cost-' || ?1 || '-' || i"}])}
         FROM n
         """,
         [n, ws]
@@ -54,8 +55,8 @@ defmodule OptimalEngine.Sync.GateReaderCostTest do
     # A hundred of the sources are restricted.
     {:ok, _} =
       Store.raw_query(
-        "UPDATE source_packages SET security_labels = '[\"restricted\"]' WHERE workspace_id = ?1 AND id GLOB ?2",
-        [ctx.ws, "sp-cost-#{ctx.n}-1[0-9][0-9]"]
+        "UPDATE source_packages SET security_labels = '[\"restricted\"]' WHERE workspace_id = ?1 AND id IN (SELECT value FROM json_each(?2))",
+        [ctx.ws, Jason.encode!(for i <- 100..199, do: "sp-cost-#{ctx.n}-#{i}")]
       )
 
     {allowed, reads} =

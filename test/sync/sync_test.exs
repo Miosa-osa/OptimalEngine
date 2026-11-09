@@ -156,6 +156,9 @@ defmodule OptimalEngine.SyncTest do
       assert later["mutations"] == []
     end
 
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "the job queue stays on its Engine: not captured, not applied, old triggers dropped",
          ctx do
       # An Engine before the queue was excluded had capture triggers on it.
@@ -1417,6 +1420,9 @@ defmodule OptimalEngine.SyncTest do
                0
     end
 
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "the purge runs once for each version of the replicated list", ctx do
       stale = fn suffix ->
         {:ok, _} =
@@ -1467,6 +1473,9 @@ defmodule OptimalEngine.SyncTest do
   end
 
   describe "an explicit list of what replicates" do
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "every table with a workspace_id is on the replicated list or classified local" do
       {:ok, rows} =
         Store.raw_query(
@@ -1489,6 +1498,9 @@ defmodule OptimalEngine.SyncTest do
              "tables with a workspace_id that are on neither list (add each to @replicated or to @engine_state / @per_engine in Capture): #{inspect(unclassified)}"
     end
 
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "every foreign key of a replicated table points at a replicated table or at a scope table" do
       allowed = MapSet.new(Capture.replicated_tables() ++ ~w(workspaces tenants organizations))
 
@@ -2391,11 +2403,7 @@ defmodule OptimalEngine.SyncTest do
          ctx do
       local = Sync.replica_id()
 
-      {:ok, [[next]]} =
-        Store.raw_query(
-          "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'sync_capture'), 0) + 1",
-          []
-        )
+      next = OptimalEngine.Test.SyncSql.next_capture_sequence()
 
       # What a peer would send to take the ids of the changes this Engine makes next.
       spoofs =
@@ -2432,11 +2440,7 @@ defmodule OptimalEngine.SyncTest do
          ctx do
       local = Sync.replica_id()
 
-      {:ok, [[next]]} =
-        Store.raw_query(
-          "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'sync_capture'), 0) + 1",
-          []
-        )
+      next = OptimalEngine.Test.SyncSql.next_capture_sequence()
 
       # `<replica>:<capture sequence>` is the key `Capture.seal/0` gives this
       # Engine's next changes; as an id, the ledger would have stored it as the key.
@@ -2515,6 +2519,9 @@ defmodule OptimalEngine.SyncTest do
                Sync.apply_changes(ctx.tenant, ctx.ws, [numeric])
     end
 
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "the key capture gives a row is the key computed from its values, for every replicated table" do
       sample = fn
         %{type: "INTEGER"}, i -> 40 + i
@@ -2558,6 +2565,9 @@ defmodule OptimalEngine.SyncTest do
   end
 
   describe "tables that belong to one Engine" do
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "writes to them are not captured, and a trigger an earlier version left is removed",
          ctx do
       {:ok, _} = Capture.seal()
@@ -3310,8 +3320,8 @@ defmodule OptimalEngine.SyncTest do
       age = fn ->
         {:ok, _} =
           Store.raw_query(
-            "UPDATE sync_conflicts SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour') WHERE workspace_id = ?1 AND kind = 'peer_replaced'",
-            [ctx.ws]
+            "UPDATE sync_conflicts SET created_at = ?2 WHERE workspace_id = ?1 AND kind = 'peer_replaced'",
+            [ctx.ws, an_hour_ago()]
           )
       end
 
@@ -3359,8 +3369,8 @@ defmodule OptimalEngine.SyncTest do
       age = fn ->
         {:ok, _} =
           Store.raw_query(
-            "UPDATE sync_conflicts SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour') WHERE workspace_id = ?1 AND kind = 'peer_replaced'",
-            [ctx.ws]
+            "UPDATE sync_conflicts SET created_at = ?2 WHERE workspace_id = ?1 AND kind = 'peer_replaced'",
+            [ctx.ws, an_hour_ago()]
           )
       end
 
@@ -4333,5 +4343,10 @@ defmodule OptimalEngine.SyncTest do
 
       assert pulled == [late]
     end
+  end
+
+  # An hour ago, in the format of `created_at` (SQLite's strftime('%Y-%m-%dT%H:%M:%SZ')).
+  defp an_hour_ago do
+    DateTime.utc_now() |> DateTime.add(-3600, :second) |> Calendar.strftime("%Y-%m-%dT%H:%M:%SZ")
   end
 end

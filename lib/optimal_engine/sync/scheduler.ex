@@ -32,16 +32,10 @@ defmodule OptimalEngine.Sync.Scheduler do
 
   # The install is retried until it succeeds: a Store busy at startup would
   # otherwise leave a new or changed table uncaptured until the next restart.
-  # The tick chain starts once, after the first attempt. Capture is made of
-  # SQLite triggers, so an engine whose canonical store is PostgreSQL says so
-  # once instead of retrying forever.
+  # The tick chain starts once, after the first attempt.
   @impl true
   def handle_info(:install, state) do
-    if OptimalEngine.Store.selected?(OptimalEngine.Store.SQLite) do
-      install_capture()
-    else
-      Logger.info("[Sync] change capture uses SQLite triggers and is off on this store")
-    end
+    install_capture()
 
     unless state[:ticking], do: schedule(state.interval)
     {:noreply, Map.put(state, :ticking, true)}

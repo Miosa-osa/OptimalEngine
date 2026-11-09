@@ -25,6 +25,7 @@ defmodule OptimalEngine.SyncGateTest do
 
   alias OptimalEngine.MemoryCore.Store, as: CoreStore
   alias OptimalEngine.Pipeline.Intake
+  alias OptimalEngine.Test.SyncSql
   alias OptimalEngine.Storage.PolicyStore
   alias OptimalEngine.Store.Dialect
   alias OptimalEngine.Sync.{Capture, Gate, GateCache, Lineage}
@@ -813,6 +814,9 @@ defmodule OptimalEngine.SyncGateTest do
       assert {:error, :workspace_class_above_gate} = Sync.apply_changes(ctx.tenant, odd, [])
     end
 
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "a workspace that cannot be read sends nothing, and is sent when it can", ctx do
       {:ok, plain} =
         Versioned.create(%{content: "A plain note", workspace_id: ctx.ws, tenant_id: ctx.tenant})
@@ -836,6 +840,9 @@ defmodule OptimalEngine.SyncGateTest do
       assert sent?(later, "memories", plain.id)
     end
 
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "a Store error while the gate reads a source holds the cycle, not the row", ctx do
       {:ok, memory} =
         Versioned.create(%{content: "A plain note", workspace_id: ctx.ws, tenant_id: ctx.tenant})
@@ -924,7 +931,7 @@ defmodule OptimalEngine.SyncGateTest do
 
       {:ok, _} =
         Store.raw_query(
-          "UPDATE memories SET metadata = json_set(COALESCE(metadata, '{}'), '$.security_labels', json('[\"restricted\"]')) WHERE id = ?1",
+          "UPDATE memories SET metadata = #{SyncSql.json_set("COALESCE(metadata, '{}')", "security_labels", {:json, "'[\"restricted\"]'"})} WHERE id = ?1",
           [memory.id]
         )
 
@@ -1173,7 +1180,7 @@ defmodule OptimalEngine.SyncGateTest do
 
       {:ok, _} =
         Store.raw_query(
-          "UPDATE memories SET metadata = json_set(metadata, '$.partition_ids', json('[\"team-a\"]')) WHERE id = ?1",
+          "UPDATE memories SET metadata = #{SyncSql.json_set("metadata", "partition_ids", {:json, "'[\"team-a\"]'"})} WHERE id = ?1",
           [memory.id]
         )
 
@@ -1373,7 +1380,7 @@ defmodule OptimalEngine.SyncGateTest do
 
       {:ok, _} =
         Store.raw_query(
-          "UPDATE source_packages SET metadata = json_set(COALESCE(metadata, '{}'), '$.security_labels', json('[\"confidential\"]')) WHERE id = ?1",
+          "UPDATE source_packages SET metadata = #{SyncSql.json_set("COALESCE(metadata, '{}')", "security_labels", {:json, "'[\"confidential\"]'"})} WHERE id = ?1",
           [source.id]
         )
 
@@ -1572,7 +1579,7 @@ defmodule OptimalEngine.SyncGateTest do
 
       {:ok, _} =
         Store.raw_query(
-          "UPDATE memories SET metadata = json_set(COALESCE(metadata, '{}'), '$.security_labels', json('[\"restricted\"]')) WHERE id = (SELECT id FROM memories WHERE workspace_id = ?1 LIMIT 1)",
+          "UPDATE memories SET metadata = #{SyncSql.json_set("COALESCE(metadata, '{}')", "security_labels", {:json, "'[\"restricted\"]'"})} WHERE id = (SELECT id FROM memories WHERE workspace_id = ?1 LIMIT 1)",
           [ctx.ws]
         )
 
@@ -1708,7 +1715,7 @@ defmodule OptimalEngine.SyncGateTest do
 
             {:meta, key, value} ->
               Store.raw_query(
-                "UPDATE source_packages SET metadata = json_set(COALESCE(metadata, '{}'), '$.' || ?2, json(?3)) WHERE id = ?1",
+                "UPDATE source_packages SET metadata = #{SyncSql.json_set("COALESCE(metadata, '{}')", {:param, "?2"}, {:json, "?3"})} WHERE id = ?1",
                 [source.id, key, value]
               )
           end
@@ -1827,7 +1834,7 @@ defmodule OptimalEngine.SyncGateTest do
           :source ->
             {:ok, _} =
               Store.raw_query(
-                "UPDATE source_packages SET metadata = json_set(COALESCE(metadata, '{}'), '$.security_labels', json(?2)) WHERE id = ?1",
+                "UPDATE source_packages SET metadata = #{SyncSql.json_set("COALESCE(metadata, '{}')", "security_labels", {:json, "?2"})} WHERE id = ?1",
                 [source.id, labels]
               )
 
@@ -1836,7 +1843,7 @@ defmodule OptimalEngine.SyncGateTest do
 
             {:ok, _} =
               Store.raw_query(
-                "INSERT INTO claims (id, tenant_id, workspace_id, source_package_id, signal_id, claim_text, metadata) VALUES (?1, ?2, ?3, ?4, ?5, 'a claim', json_object('security_labels', json(?6)))",
+                "INSERT INTO claims (id, tenant_id, workspace_id, source_package_id, signal_id, claim_text, metadata) VALUES (?1, ?2, ?3, ?4, ?5, 'a claim', #{SyncSql.json_object([{"security_labels", SyncSql.json("?6")}])})",
                 [
                   "clm-mo-#{label}-#{ctx.n}",
                   ctx.tenant,
@@ -2182,7 +2189,7 @@ defmodule OptimalEngine.SyncGateTest do
 
       {:ok, _} =
         Store.raw_query(
-          "UPDATE memories SET metadata = json_set(COALESCE(metadata, '{}'), '$.security_labels', json('[\"restricted\"]')) WHERE id = ?1",
+          "UPDATE memories SET metadata = #{SyncSql.json_set("COALESCE(metadata, '{}')", "security_labels", {:json, "'[\"restricted\"]'"})} WHERE id = ?1",
           [root]
         )
 
@@ -2202,7 +2209,7 @@ defmodule OptimalEngine.SyncGateTest do
       # from and not by value, so the later versions do not carry it.
       {:ok, _} =
         Store.raw_query(
-          "UPDATE memories SET metadata = json_set(COALESCE(metadata, '{}'), '$.memory_core_source_package_id', ?2) WHERE id = ?1",
+          "UPDATE memories SET metadata = #{SyncSql.json_set("COALESCE(metadata, '{}')", "memory_core_source_package_id", {:text, "?2"})} WHERE id = ?1",
           [second, source.id]
         )
 
@@ -2644,6 +2651,8 @@ defmodule OptimalEngine.SyncGateTest do
       assert local_stamp() == before
     end
 
+    # SQLite's delete-and-insert; PostgreSQL has no INSERT OR REPLACE.
+    @tag :sqlite_store
     test "an INSERT OR REPLACE of an asset with a labelled one holds an aggregate", ctx do
       report(ctx, ctx.report)
       asset(ctx, ctx.asset)
@@ -2735,6 +2744,9 @@ defmodule OptimalEngine.SyncGateTest do
              "classify #{inspect(unclassified)} in OptimalEngine.Sync.Lineage before they replicate"
     end
 
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "every replicated table the gate classifies by has a text key and capture triggers" do
       {:ok, rows} =
         Store.raw_query(
@@ -2774,6 +2786,9 @@ defmodule OptimalEngine.SyncGateTest do
       end
     end
 
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "every table the gate scans is captured or moves the local stamp" do
       replicated = replicated_tables()
       stamped = Capture.stamped_tables()
@@ -3026,6 +3041,9 @@ defmodule OptimalEngine.SyncGateTest do
       assert held.(Gate.exact_predicate({:labels, "security_labels"}, 1), "security_labels", "")
     end
 
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "installing again does no DDL" do
       assert {:ok, _} = Capture.install()
       {:ok, [[before]]} = Store.raw_query("PRAGMA schema_version", [])
@@ -3034,6 +3052,9 @@ defmodule OptimalEngine.SyncGateTest do
       assert {:ok, [[^before]]} = Store.raw_query("PRAGMA schema_version", [])
     end
 
+    # SQLite's triggers, catalog or migration SQL: a PostgreSQL build is covered by
+    # test/sync/postgres_capture_test.exs.
+    @tag :sqlite_store
     test "a stamp trigger left on a table that is no longer scanned is dropped" do
       {:ok, _} =
         Store.raw_query(
@@ -3441,13 +3462,7 @@ defmodule OptimalEngine.SyncGateTest do
   end
 
   defp stamp_sequences do
-    {:ok, rows} =
-      Store.raw_query(
-        "SELECT name, seq FROM sqlite_sequence WHERE name IN ('sync_capture', 'sync_local_stamp', 'sync_mutations') ORDER BY name",
-        []
-      )
-
-    rows
+    OptimalEngine.Sync.Capture.write_sequences()
   end
 
   # Runs `fun`, returning its result and what the gate scanned the workspace
@@ -3747,12 +3762,9 @@ defmodule OptimalEngine.SyncGateTest do
 
   # The sequence of the local stamp (0 before any write moved it).
   defp local_stamp do
-    {:ok, rows} =
-      Store.raw_query("SELECT seq FROM sqlite_sequence WHERE name = 'sync_local_stamp'", [])
-
-    case rows do
-      [[seq]] -> seq
-      [] -> 0
+    case Enum.find(OptimalEngine.Sync.Capture.write_sequences(), &(hd(&1) == "sync_local_stamp")) do
+      ["sync_local_stamp", seq] -> seq
+      nil -> 0
     end
   end
 

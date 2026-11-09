@@ -145,6 +145,16 @@ defmodule OptimalEngine.Storage.Postgres do
             "posting list created at runtime and ranked as FTS5 ranks; the SQLite statements " <>
             "(FTS5 tables, triggers, STRICT tables) stay refused as schema changes",
         refused_as: ["schema change outside the migrations"]
+      },
+      %{
+        feature: "replication",
+        how:
+          "PL/pgSQL row triggers (OptimalEngine.Sync.Postgres) capture into sync_capture the " <>
+            "rows SQLite's capture triggers capture, gated the same way; sealing, serving, " <>
+            "applying and the gate read the store's catalog and SQLite's JSON semantics " <>
+            "through oe_json_* functions (OptimalEngine.Store.Postgres.SqliteJson); the " <>
+            "SQLite trigger DDL and catalog statements stay refused",
+        refused_as: ["schema change outside the migrations", "sqlite_master", "PRAGMA"]
       }
     ]
   end
@@ -159,13 +169,6 @@ defmodule OptimalEngine.Storage.Postgres do
   @spec unavailable() :: [%{feature: String.t(), reason: String.t(), refused_as: [String.t()]}]
   def unavailable do
     [
-      %{
-        feature: "replication",
-        reason:
-          "change capture is SQLite triggers and applying reads SQLite's catalog; " <>
-            "enabling, serving and applying sync are refused",
-        refused_as: ["replication is not available on the PostgreSQL store"]
-      },
       %{
         feature: "runtime_schema_and_transactions",
         reason:

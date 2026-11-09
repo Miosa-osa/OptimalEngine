@@ -40,6 +40,7 @@ defmodule OptimalEngine.Sync.Capture do
 
   alias OptimalEngine.Store
   alias OptimalEngine.Sync.Lineage
+  alias OptimalEngine.Sync.Postgres, as: PgCapture
 
   # What replicates: workspace knowledge. A peer that holds the `sync` scope may
   # write these tables and no others, so nothing here may grant a capability
@@ -160,6 +161,8 @@ defmodule OptimalEngine.Sync.Capture do
   """
   @spec install() :: {:ok, %{tables: non_neg_integer(), skipped: [String.t()]}}
   def install do
+    if PgCapture.active?(), do: :ok = PgCapture.ensure()
+
     {installed, skipped} =
       Enum.reduce(@replicated, {0, []}, fn table, {count, skipped} ->
         case install(table) do
@@ -193,9 +196,24 @@ defmodule OptimalEngine.Sync.Capture do
       length(columns) > @max_columns ->
         {:skipped, :too_many_columns}
 
+      PgCapture.active?() ->
+        install_postgres(table, columns)
+
       true ->
         ensure_triggers(table, "sync_capture_", statements(table, columns))
     end
+  end
+
+  @doc """
+  Installs the capture triggers of a table of a PostgreSQL store, from its
+  columns there (`OptimalEngine.Sync.Postgres`).
+  """
+  @spec install_postgres(String.t(), [map()]) :: :ok
+  def install_postgres(table, columns) do
+    keys = key_columns(columns)
+    blobs = for %{type: "BYTEA", name: name} <- columns, do: name
+    triggers = PgCapture.capture_triggers(table, keys, blobs, rowid_key?(columns))
+    PgCapture.ensure_triggers(table, "sync_capture_", "optimal_sync_capture", triggers)
   end
 
   # Triggers already in place are left alone, so a restart does no DDL; a
@@ -227,7 +245,36 @@ defmodule OptimalEngine.Sync.Capture do
   # The counter table is created here, not by a migration: like the capture
   # triggers it is installed at boot and when sync is enabled, and a gate that
   # reads the stamp before it exists just sees no entry for it.
+  # On PostgreSQL the stamp table is created with the capture functions
+  # (`OptimalEngine.Sync.Postgres`), and its triggers call one function.
   defp install_stamp do
+    if PgCapture.active?(), do: install_postgres_stamp(), else: install_sqlite_stamp()
+  end
+
+  defp install_postgres_stamp do
+    stamped = stamped_tables()
+
+    for table <- stamped do
+      columns = columns(table)
+      read = stamp_columns(table)
+
+      if Enum.all?(read, fn column -> Enum.any?(columns, &(&1.name == column)) end) do
+        classes = table |> Lineage.spec() |> Lineage.class_columns()
+
+        matters = fn row ->
+          Enum.map_join(classes, " OR ", &Lineage.may_name_class_sql(&1, row))
+        end
+
+        {function, triggers} = PgCapture.stamp_triggers(table, read, matters)
+        PgCapture.ensure_triggers(table, "sync_stamp_", function, triggers)
+      end
+    end
+
+    keep = MapSet.new(stamped)
+    PgCapture.drop_triggers("sync_stamp_", :all, &MapSet.member?(keep, &1))
+  end
+
+  defp install_sqlite_stamp do
     :ok =
       Store.raw_execute(
         "CREATE TABLE IF NOT EXISTS #{@stamp_table} (seq INTEGER PRIMARY KEY AUTOINCREMENT)",
@@ -245,6 +292,26 @@ defmodule OptimalEngine.Sync.Capture do
     end
 
     drop_stale_stamp_triggers(stamped)
+  end
+
+  @doc """
+  The write sequences the gate cache keys on, as `[name, seq]` rows by name:
+  `sync_capture`, `sync_local_stamp` and `sync_mutations` (see
+  `OptimalEngine.Sync.GateCache`). A sequence nothing has moved yet is absent.
+  """
+  @spec write_sequences() :: [[term()]]
+  def write_sequences do
+    if PgCapture.active?() do
+      PgCapture.stamp()
+    else
+      {:ok, rows} =
+        Store.raw_query(
+          "SELECT name, seq FROM sqlite_sequence WHERE name IN ('sync_capture', 'sync_local_stamp', 'sync_mutations') ORDER BY name",
+          []
+        )
+
+      rows
+    end
   end
 
   @doc """
@@ -335,6 +402,12 @@ defmodule OptimalEngine.Sync.Capture do
   end
 
   defp drop_capture_triggers(table) do
+    if PgCapture.active?(),
+      do: PgCapture.drop_triggers("sync_capture_", table),
+      else: drop_sqlite_capture_triggers(table)
+  end
+
+  defp drop_sqlite_capture_triggers(table) do
     {:ok, rows} =
       Store.raw_query(
         "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 AND name LIKE 'sync_capture_%'",
@@ -353,6 +426,12 @@ defmodule OptimalEngine.Sync.Capture do
   defp drop_stale_triggers do
     replicated = MapSet.new(@replicated)
 
+    if PgCapture.active?(),
+      do: PgCapture.drop_triggers("sync_capture_", :all, &MapSet.member?(replicated, &1)),
+      else: drop_stale_sqlite_triggers(replicated)
+  end
+
+  defp drop_stale_sqlite_triggers(replicated) do
     {:ok, rows} =
       Store.raw_query(
         "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'sync_capture_%'",
@@ -379,6 +458,12 @@ defmodule OptimalEngine.Sync.Capture do
   @doc "Removes capture triggers from every table."
   @spec uninstall() :: :ok
   def uninstall do
+    if PgCapture.active?(),
+      do: PgCapture.drop_triggers("sync_capture_", :all),
+      else: uninstall_sqlite()
+  end
+
+  defp uninstall_sqlite do
     {:ok, rows} =
       Store.raw_query(
         "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'sync_capture_%'",
@@ -401,7 +486,12 @@ defmodule OptimalEngine.Sync.Capture do
   were sealed.
   """
   @spec seal() :: {:ok, non_neg_integer()}
-  def seal, do: seal_backlog(0)
+  def seal do
+    # Two seals in one Engine would seal the same captured rows at once: on
+    # SQLite the single writer orders them, on PostgreSQL one of the two would
+    # abort and run again, and under a steady stream of seals keep aborting.
+    :global.trans({{__MODULE__, :seal}, self()}, fn -> seal_backlog(0) end, [node()])
+  end
 
   # A batch is at most @seal_batch rows; sealing goes on until the backlog is
   # empty, so one call never leaves captured rows behind for the caller to miss.
@@ -433,59 +523,77 @@ defmodule OptimalEngine.Sync.Capture do
       # is now local-only are dropped, not sealed.
       sealable = Enum.filter(rows, fn [_seq, table | _] -> replicated?(table) end)
 
-      {:ok, sealed} =
-        Store.transaction(fn txn ->
-          Enum.each(sealable, fn [
-                                   seq,
-                                   table,
-                                   op,
-                                   workspace_id,
-                                   key,
-                                   row,
-                                   blobs,
-                                   occurred_at,
-                                   tenant_id,
-                                   org_id
-                                 ] ->
-            payload = Jason.encode!(%{"row" => Jason.decode!(row), "blobs" => decode_blobs(blobs)})
-
-            {:ok, _} =
-              Store.txn_execute(
-                txn,
-                """
-                INSERT OR IGNORE INTO sync_mutations
-                  (id, tenant_id, organization_id, workspace_id, device_id, entity_type, entity_id, operation,
-                   payload, payload_hash, idempotency_key, occurred_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                """,
-                [
-                  "mut_" <> replica_id <> "_" <> Integer.to_string(seq),
-                  tenant_id,
-                  org_id,
-                  workspace_id,
-                  replica_id,
-                  table,
-                  key || "row:#{seq}",
-                  op,
-                  payload,
-                  :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower),
-                  replica_id <> ":" <> Integer.to_string(seq),
-                  occurred_at
-                ]
-              )
-          end)
-
-          max_seq = rows |> List.last() |> hd()
-          {:ok, _} = Store.txn_execute(txn, "DELETE FROM sync_capture WHERE seq <= ?1", [max_seq])
-          {:ok, length(sealable)}
-        end)
+      max_seq = rows |> List.last() |> hd()
+      entries = Enum.map(sealable, &ledger_entry(&1, replica_id))
+      {:ok, sealed} = write_ledger(entries, max_seq)
 
       {:ok, length(rows), sealed}
     end
   end
 
+  @ledger_insert """
+  INSERT OR IGNORE INTO sync_mutations
+    (id, tenant_id, organization_id, workspace_id, device_id, entity_type, entity_id, operation,
+     payload, payload_hash, idempotency_key, occurred_at)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+  """
+
+  @ledger_insert_pg """
+  INSERT INTO sync_mutations
+    (id, tenant_id, organization_id, workspace_id, device_id, entity_type, entity_id, operation,
+     payload, payload_hash, idempotency_key, occurred_at)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+  ON CONFLICT DO NOTHING
+  """
+
+  # The ledger rows of captured changes, and the captured rows gone, in one
+  # transaction. Sealing is idempotent (a mutation id is the capture key, and a
+  # sealed row is ignored), so on PostgreSQL it runs at READ COMMITTED: at
+  # SERIALIZABLE a batch of thousands of rows takes enough predicate locks to
+  # be aborted again and again beside the writers it overlaps.
+  defp write_ledger(entries, max_seq) do
+    if PgCapture.active?() do
+      PgCapture.write_ledger(@ledger_insert_pg, entries, max_seq)
+    else
+      Store.transaction(fn txn ->
+        Enum.each(entries, fn params ->
+          {:ok, _} = Store.txn_execute(txn, @ledger_insert, params)
+        end)
+
+        {:ok, _} = Store.txn_execute(txn, "DELETE FROM sync_capture WHERE seq <= ?1", [max_seq])
+        {:ok, length(entries)}
+      end)
+    end
+  end
+
+  defp ledger_entry(
+         [seq, table, op, workspace_id, key, row, blobs, occurred_at, tenant_id, org_id],
+         replica_id
+       ) do
+    payload = Jason.encode!(%{"row" => Jason.decode!(row), "blobs" => decode_blobs(blobs)})
+
+    [
+      "mut_" <> replica_id <> "_" <> Integer.to_string(seq),
+      tenant_id,
+      org_id,
+      workspace_id,
+      replica_id,
+      table,
+      key || "row:#{seq}",
+      op,
+      payload,
+      :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower),
+      replica_id <> ":" <> Integer.to_string(seq),
+      occurred_at
+    ]
+  end
+
   @doc false
   def columns(table) do
+    if PgCapture.active?(), do: PgCapture.columns(table), else: sqlite_columns(table)
+  end
+
+  defp sqlite_columns(table) do
     {:ok, rows} =
       Store.raw_query("SELECT name, type, pk FROM pragma_table_info(?1) ORDER BY cid", [table])
 
