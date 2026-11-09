@@ -152,8 +152,11 @@ defmodule OptimalEngine.Store do
   so the transaction sees every write committed before it holds them; call it
   first in the transaction, with a list read before it began. The locks are
   taken in name order, one statement, in SHARE ROW EXCLUSIVE mode, which two
-  such transactions cannot hold at once. SQLite's store runs one writer at a
-  time, so there it does nothing.
+  such transactions cannot hold at once. The cost: every writer of those
+  tables, in any workspace, stalls until the transaction ends, and one that
+  waits past its lock timeout (15 seconds, or its call's time when shorter) is
+  `:busy`. Keep such transactions rare and short. SQLite's store runs one
+  writer at a time, so there it does nothing.
   """
   @spec txn_lock_tables(term(), [String.t()]) :: :ok | {:error, term()}
   def txn_lock_tables(_txn, []), do: :ok

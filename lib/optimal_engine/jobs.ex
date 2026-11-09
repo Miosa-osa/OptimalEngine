@@ -267,7 +267,8 @@ defmodule OptimalEngine.Jobs do
                """
                SELECT id FROM jobs
                WHERE ((status = 'available' AND run_at <= datetime('now'))
-                  OR (status = 'running' AND lease_expires_at <= datetime('now')))
+                  OR (status = 'running' AND lease_expires_at <= datetime('now')
+                      AND attempts < max_attempts))
                  #{scope_sql}
                ORDER BY priority DESC, run_at ASC, inserted_at ASC
                LIMIT 1#{Store.skip_locked()}
@@ -722,6 +723,14 @@ defmodule OptimalEngine.Jobs do
     kind, reason -> {:error, {kind, reason}}
   end
 
+  # The expired leases with no attempts left are dead-lettered before a job is
+  # claimed. On PostgreSQL the sweep skips a job another transaction holds (a
+  # claimer sweeping it, or its owner completing, failing or extending it):
+  # that job is swept by a later claim, once it is still expired and no longer
+  # held. A claim never takes it meanwhile: the selection takes an expired
+  # lease only with attempts left. At READ COMMITTED the sweep and the
+  # selection see different moments, so without that condition a job released
+  # between them could be run once more than `max_attempts`.
   defp dead_letter_expired_exhausted(txn, scope_sql, scope_params) do
     with {:ok, rows} <-
            Store.txn_query(

@@ -356,6 +356,11 @@ defmodule OptimalEngine.DataSteward do
   The checks and the move run in one transaction. A repair with nothing of the
   tenant's to move answers `{:error, :nothing_to_repair}` and says nothing of
   what other tenants hold under the id.
+
+  On PostgreSQL the transaction first holds every table of the store against
+  other writers (`Store.txn_lock_tables/2`): writers in every workspace stall
+  until it commits, and one that waits past its lock timeout (15 seconds) gets
+  `{:error, :busy}`. Readers do not wait.
   """
   def repair_orphan_scope(source_workspace_id, target_workspace_id, opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
@@ -455,6 +460,12 @@ defmodule OptimalEngine.DataSteward do
   bodies) is not rewritten. The answer says whether the directory moved
   (`directory_moved`) and how many paths and addresses were rewritten
   (`paths_rewritten`).
+
+  On PostgreSQL the transaction first holds every table of the store against
+  other writers (`Store.txn_lock_tables/2`), as SQLite's one writer does:
+  writers in every workspace stall until the rename commits, and one that waits
+  past its lock timeout (15 seconds) gets `{:error, :busy}`. Readers do not
+  wait.
   """
   def rename_workspace(source_workspace_id, target_workspace_id, opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
