@@ -323,12 +323,12 @@ defmodule OptimalEngine.Storage.SharedTest do
     setup do
       previous =
         Map.new(
-          ~w(OPTIMAL_VALKEY_KEY_PREFIX OPTIMAL_POSTGRES_URL OPTIMAL_POSTGRES_SCHEMA),
+          ~w(OPTIMAL_VALKEY_KEY_PREFIX OPTIMAL_POSTGRES_URL OPTIMAL_POSTGRES_SCHEMA OPTIMAL_ENGINE_ID),
           &{&1, System.get_env(&1)}
         )
 
       Enum.each(Map.keys(previous), &System.delete_env/1)
-      previous_reader = Application.fetch_env(:optimal_engine, :valkey_identity_reader)
+      previous_reader = Application.fetch_env(:optimal_engine, :valkey_identity_query)
       Shared.reset_key_prefix()
 
       on_exit(fn ->
@@ -338,8 +338,8 @@ defmodule OptimalEngine.Storage.SharedTest do
         end)
 
         case previous_reader do
-          {:ok, reader} -> Application.put_env(:optimal_engine, :valkey_identity_reader, reader)
-          :error -> Application.delete_env(:optimal_engine, :valkey_identity_reader)
+          {:ok, reader} -> Application.put_env(:optimal_engine, :valkey_identity_query, reader)
+          :error -> Application.delete_env(:optimal_engine, :valkey_identity_query)
         end
 
         Shared.reset_key_prefix()
@@ -354,8 +354,68 @@ defmodule OptimalEngine.Storage.SharedTest do
         |> Base.encode16(case: :lower)
         |> binary_part(0, 16)
 
+    # What the store answers the replica id query with: {:ok, rows} or {:error, reason}.
     defp read_identity_as(fun),
-      do: Application.put_env(:optimal_engine, :valkey_identity_reader, fun)
+      do:
+        Application.put_env(:optimal_engine, :valkey_identity_query, fn _sql, _params -> fun.() end)
+
+    test "OPTIMAL_ENGINE_ID names the Engine ahead of the replica id" do
+      System.put_env("OPTIMAL_ENGINE_ID", "db_prod_1")
+      prod = Shared.key_prefix()
+      assert prod == "optimal:shared:" <> digest("engine:db_prod_1")
+
+      # A staging copy restored from prod's dump has prod's replica id, but its
+      # own Engine id, so it never draws on prod's buckets.
+      System.put_env("OPTIMAL_ENGINE_ID", "db_staging_7")
+      Shared.reset_key_prefix()
+      refute Shared.key_prefix() == prod
+    end
+
+    test "a stale OPTIMAL_POSTGRES_URL on a SQLite Engine is never its identity" do
+      System.put_env("OPTIMAL_POSTGRES_URL", "postgres://engine:pw@db.example:5432/eng_a")
+      none = fn _sql, _params -> {:ok, []} end
+
+      assert Shared.resolve_prefix(store: OptimalEngine.Store.SQLite, query: none) ==
+               :unidentified
+
+      assert {:ok, _} = Shared.resolve_prefix(store: OptimalEngine.Store.Postgres, query: none)
+    end
+
+    test "a replica id read that keeps failing is warned about and stops holding buckets closed" do
+      stub = stub!()
+      start_pool(stub)
+      read_identity_as(fn -> {:error, :busy} end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for _ <- 1..25, do: assert(Shared.key_prefix() == nil)
+          # Valkey is up, but this Engine shares nothing on it: a local bucket, not an outage.
+          assert :ok = Shared.take_token(@ns, "never-named", 2, 1.0e-9, :keep, 60_000)
+        end)
+
+      assert length(String.split(log, "could not read its replica id")) == 2
+      assert log =~ "OPTIMAL_VALKEY_KEY_PREFIX"
+    end
+
+    test "a store without a sync_identity table has no replica id, from SQLite's own error" do
+      dir = Path.join(System.tmp_dir!(), "no-identity-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+      {:ok, db} = Exqlite.Sqlite3.open(Path.join(dir, "empty.db"))
+      on_exit(fn -> Exqlite.Sqlite3.close(db) end)
+
+      query = fn sql, _params ->
+        case Exqlite.Sqlite3.prepare(db, sql) do
+          {:ok, stmt} -> Exqlite.Sqlite3.fetch_all(db, stmt)
+          {:error, reason} -> {:error, reason}
+        end
+      end
+
+      assert {:error, _no_such_table} =
+               query.("SELECT replica_id FROM sync_identity WHERE id = 1", [])
+
+      assert Shared.replica_identity(query) == :none
+    end
 
     test "defaults to optimal:shared:<hash of the replica id>, the same every time" do
       expected = "optimal:shared:" <> digest(OptimalEngine.Sync.replica_id())
@@ -388,7 +448,7 @@ defmodule OptimalEngine.Storage.SharedTest do
       _ = Shared.key_prefix()
       assert_received :read
 
-      read_identity_as(fn -> {:ok, "replica-xyz"} end)
+      read_identity_as(fn -> {:ok, [["replica-xyz"]]} end)
       assert Shared.key_prefix() == "optimal:shared:" <> digest("replica-xyz")
 
       # Once read, it is kept even if a later read would fail.
@@ -396,36 +456,59 @@ defmodule OptimalEngine.Storage.SharedTest do
       assert Shared.key_prefix() == "optimal:shared:" <> digest("replica-xyz")
     end
 
-    test "without a replica id the PostgreSQL URL names the Engine, never its credentials" do
-      read_identity_as(fn -> :none end)
+    test "on the PostgreSQL store without a replica id, its URL names the Engine, never its credentials" do
+      none = fn _sql, _params -> {:ok, []} end
+      on_pg = fn -> Shared.resolve_prefix(store: OptimalEngine.Store.Postgres, query: none) end
 
       System.put_env(
         "OPTIMAL_POSTGRES_URL",
         "postgres://engine:s3cret@db.example:5432/eng_a?sslmode=require"
       )
 
-      a = Shared.key_prefix()
-      assert "optimal:shared:" <> _ = a
+      assert {:ok, "optimal:shared:" <> _ = a} = on_pg.()
       refute a =~ "s3cret"
 
-      Shared.reset_key_prefix()
       System.put_env("OPTIMAL_POSTGRES_URL", "postgres://other:rotated@db.example:5432/eng_a")
-      assert Shared.key_prefix() == a
+      assert on_pg.() == {:ok, a}
 
-      Shared.reset_key_prefix()
       System.put_env("OPTIMAL_POSTGRES_URL", "postgres://engine:s3cret@db.example:5432/eng_b")
-      refute Shared.key_prefix() == a
+      refute on_pg.() == {:ok, a}
 
-      Shared.reset_key_prefix()
       System.put_env("OPTIMAL_POSTGRES_SCHEMA", "tenant_b")
       System.put_env("OPTIMAL_POSTGRES_URL", "postgres://engine:s3cret@db.example:5432/eng_a")
-      refute Shared.key_prefix() == a
+      refute on_pg.() == {:ok, a}
+    end
+
+    @tag :postgres
+    test "a PostgreSQL store without a sync_identity table has no replica id, from PostgreSQL's own error" do
+      alias OptimalEngine.Test.PostgresStore
+      schema = PostgresStore.unique_schema("oe_valkey_id")
+      on_exit(fn -> PostgresStore.drop_schema(schema) end)
+      pool = PostgresStore.start_pool(schema)
+
+      query = fn sql, params ->
+        case OptimalEngine.Store.Postgres.Connection.query(pool, sql, params) do
+          {:ok, %{rows: rows}} -> {:ok, rows}
+          {:error, reason} -> {:error, reason}
+        end
+      end
+
+      assert {:error, _undefined_table} =
+               query.("SELECT replica_id FROM sync_identity WHERE id = 1", [])
+
+      assert Shared.replica_identity(query) == :none
+
+      System.put_env("OPTIMAL_POSTGRES_URL", PostgresStore.url())
+      System.put_env("OPTIMAL_POSTGRES_SCHEMA", schema)
+
+      assert {:ok, "optimal:shared:" <> _} =
+               Shared.resolve_prefix(store: OptimalEngine.Store.Postgres, query: query)
     end
 
     test "with nothing to name the Engine, it warns and keeps Valkey out of it" do
       stub = stub!()
       start_pool(stub)
-      read_identity_as(fn -> :none end)
+      read_identity_as(fn -> {:ok, []} end)
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
@@ -490,6 +573,26 @@ defmodule OptimalEngine.Storage.SharedTest do
     test "every Valkey answer is mirrored, but the table never grows past its bound" do
       for n <- 1..50, do: :ok = Local.mirror_bucket(@ns, "client-#{n}", 3.0, 60_000)
       assert :ets.info(@ns, :size) <= 10
+    end
+
+    test "a flood of new keys evicts the oldest mirrors in a batch, never all of them" do
+      # Later rows expire later: client-10 is the newest.
+      for n <- 1..10, do: :ok = Local.mirror_bucket(@ns, "client-#{n}", 3.0, 60_000 + n * 1_000)
+      :ok = Local.mirror_bucket(@ns, "client-11", 3.0, 80_000)
+
+      size = :ets.info(@ns, :size)
+      assert size <= 10 and size >= 5
+      assert :ets.member(@ns, "client-11")
+      assert :ets.member(@ns, "client-10")
+      refute :ets.member(@ns, "client-1")
+    end
+
+    test "the local bucket table is bounded the same way" do
+      for n <- 1..50,
+          do: Local.take_token(@ns, "local-#{n}", 3, 1.0e-6, :keep, 60_000 + n)
+
+      assert :ets.info(@ns, :size) <= 10
+      assert :ets.member(@ns, "local-50")
     end
   end
 
@@ -643,6 +746,78 @@ defmodule OptimalEngine.Storage.SharedTest do
       for _ <- 1..3, do: assert(:ok = RateLimiter.check("key:other", 3, 1))
       Local.clear(:optimal_api_rate_limit_buckets)
       assert {:rate_limited, _, _} = RateLimiter.check("key:other", 3, 1)
+    end
+
+    test "after an outage Valkey is charged what this node spent, never set to its count",
+         %{stub: stub} do
+      # A client this node never saw: denied during the outage, so it spent
+      # nothing, and the cluster's bucket must still be full when Valkey is back.
+      go_down(stub)
+      assert {:rate_limited, _, _} = RateLimiter.check("key:fresh", 3, 1)
+      ValkeyStub.set_mode(stub, :normal)
+      wait_until(&Pool.serving?/0)
+      for _ <- 1..3, do: assert(:ok = RateLimiter.check("key:fresh", 3, 1))
+      assert {:rate_limited, _, _} = RateLimiter.check("key:fresh", 3, 1)
+
+      # A mirrored bucket of 2: one token spent locally is one token less on Valkey.
+      assert :ok = RateLimiter.check("key:spent", 3, 1)
+      go_down(stub)
+      assert :ok = RateLimiter.check("key:spent", 3, 1)
+      ValkeyStub.set_mode(stub, :normal)
+      wait_until(&Pool.serving?/0)
+      assert :ok = RateLimiter.check("key:spent", 3, 1)
+      assert {:rate_limited, _, _} = RateLimiter.check("key:spent", 3, 1)
+    end
+
+    test "OPTIMAL_VALKEY_OUTAGE_POLICY=open gives an unseen client a normal local bucket", %{
+      stub: stub
+    } do
+      previous = System.get_env("OPTIMAL_VALKEY_OUTAGE_POLICY")
+      System.put_env("OPTIMAL_VALKEY_OUTAGE_POLICY", "open")
+
+      on_exit(fn ->
+        if previous,
+          do: System.put_env("OPTIMAL_VALKEY_OUTAGE_POLICY", previous),
+          else: System.delete_env("OPTIMAL_VALKEY_OUTAGE_POLICY")
+      end)
+
+      go_down(stub)
+      for _ <- 1..3, do: assert(:ok = RateLimiter.check("key:open", 3, 1))
+      assert {:rate_limited, _, _} = RateLimiter.check("key:open", 3, 1)
+
+      # Closed, the default: an unseen client waits for its bucket to refill.
+      System.put_env("OPTIMAL_VALKEY_OUTAGE_POLICY", "closed")
+      assert {:rate_limited, _, _} = RateLimiter.check("key:closed", 3, 1)
+    end
+
+    test "the generation key expires unless used, and a use renews it", %{stub: stub} do
+      :ok = Shared.clear(@ns)
+      gen = "#{Shared.key_prefix()}:#{@ns}:gen"
+      assert ValkeyStub.pttl(stub, gen) > 0
+
+      # One written before it had a TTL gets one on its next use.
+      :ok = ValkeyStub.put_raw(stub, gen, "4")
+      :ok = ValkeyStub.persist(stub, gen)
+      assert ValkeyStub.pttl(stub, gen) == nil
+      _ = Shared.get(@ns, "anything")
+      assert ValkeyStub.pttl(stub, gen) > 0
+    end
+
+    test "the generation keys of the layout before the prefix are removed once nothing is under them",
+         %{stub: stub} do
+      :ok = ValkeyStub.put_raw(stub, "optimal:shared:optimal_legacy_idle:gen", "3")
+      :ok = ValkeyStub.put_raw(stub, "optimal:shared:optimal_legacy_busy:gen", "2")
+      # An Engine still on the old layout keeps a live key there.
+      :ok = ValkeyStub.put_raw(stub, "optimal:shared:optimal_legacy_busy:2:k:x", "v")
+
+      Shared.reset_legacy_cleanup()
+      _ = Shared.get(@ns, "anything")
+
+      wait_until(fn ->
+        not Map.has_key?(ValkeyStub.keys(stub), "optimal:shared:optimal_legacy_idle:gen")
+      end)
+
+      assert Map.has_key?(ValkeyStub.keys(stub), "optimal:shared:optimal_legacy_busy:gen")
     end
 
     test "denied API checks on Valkey do not refill the bucket faster than its rate" do

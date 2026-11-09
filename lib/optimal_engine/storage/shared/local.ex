@@ -39,7 +39,7 @@ defmodule OptimalEngine.Storage.Shared.Local do
 
   @doc """
   Stores `value` for `ttl_ms`. With `:max_entries`, a full table drops its
-  expired rows first and every row when the live ones still fill it.
+  expired rows first and then its oldest rows, a tenth of the bound at a time.
   """
   @spec put(atom(), term(), term(), pos_integer(), keyword()) :: :ok
   def put(table, key, value, ttl_ms, opts \\ []) do
@@ -139,17 +139,34 @@ defmodule OptimalEngine.Storage.Shared.Local do
       node without Valkey always has; `:empty` opens it with no tokens and the
       stamp at now, so it refills at its rate. A node that never saw the
       bucket on Valkey does not know how much of it other nodes spent.
-    * `:mark` - `:fallback` marks the rows it writes, so the first step back on
-      Valkey hands the server the lower count (`fallback_tokens/4`).
+    * `:mark` - `:fallback` marks the rows it writes and counts the tokens
+      taken while marked, so the first step back on Valkey charges the server
+      what this node spent (`fallback_spent/2`).
+
+  The table is bounded like `put/5` with `:max_entries`
+  (`config :optimal_engine, :shared_bucket_max_entries`, 100000): a new bucket
+  in a full table first drops the expired rows, then the oldest ones.
   """
   @spec take_token(atom(), term(), number(), float(), :keep | :advance, pos_integer(), keyword()) ::
           :ok | {:limited, float(), non_neg_integer()}
   def take_token(table, key, capacity, refill_per_ms, deny, ttl_ms, opts \\ []) do
     new_table(table)
     now = now()
-    write = fn tokens -> :ets.insert(table, {key, bucket(tokens, now, opts), now + ttl_ms}) end
+    rows = :ets.lookup(table, key)
 
-    case :ets.lookup(table, key) do
+    spent =
+      case rows do
+        [{^key, {_tokens, _stamp, {:fallback, spent}}, _expires}] -> spent
+        _ -> 0
+      end
+
+    write = fn tokens, taken ->
+      :ets.insert(table, {key, bucket(tokens, now, opts, spent + taken), now + ttl_ms})
+    end
+
+    if rows == [], do: bound(table, now)
+
+    case rows do
       [{^key, state, expires}] when expires > now and is_tuple(state) ->
         stamp = elem(state, 1)
         elapsed = now - stamp
@@ -157,7 +174,7 @@ defmodule OptimalEngine.Storage.Shared.Local do
 
         cond do
           current >= 1.0 ->
-            write.(current - 1.0)
+            write.(current - 1.0, 1)
             :ok
 
           # Storing `current` under the old stamp would credit `elapsed`
@@ -165,7 +182,7 @@ defmodule OptimalEngine.Storage.Shared.Local do
           # through before the rate allows. A mirror of Valkey's bucket being
           # spent locally is marked even when the step is denied.
           deny == :advance or (Keyword.get(opts, :mark) != nil and tuple_size(state) == 2) ->
-            write.(current)
+            write.(current, 0)
             {:limited, current, elapsed}
 
           true ->
@@ -177,22 +194,22 @@ defmodule OptimalEngine.Storage.Shared.Local do
           # A first request (or one after the bucket idled out) opens a full
           # bucket and takes one token from it.
           :full ->
-            write.(capacity - 1.0)
+            write.(capacity - 1.0, 1)
             :ok
 
           # Written whatever `deny` says, or the stamp would never move and
           # the bucket would never refill.
           :empty ->
-            write.(0.0)
+            write.(0.0, 0)
             {:limited, 0.0, 0}
         end
     end
   end
 
-  defp bucket(tokens, now, opts) do
+  defp bucket(tokens, now, opts, spent) do
     case Keyword.get(opts, :mark) do
       nil -> {tokens, now}
-      mark -> {tokens, now, mark}
+      mark -> {tokens, now, {mark, spent}}
     end
   end
 
@@ -226,27 +243,44 @@ defmodule OptimalEngine.Storage.Shared.Local do
   end
 
   @doc """
-  The tokens a bucket spent during an outage holds now (refilled to now, at
-  most `capacity`), or `nil` when the bucket was not written during one.
+  The tokens this node took from a bucket while Valkey was down, or `nil`
+  when the bucket was not written during an outage. Valkey is charged this
+  much when it answers again; it is a lower bound on what was spent, never the
+  bucket's count.
   """
-  @spec fallback_tokens(atom(), term(), number(), float()) :: float() | nil
-  def fallback_tokens(table, key, capacity, refill_per_ms) do
+  @spec fallback_spent(atom(), term()) :: non_neg_integer() | nil
+  def fallback_spent(table, key) do
     now = now()
 
     case :ets.lookup(table, key) do
-      [{^key, {tokens, stamp, :fallback}, expires}] when expires > now ->
-        min(capacity * 1.0, tokens + (now - stamp) * refill_per_ms)
-
-      _ ->
-        nil
+      [{^key, {_tokens, _stamp, {:fallback, spent}}, expires}] when expires > now -> spent
+      _ -> nil
     end
   rescue
     ArgumentError -> nil
   end
 
+  defp bound(table, now) do
+    max = bucket_max_entries()
+    if :ets.info(table, :size) >= max, do: make_room(table, now, max)
+  end
+
+  # Expired rows first; then the rows that expire soonest (the oldest
+  # written, for one TTL), a tenth of the bound at a time, so a flood of new
+  # keys never wipes every live row at once.
   defp make_room(table, now, max) do
     :ets.select_delete(table, [{{:_, :_, :"$1"}, [{:<, :"$1", now}], [true]}])
-    if :ets.info(table, :size) >= max, do: :ets.delete_all_objects(table)
+    size = :ets.info(table, :size)
+
+    if size >= max do
+      table
+      |> :ets.select([{{:"$1", :_, :"$2"}, [], [{{:"$2", :"$1"}}]}])
+      |> Enum.sort()
+      |> Enum.take(size - max + max(div(max, 10), 1))
+      |> Enum.each(fn {_expires, key} -> :ets.delete(table, key) end)
+    end
+
+    :ok
   end
 
   defp now, do: System.monotonic_time(:millisecond)

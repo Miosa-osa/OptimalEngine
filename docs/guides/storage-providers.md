@@ -849,25 +849,38 @@ With `OPTIMAL_VALKEY_URL` set (`redis://[user:password@]host[:port][/db]`, `redi
 All of it goes through `OptimalEngine.Storage.Shared`, a small cache, counter, lock and token-bucket interface whose fallback is the process's own ETS table.
 Nothing durable lives in Valkey, and every key it holds has a TTL.
 
+**Which Engines share keys.** Without `OPTIMAL_VALKEY_KEY_PREFIX`, an Engine's keys are under `optimal:shared:` and a hash of the first of:
+
+1. `OPTIMAL_ENGINE_ID`, set by the platform per Engine;
+2. the store's replica id, which belongs to the database, not the Engine: a copy restored from another Engine's dump (a staging copy of production) has the same replica id, and on one Valkey the two draw on each other's buckets;
+3. on the PostgreSQL store only, `OPTIMAL_POSTGRES_URL` without user and password plus `OPTIMAL_POSTGRES_SCHEMA`, which belongs to the database and schema and moves every key when the host, pooler or URL changes.
+
+Processes of one Engine, and Engines on one database and schema, share their keys on purpose: they are one Engine to the rate limits and caches. For anything else that shares a Valkey, set `OPTIMAL_VALKEY_KEY_PREFIX` (or `OPTIMAL_ENGINE_ID`); that, not the default, is the isolation.
+A prefix is kept only once it came from one of those. A store without a `sync_identity` table has no replica id; a replica id that cannot be read is read again on the next call (that call runs on ETS, never under a second keyspace), and after 20 failures in a row it is logged once and read every ten seconds. An Engine with none of them logs a warning and keeps everything on ETS until `OPTIMAL_VALKEY_KEY_PREFIX` is set.
+
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `OPTIMAL_VALKEY_URL` | unset | Unset: no pool, everything on ETS, as before. |
 | `OPTIMAL_VALKEY_POOL_SIZE` | 4 | Connections per Engine process (1 to 32). |
 | `OPTIMAL_VALKEY_TIMEOUT_MS` | 500 | How long a command waits for its reply before the call is answered from ETS. |
-| `OPTIMAL_VALKEY_KEY_PREFIX` | keys under `optimal:shared:<hash>`, the hash of the Engine's identity | `P` puts every key this Engine writes under `P:shared:`: 1 to 64 of `A-Z a-z 0-9 : _ . -`, starting with a letter or digit (an invalid value is logged and the default used). The default identity is the store's replica id, or, on a store without one (PostgreSQL), `OPTIMAL_POSTGRES_URL` without its user and password plus `OPTIMAL_POSTGRES_SCHEMA`. It is the same for every process on one store and differs between Engines, so Engines sharing a Valkey never collide. **Required** for an Engine with neither: until it is set that Engine keeps its shared state in local ETS and logs a warning. A replica id that cannot be read for a moment is read again on the next call (that call runs on ETS), never replaced by a second keyspace. Set the same value on processes that must share buckets and caches but not a store. |
+| `OPTIMAL_VALKEY_KEY_PREFIX` | unset: keys under `optimal:shared:<hash of the Engine's identity>` | `P` puts every key this Engine writes under `P:shared:` (1 to 64 of `A-Z a-z 0-9 : _ . -`, starting with a letter or digit; an invalid value is logged and the default used). **This is the setting that isolates Engines.** `P:shared:*` is outside an ACL written for `~optimal:shared:*`: widen the ACL to `~P:shared:*` first, or every command is refused and the Engine stays on ETS. |
+| `OPTIMAL_ENGINE_ID` | unset | An id the platform gives each Engine (MIOSA sets it to the Engine's database id). When set, it is the identity the default prefix is hashed from. |
+| `OPTIMAL_VALKEY_OUTAGE_POLICY` | `closed` | What a bucket this process never saw on Valkey holds while Valkey is configured but down. `closed`: no tokens, refilling at its rate, so an outage can only tighten a limit, at the cost of 429s for new clients (and, after a restart mid-outage, for every client, since the mirrors are in memory). `open`: a full local bucket, as without Valkey, so clients keep working and each process may hand out a full bucket of its own. Buckets the process did see continue from their last Valkey answer either way. |
 
 Valkey being down never fails a request.
 A connection that cannot open, or fails mid-command, is closed and opened again with a backoff of 100 ms doubling to 5 seconds; while no connection is up every call runs on ETS at once, and a server that stops answering costs one timeout per connection before that.
 A removal Valkey could not take while it was unreachable (a revoked key, a cleared gate cache) is kept and applied before anything is read from Valkey again, so a revoked key's entry is never read back.
 `ApiKey.verify/1` reads the key row on every request in any case, so a revocation takes effect at once whatever any cache holds.
 A rate limit never loosens because Valkey dropped out.
-Each answer Valkey gives for a bucket is kept in the process's ETS table, and while Valkey is configured but not answering the process steps that last-known bucket; a bucket the process never saw on Valkey opens empty and refills at its rate, instead of full.
-When Valkey answers again, the first step on a bucket the process spent during the outage gives Valkey the tokens the local bucket holds, and Valkey keeps the lower of the two counts.
+Each answer Valkey gives for a bucket is kept in the process's ETS table, and while Valkey is configured but not answering the process steps that last-known bucket; a bucket the process never saw on Valkey opens as `OPTIMAL_VALKEY_OUTAGE_POLICY` says (empty by default).
+When Valkey answers again, the first step on a bucket the process used during the outage charges Valkey the tokens the process took meanwhile: a lower bound on what was spent, never the bucket's new count, so one process's outage cannot drain the bucket every other process draws on.
+The ETS tables are bounded (`config :optimal_engine, :shared_bucket_max_entries`, 100000 buckets): a new key in a full table drops the expired rows, then the oldest tenth.
 
 What is stored, and how:
 
 * Keys are `optimal:shared:<hash>:<namespace>:<generation>:<key>` (or `P:shared:<namespace>:...` with `OPTIMAL_VALKEY_KEY_PREFIX=P`); clearing a namespace moves its generation in one command, and the old keys expire.
   The default stays inside `optimal:shared:*`, so a Valkey ACL that allowed `~optimal:shared:*` before still covers it. A custom prefix needs the ACL widened to `~P:shared:*`, or every command is refused and the Engine stays on local ETS.
+* A generation key expires 30 days after its last use (every use past half that renews it), and nothing written under it lives longer than 15 days, so it goes only once nothing under it is left. The generation keys of the layout before the prefix (`optimal:shared:<namespace>:gen`, which never expired) are deleted once per boot when nothing else is left under them; one an older Engine still uses is kept.
 * Cached values are signed with an HMAC: a value this Engine did not write reads as a miss. The key comes from `CONNECTOR_KEY`; give every process that shares a Valkey the same `CONNECTOR_KEY` and they share cache entries, otherwise each reads only its own (the rate limits are shared either way). An `openbao:` reference in `CONNECTOR_KEY` is resolved through the Engine's secret resolver, never used as the key; while it cannot be read the process signs with a key of its own and logs why.
 * The key cache stores the SHA-256 of the stored bcrypt hash and the secret, never either of them.
 * A gate cache entry is keyed by the Engine's replica id, so Engines with stores of their own never share one; a store without a replica id keeps its gate cache entries in the process's ETS table.

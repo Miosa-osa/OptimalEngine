@@ -99,24 +99,37 @@ defmodule OptimalEngine.Storage.ValkeyIntegrationTest do
     assert :ok = Shared.take_token(@ns, "fast", 1, 1.0, :keep, 60_000)
   end
 
-  test "after an outage the bucket script keeps the lower of the local and the server bucket" do
-    # This node spent a fresh bucket down to nothing while Valkey was away.
+  test "after an outage the bucket script charges what this node spent, never sets its count" do
     Local.new_table(@ns)
+    now = System.monotonic_time(:millisecond)
 
-    :ets.insert(
-      @ns,
-      {"after-outage", {0.0, System.monotonic_time(:millisecond), :fallback},
-       System.monotonic_time(:millisecond) + 60_000}
-    )
+    # A bucket this node never saw, denied during the outage: nothing spent,
+    # so the server's full bucket stays full.
+    :ets.insert(@ns, {"unseen", {0.0, now, {:fallback, 0}}, now + 60_000})
+    assert :ok = Shared.take_token(@ns, "unseen", 3, 1.0e-6, :keep, 60_000)
+    assert [{"unseen", {left, _at}, _}] = :ets.lookup(@ns, "unseen")
+    assert_in_delta left, 2.0, 0.01
 
-    assert {:limited, tokens, _} = Shared.take_token(@ns, "after-outage", 3, 1.0e-6, :keep, 60_000)
-    assert tokens < 1.0
+    # Two tokens spent locally come off the server's three: one is left, and
+    # this step takes it.
+    :ets.insert(@ns, {"spent", {1.0, now, {:fallback, 2}}, now + 60_000})
+    assert :ok = Shared.take_token(@ns, "spent", 3, 1.0e-6, :keep, 60_000)
+    assert [{"spent", {mirrored, _at}, _}] = :ets.lookup(@ns, "spent")
+    assert_in_delta mirrored, 0.0, 0.01
+    assert {:limited, _, _} = Shared.take_token(@ns, "spent", 3, 1.0e-6, :keep, 60_000)
+  end
 
-    # The server bucket now carries that count; the local row is its mirror.
-    assert [{"after-outage", {mirrored, _at}, _}] = :ets.lookup(@ns, "after-outage")
-    assert mirrored < 1.0
-    :ets.delete(@ns, "after-outage")
-    assert {:limited, _, _} = Shared.take_token(@ns, "after-outage", 3, 1.0e-6, :keep, 60_000)
+  test "the generation key carries a TTL, given again when it was written without one" do
+    :ok = Shared.clear(@ns)
+    gen_key = "#{Shared.key_prefix()}:#{@ns}:gen"
+    assert {:ok, pttl} = Pool.command(["PTTL", gen_key])
+    assert pttl > 0
+
+    assert {:ok, 1} = Pool.command(["PERSIST", gen_key])
+    assert {:ok, -1} = Pool.command(["PTTL", gen_key])
+    _ = Shared.get(@ns, "anything")
+    assert {:ok, renewed} = Pool.command(["PTTL", gen_key])
+    assert renewed > 0
   end
 
   test "denied API checks do not refill the bucket faster than its rate" do
