@@ -147,6 +147,30 @@ defmodule OptimalEngine.Storage.BackupDualWrapTest do
     assert Schedule.status().encryption.recoverable_without_openbao == false
   end
 
+  test "a backup key that lives only in OpenBao is warned about, once, with no transit key too",
+       ctx do
+    System.delete_env("OPTIMAL_OPENBAO_TRANSIT_KEY")
+    hex = Base.encode16(:crypto.strong_rand_bytes(32))
+
+    OptimalEngine.TestSupport.OpenBaoStub.put_secret(ctx.bao, "optimal/engine", %{
+      "backup_key" => hex
+    })
+
+    System.put_env("OPTIMAL_BACKUP_KEY", "openbao:optimal/engine#backup_key")
+    Envelope.reset_warnings()
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, key} = Envelope.sealing_key()
+        assert byte_size(key) == 32
+        assert {:ok, _} = Envelope.sealing_key()
+      end)
+
+    assert length(String.split(log, "lost with that OpenBao")) == 2
+    assert log =~ "OPTIMAL_BACKUP_KEY"
+    refute log =~ hex
+  end
+
   test "the schedule says a dual-wrapped copy recovers without OpenBao" do
     status = Schedule.status()
     assert status.encryption.key_configured
