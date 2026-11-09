@@ -4,7 +4,8 @@ defmodule OptimalEngine.Secrets do
 
   A secret the Engine reads by name (`OPTIMAL_BACKUP_KEY`,
   `OPTIMAL_AUTHORITY_KEY`, `CONNECTOR_KEY`, `OPTIMAL_S3_ACCESS_KEY_ID`,
-  `OPTIMAL_S3_SECRET_ACCESS_KEY`) is resolved by `fetch/1`:
+  `OPTIMAL_S3_SECRET_ACCESS_KEY`, `OPTIMAL_QDRANT_API_KEY`) is resolved by
+  `fetch/1`:
 
     * a plain value in the environment is the secret, exactly as before;
     * a value of the form `openbao:<path>#<field>` is a reference: the secret
@@ -46,7 +47,8 @@ defmodule OptimalEngine.Secrets do
   @cache_key {__MODULE__, :cache}
   @not_references ~w(OPTIMAL_OPENBAO_ADDR OPTIMAL_OPENBAO_TOKEN)
   @engine_secrets ~w(OPTIMAL_BACKUP_KEY OPTIMAL_AUTHORITY_KEY CONNECTOR_KEY
-                     OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY)
+                     OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY
+                     OPTIMAL_QDRANT_API_KEY)
 
   @type reason ::
           :openbao_not_configured

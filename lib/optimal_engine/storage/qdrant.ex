@@ -6,7 +6,10 @@ defmodule OptimalEngine.Storage.Qdrant do
 
   Reached over its REST API through `OptimalEngine.Connectors.HTTP`, from
   `OPTIMAL_QDRANT_URL` and, when the server asks for one, `OPTIMAL_QDRANT_API_KEY`
-  (sent as the `api-key` header, never logged, described or returned).
+  (sent as the `api-key` header, never logged, described or returned). The key
+  is read through `OptimalEngine.Secrets`, so it may be an
+  `openbao:<path>#<field>` reference; one OpenBao cannot answer fails the
+  request with `{:api_key_unavailable, reason}` and nothing is sent.
 
   Health is `GET /collections` answered `200`: it exercises the key and the
   API, where `/healthz` answers anyone. The proof creates a collection of its
@@ -16,6 +19,7 @@ defmodule OptimalEngine.Storage.Qdrant do
   """
 
   alias OptimalEngine.Connectors.HTTP
+  alias OptimalEngine.Secrets
 
   @env "OPTIMAL_QDRANT_URL"
   @key_env "OPTIMAL_QDRANT_API_KEY"
@@ -150,18 +154,25 @@ defmodule OptimalEngine.Storage.Qdrant do
       {:error, reason} -> {:error, {:unreachable, class(reason)}}
     end
   catch
+    :throw, {:api_key_unavailable, _reason} = unavailable -> {:error, unavailable}
     _kind, _reason -> {:error, :unreachable}
   end
 
-  # Trimmed as `present?/1` reads it, so a key read from a file with its
-  # newline is sent as the key, and a blank one is not sent at all.
+  # The key is read through `OptimalEngine.Secrets`, so it may be an
+  # `openbao:<path>#<field>` reference; trimmed, so a key read from a file with
+  # its newline is sent as the key, and a blank one is not sent at all. A
+  # reference OpenBao cannot answer stops the request before it is sent: it
+  # never goes out without the key the operator configured.
   defp headers do
-    case System.get_env(@key_env) |> to_string() |> String.trim() do
-      "" ->
+    case Secrets.fetch(@key_env) do
+      {:ok, key} ->
+        [{"api-key", key}, {"content-type", "application/json"}]
+
+      {:error, :not_set} ->
         [{"content-type", "application/json"}]
 
-      key ->
-        [{"api-key", key}, {"content-type", "application/json"}]
+      {:error, {:secret_unavailable, _name, reason}} ->
+        throw({:api_key_unavailable, reason})
     end
   end
 
