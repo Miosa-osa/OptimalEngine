@@ -139,14 +139,9 @@ defmodule OptimalEngine.Health do
   end
 
   defp run_check(:migrations) do
-    case Store.raw_query(
-           "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='wiki_pages'",
-           []
-         ) do
-      {:ok, [[1]]} -> :ok
-      {:ok, [[0]]} -> {:error, :migrations_pending}
-      other -> {:error, {:migrations_unknown, other}}
-    end
+    if OptimalEngine.Store.Catalog.table_exists?("wiki_pages"),
+      do: :ok,
+      else: {:error, :migrations_pending}
   rescue
     e -> {:error, {:migrations_raised, Exception.message(e)}}
   end

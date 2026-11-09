@@ -10,6 +10,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
   alias OptimalEngine.Memory.Versioned
   alias OptimalEngine.Memory.Versioned.RetrievalDocument
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.Replace
 
   @fallback_model "nomic-embed-text"
 
@@ -101,7 +102,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
     """
 
-    case Store.raw_query(sql, [
+    case Replace.raw_query(sql, [
            memory.id,
            memory.tenant_id,
            memory.workspace_id,

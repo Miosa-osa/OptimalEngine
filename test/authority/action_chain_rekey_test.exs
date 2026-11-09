@@ -1092,16 +1092,14 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
     @hashlike ~r/(hash|sha256|signature|checksum|digest|fingerprint|dedupe|etag|nonce|seal|(^|_)mac($|_)|(^|_)sha($|_))/
 
     test "each is classified, so a new signed table has to be considered" do
-      {:ok, rows} =
-        Store.raw_query(
-          """
-          SELECT m.name, c.name FROM sqlite_master m, pragma_table_info(m.name) c
-          WHERE m.type = 'table'
-            AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) w WHERE w.name = 'workspace_id')
-          ORDER BY m.name, c.name
-          """,
-          []
-        )
+      {:ok, tables} = OptimalEngine.Store.Catalog.tables()
+
+      rows =
+        for table <- tables,
+            {:ok, columns} = OptimalEngine.Store.Catalog.column_names(table),
+            "workspace_id" in columns,
+            column <- Enum.sort(columns),
+            do: [table, column]
 
       found =
         rows
@@ -1124,6 +1122,8 @@ defmodule OptimalEngine.Authority.ActionChainRekeyTest do
   end
 
   describe "reading re-keys" do
+    # The index is named by SQLite's migration; PostgreSQL names it by a hash.
+    @tag :sqlite_store
     test "is by tenant, kind and sequence, from an index" do
       assert {:ok, [[1]]} =
                Store.raw_query(

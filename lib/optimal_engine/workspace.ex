@@ -34,6 +34,7 @@ defmodule OptimalEngine.Workspace do
 
   alias OptimalEngine.Authority.Evidence
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.Catalog
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.Organization
   alias OptimalEngine.Tenancy.Tenant
@@ -50,16 +51,8 @@ defmodule OptimalEngine.Workspace do
   # for rows under an unregistered id skips them.
   @own_tables ~w(workspaces workspace_handles)
   # The tables that check reads: those with an index that starts at
-  # workspace_id, so asking one for one id is an index lookup, never a scan.
-  @indexed_by_workspace """
-  SELECT m.name FROM sqlite_master m
-  WHERE m.type = 'table' AND m.sql NOT LIKE 'CREATE VIRTUAL TABLE%'
-    AND EXISTS (
-      SELECT 1 FROM pragma_index_list(m.name) il
-      JOIN pragma_index_info(il.name) ii
-      WHERE ii.seqno = 0 AND ii.name = 'workspace_id'
-    )
-  """
+  # workspace_id, so asking one for one id is an index lookup, never a scan
+  # (Store.Catalog.tables_indexed_by/2).
   # The id another system knows a workspace by: 1 to 255 printable ASCII
   # bytes without spaces, compared exactly, held by one active workspace of a
   # tenant, set once. The `workspaces.external_id` column holds it.
@@ -604,7 +597,7 @@ defmodule OptimalEngine.Workspace do
          {:ok, rows} <-
            Store.txn_query(
              txn,
-             "SELECT slug FROM workspace_handles WHERE workspace_id = ?1 AND slug != ?2 ORDER BY created_at, rowid",
+             "SELECT slug FROM workspace_handles WHERE workspace_id = ?1 AND slug != ?2 ORDER BY created_at, #{Catalog.insertion_order("slug")}",
              [current.id, slug]
            ) do
       {:ok, List.flatten(rows)}
@@ -696,10 +689,10 @@ defmodule OptimalEngine.Workspace do
   # Writes to an unregistered "<tenant>:<slug>" id are allowed, so an id can
   # hold rows before any workspace has it. A rename onto that slug would
   # strand them behind the renamed workspace's handle. Only the tables
-  # indexed by workspace are asked (@indexed_by_workspace), each by one index
+  # indexed by workspace are asked (Catalog.tables_indexed_by/2), each by one index
   # lookup, so the check stays short while it holds the Store's one writer.
   defp rows_under(txn, workspace_id) do
-    with {:ok, tables} <- Store.txn_query(txn, @indexed_by_workspace, []) do
+    with {:ok, tables} <- Catalog.tables_indexed_by("workspace_id", txn) do
       tables
       |> List.flatten()
       |> Enum.reject(&(&1 in @own_tables))

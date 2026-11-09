@@ -185,14 +185,14 @@ defmodule OptimalEngine.ScopePortabilityTest do
     :ok =
       :erl_tar.extract(String.to_charlist(ctx.path), [:compressed, {:cwd, String.to_charlist(dir)}])
 
-    {:ok, info} = Store.raw_query("PRAGMA table_info(#{table})", [])
+    {:ok, info} = OptimalEngine.Store.Catalog.column_names(table)
     content = Enum.map_join(rows, "", &(Jason.encode!(&1) <> "\n"))
     File.write!(Path.join([dir, "tables", table <> ".jsonl"]), content)
 
     entry = %{
       "name" => table,
       "rows" => length(rows),
-      "columns" => Enum.map(info, fn [_cid, name | _rest] -> name end),
+      "columns" => info,
       "sha256" => :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
     }
 

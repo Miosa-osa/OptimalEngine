@@ -377,20 +377,15 @@ defmodule OptimalEngine.Storage.PolicyStore do
   # A table name is what replication and the gate read rows by; SQLite matches
   # table names without regard to case.
   defp validate_entity_type(type) do
-    case Store.raw_query(
-           "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 COLLATE NOCASE",
-           [type]
-         ) do
-      {:ok, []} ->
-        if String.starts_with?(String.downcase(type), "authority_"),
-          do: {:error, :entity_type_names_a_table},
-          else: :ok
-
-      {:ok, _table} ->
+    cond do
+      OptimalEngine.Store.Catalog.table_exists?(type, case_insensitive: true) ->
         {:error, :entity_type_names_a_table}
 
-      {:error, reason} ->
-        {:error, reason}
+      String.starts_with?(String.downcase(type), "authority_") ->
+        {:error, :entity_type_names_a_table}
+
+      true ->
+        :ok
     end
   end
 

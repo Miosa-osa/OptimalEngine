@@ -494,6 +494,15 @@ defmodule OptimalEngine.Store.Postgres do
 
   defp recoverable(opts), do: Keyword.take(opts, [:recoverable])
 
+  @doc """
+  Runs `fun` with a read-only snapshot of the database
+  (`OptimalEngine.Store.Postgres.Connection.snapshot/3`); `txn_query/4` reads
+  through the handle it gets.
+  """
+  @spec read_snapshot((term() -> result), timeout()) :: result | {:error, term()}
+        when result: term()
+  def read_snapshot(fun, timeout \\ 3_600_000), do: Connection.snapshot(@pool, fun, timeout)
+
   # ---------------------------------------------------------------------------
   # Full-text indexes
   # ---------------------------------------------------------------------------

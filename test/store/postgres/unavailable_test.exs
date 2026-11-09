@@ -11,8 +11,7 @@ defmodule OptimalEngine.Store.Postgres.UnavailableTest do
   alias OptimalEngine.Store.Postgres.{Connection, Schema}
   alias OptimalEngine.Test.PostgresStore
 
-  @features ~w(replication app_data_collections sqlite_catalog rowid replace_writes
-               runtime_schema_and_transactions)
+  @features ~w(replication app_data_collections runtime_schema_and_transactions)
 
   # Where the PostgreSQL store and its dialect refuse a statement or a feature.
   @refusing ~w(lib/optimal_engine/store/dialect.ex lib/optimal_engine/store/postgres/connection.ex

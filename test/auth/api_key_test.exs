@@ -85,8 +85,11 @@ defmodule OptimalEngine.Auth.ApiKeyTest do
       listed = List.flatten(pages)
       assert length(listed) == 60
       assert Enum.sort(listed) == Enum.sort(minted)
-      # Newest first.
-      assert hd(listed) == List.last(minted)
+      # Newest first: SQLite breaks a tie of one second by rowid, the order the
+      # keys were written in; PostgreSQL has no such order and breaks it by id
+      # (Store.Catalog.insertion_order/1), so only the pages are checked there.
+      unless OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres),
+        do: assert(hd(listed) == List.last(minted))
     end
   end
 

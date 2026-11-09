@@ -66,7 +66,7 @@ defmodule OptimalEngine.StorageAudit do
   end
 
   defp foreign_keys do
-    case Store.raw_query("PRAGMA foreign_key_check", []) do
+    case OptimalEngine.Store.Catalog.foreign_key_violations() do
       {:ok, []} -> {:ok, "no violations"}
       {:ok, rows} -> {:error, %{violations: length(rows)}}
       other -> {:error, other}
@@ -189,7 +189,7 @@ defmodule OptimalEngine.StorageAudit do
     SELECT storage_uri, checksum_sha256, offsite, metadata
     FROM backup_records
     WHERE status = 'completed' AND integrity_status = 'verified'
-    ORDER BY verified_at DESC, rowid DESC LIMIT 1
+    ORDER BY verified_at DESC, #{OptimalEngine.Store.Catalog.insertion_order("id")} DESC LIMIT 1
     """
 
     case Store.raw_query(sql, []) do

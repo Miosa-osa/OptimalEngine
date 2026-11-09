@@ -194,24 +194,16 @@ defmodule OptimalEngine.Store.Migrations do
     unless Map.has_key?(superseded_tables(), table),
       do: raise(ArgumentError, "not a superseded table: #{inspect(table)}")
 
-    case OptimalEngine.Store.raw_query(
-           "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-           [table]
-         ) do
-      {:ok, []} ->
-        {:ok, 0}
-
-      {:ok, _exists} ->
-        case OptimalEngine.Store.raw_query(
-               "SELECT COUNT(*) FROM \"#{table}\" WHERE workspace_id = ?1",
-               [workspace_id]
-             ) do
-          {:ok, [[count]]} -> {:ok, count}
-          other -> other
-        end
-
-      other ->
-        other
+    if OptimalEngine.Store.Catalog.table_exists?(table) do
+      case OptimalEngine.Store.raw_query(
+             "SELECT COUNT(*) FROM \"#{table}\" WHERE workspace_id = ?1",
+             [workspace_id]
+           ) do
+        {:ok, [[count]]} -> {:ok, count}
+        other -> other
+      end
+    else
+      {:ok, 0}
     end
   end
 

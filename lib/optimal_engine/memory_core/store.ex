@@ -9,6 +9,7 @@ defmodule OptimalEngine.MemoryCore.Store do
   """
 
   alias OptimalEngine.Store
+  alias OptimalEngine.Store.Replace
 
   alias OptimalEngine.MemoryCore.{
     Claim,
@@ -1680,7 +1681,7 @@ defmodule OptimalEngine.MemoryCore.Store do
     )
     """
 
-    Store.raw_execute(sql, [
+    Replace.raw_execute(sql, [
       operation.id,
       operation.tenant_id,
       operation.workspace_id,
@@ -1742,7 +1743,7 @@ defmodule OptimalEngine.MemoryCore.Store do
     )
     """
 
-    Store.raw_execute(sql, [
+    Replace.raw_execute(sql, [
       definition.id,
       definition.tenant_id,
       definition.workspace_id,

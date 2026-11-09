@@ -64,3 +64,12 @@ test/wiki/integrity_test.exs
 test/wiki/page_test.exs
 test/wiki/scheduler_test.exs
 test/wiki/store_test.exs
+test/data_steward_relabel_bare_scope_test.exs
+test/api/workspace_rename_test.exs
+test/portability/workspace_id_followups_test.exs
+test/portability/workspace_id_validation_test.exs
+test/store/vectors_test.exs
+test/memory/versioned_embeddings_test.exs
+test/retrieval/memory_ranking_test.exs
+test/topology/workspace_surface_spine_test.exs
+test/auth/api_key_test.exs
