@@ -95,4 +95,90 @@ defmodule OptimalEngine.Memory.ForgetChainTest do
     for doomed <- [first, second, third],
         do: assert(outside_ledger(StoreGrep.find_all(doomed)) == [], doomed)
   end
+
+  defp insert_raw!(ctx, id, parent, content, version, opts \\ []) do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO memories (id, tenant_id, workspace_id, content, version, parent_memory_id, root_memory_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        [
+          id,
+          Keyword.get(opts, :tenant, ctx.tenant),
+          Keyword.get(opts, :workspace, ctx.workspace),
+          content,
+          version,
+          parent,
+          Keyword.get(opts, :root)
+        ]
+      )
+  end
+
+  test "a parent_memory_id cycle without a root is an error, and erases nothing", ctx do
+    doomed = text(ctx, "cycle")
+    [a, b] = ["cycle-a-#{ctx.n}", "cycle-b-#{ctx.n}"]
+    insert_raw!(ctx, a, nil, doomed, 1)
+    insert_raw!(ctx, b, a, text(ctx, "cycleb"), 2)
+    {:ok, _} = Store.raw_query("UPDATE memories SET parent_memory_id = ?1 WHERE id = ?2", [b, a])
+
+    assert {:error, :memory_chain_broken} = Versioned.forget(a)
+    {:ok, rows} = Store.raw_query("SELECT is_forgotten, content FROM memories WHERE id = ?1", [a])
+    assert rows == [[0, doomed]]
+  end
+
+  test "the chain is the memory's workspace's: a link into another workspace is not followed",
+       ctx do
+    {:ok, other} = Workspace.create(%{slug: "forget-chain-other-#{ctx.n}", name: "Other"})
+    theirs = text(ctx, "theirs")
+    mine = text(ctx, "mine")
+    their_root = "foreign-root-#{ctx.n}"
+    insert_raw!(ctx, their_root, nil, theirs, 1, workspace: other.id, tenant: other.tenant_id)
+    # A row of this workspace that names the other workspace's memory.
+    insert_raw!(ctx, "mine-#{ctx.n}", their_root, mine, 2)
+
+    assert :ok = Versioned.forget("mine-#{ctx.n}")
+    assert outside_ledger(StoreGrep.find_all(mine)) == []
+    refute StoreGrep.find_all(theirs) == []
+
+    {:ok, [[flag]]} =
+      Store.raw_query("SELECT is_forgotten FROM memories WHERE id = ?1", [their_root])
+
+    assert flag == 0
+  end
+
+  # The update waits for the forget holding the chain's root, and so lands
+  # after it: refused, with no new version.
+  @tag :postgres_engine
+  test "an update waits for a forget that holds the chain's root, and is then refused", ctx do
+    {:ok, v1} = Memory.create(%{content: text(ctx, "held"), workspace_id: ctx.workspace})
+    newer = text(ctx, "heldnewer")
+    test = self()
+
+    holder =
+      Task.async(fn ->
+        Store.transaction(fn txn ->
+          :ok = Store.txn_lock_row(txn, "memories", "id", v1.id)
+          send(test, :held)
+
+          receive do
+            :release -> :ok
+          after
+            10_000 -> :ok
+          end
+
+          {:ok, _} =
+            Store.txn_execute(txn, "UPDATE memories SET is_forgotten = 1 WHERE id = ?1", [v1.id])
+
+          {:ok, :done}
+        end)
+      end)
+
+    assert_receive :held, 5_000
+    update = Task.async(fn -> Memory.update(v1.id, %{content: newer}) end)
+
+    # Still waiting on the root's row while the holder has it.
+    assert Task.yield(update, 500) == nil
+    send(holder.pid, :release)
+    assert {:ok, :done} = Task.await(holder, 10_000)
+    assert {:error, :forgotten} = Task.await(update, 10_000)
+    assert live_with(ctx, newer) == []
+  end
 end
