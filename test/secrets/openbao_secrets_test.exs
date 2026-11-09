@@ -22,7 +22,8 @@ defmodule OptimalEngine.Secrets.OpenBaoSecretsTest do
   @env ~w(OPTIMAL_OPENBAO_ADDR OPTIMAL_OPENBAO_TOKEN OPTIMAL_OPENBAO_KV_MOUNT
           OPTIMAL_BACKUP_KEY OPTIMAL_AUTHORITY_KEY CONNECTOR_KEY
           OPTIMAL_S3_ENDPOINT OPTIMAL_S3_BUCKET OPTIMAL_S3_ACCESS_KEY_ID
-          OPTIMAL_S3_SECRET_ACCESS_KEY OPTIMAL_S3_CREDENTIALS_FILE)
+          OPTIMAL_S3_SECRET_ACCESS_KEY OPTIMAL_S3_CREDENTIALS_FILE
+          OPTIMAL_CONNECTOR_CREDENTIAL_STORE OPTIMAL_OPENBAO_TRANSIT_KEY)
 
   setup do
     previous = Map.new(@env, &{&1, System.get_env(&1)})
@@ -287,8 +288,18 @@ defmodule OptimalEngine.Secrets.OpenBaoSecretsTest do
 
     status = OpenBao.Adapter.status()
     assert status.secret_references == ["OPTIMAL_BACKUP_KEY"]
-    assert status.connector_credentials == "openbao"
+    # Configuring OpenBao does not move connector credentials into it.
+    assert status.connector_credentials == "engine"
     assert status.backup_transit_key == nil
+    assert OpenBao.Adapter.serves() == ["secret_references"]
+
+    System.put_env("OPTIMAL_CONNECTOR_CREDENTIAL_STORE", "openbao")
+    assert OpenBao.Adapter.status().connector_credentials == "openbao"
+    assert OpenBao.Adapter.serves() == ["secret_references", "connector_credentials"]
+
+    System.delete_env("OPTIMAL_BACKUP_KEY")
+    System.delete_env("OPTIMAL_CONNECTOR_CREDENTIAL_STORE")
+    assert OpenBao.Adapter.serves() == []
     assert OpenBaoStub.requests(stub) == []
   end
 end

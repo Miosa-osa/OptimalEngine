@@ -30,6 +30,25 @@ defmodule OptimalEngine.Storage.OpenBao.Adapter do
   @impl OptimalEngine.Storage.Provider
   def capabilities, do: @capabilities
 
+  @doc """
+  What the Engine routes through OpenBao now, from the configuration alone:
+  `secret_references` when one of the Engine's secrets is an OpenBao
+  reference, `connector_credentials` when
+  `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`, and `backup_key_wrapping`
+  when a transit key wraps backup data keys. Empty when OpenBao is only
+  probed, so it is reported `probe_only`.
+  """
+  @spec serves() :: [String.t()]
+  def serves do
+    [
+      {"secret_references", Enum.any?(@engine_secrets, &(Secrets.source(&1) == "openbao"))},
+      {"connector_credentials", CredentialVault.mode() == :openbao},
+      {"backup_key_wrapping", OpenBao.transit_key() != nil}
+    ]
+    |> Enum.filter(&elem(&1, 1))
+    |> Enum.map(&elem(&1, 0))
+  end
+
   @impl OptimalEngine.Storage.Provider
   def describe do
     %{

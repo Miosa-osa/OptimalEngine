@@ -87,7 +87,7 @@ At 70 percent of any limit the recommendation is `resize` to the next profile, w
 | `disk_bytes` | `s3` | Wired. Moves assets and backups off the disk. |
 | `writes_per_minute` | `postgres`, `nats_jetstream` | `postgres` is wired but partial; `nats_jetstream` publishes the change ledger to subscribers (`OPTIMAL_NATS_FLOWS=ledger`), but Engine writes still land in SQLite first, so it adds no write capacity. |
 | any other gauge | `postgres` | Wired but partial. |
-| no gauge (secrets) | `openbao` | Not named by a recommendation. In the data path when configured: secret references, connector credentials and backup transit keys ([Storage providers](storage-providers.md#openbao)). |
+| no gauge (secrets) | `openbao` | Not named by a recommendation. In the data path when configured: secret references, connector credentials (opt in) and backup transit keys ([Storage providers](storage-providers.md#openbao)). |
 
 The recommendation names a provider whether or not the Engine can use it, so check `GET /api/storage/providers` (`adapter_implemented`) before acting on it.
 

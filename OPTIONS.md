@@ -57,7 +57,7 @@ bin/optimal close "what changed and how verified"
 | `OPTIMAL_ASSET_RECONCILE_INTERVAL_MS` | `600000` (10 minutes) | How often assets kept on the local disk during an object store outage are put in the bucket, while any are pending and S3 is configured; `0` turns it off. |
 | `OPTIMAL_ENGINE_ROOT` | repo root | Engine root for source-checkout usage. |
 | `OPTIMAL_KNOWLEDGE_BACKEND` | `ets` | Backend of the triple-store mirror of `graph_edges`: `ets`, `rocksdb`, or `mnesia`. `scripts/run-engine.sh` defaults it to `rocksdb`; the Docker image and MIOSA template set nothing. |
-| `CONNECTOR_KEY` | generated into `.optimal/connector_key` | Local connector secret, or an OpenBao reference. Connector credentials are refused without it unless OpenBao holds them; they are never stored in plaintext. |
+| `CONNECTOR_KEY` | generated into `.optimal/connector_key` | Local connector secret, or an OpenBao reference. Connector credentials are refused without it unless OpenBao holds them (`OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`); they are never stored in plaintext. |
 | `OPTIMAL_CLAIM_PROMOTION_MODE` | `auto_threshold` | `auto_threshold`: the Engine promotes Claims whose confidence meets the workspace threshold every 30 minutes, as `system:promotion-scheduler`. `manual` or `agent_review`: it promotes nothing, and every Claim waits for a reviewer with `claims:review`. Other values fail startup configuration. |
 
 Keep private values in environment variables, local secret stores, or deployment secret managers.
@@ -97,11 +97,11 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 | `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS`, `OPTIMAL_OFFSITE_BACKUP_KEEP`, `OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL` | off, `14`, `3` | Scheduled offsite backups and how many copies are kept. |
 | `CONNECTOR_KEY` | none | 64 hex characters, or `openbao:<path>#<field>`; seals connector and peer credentials in the database. |
 | `OPTIMAL_AUTHORITY_KEY` | none | 64 hex characters, or `openbao:<path>#<field>`; wraps the authority signing keys. |
-| `OPTIMAL_OPENBAO_ADDR`, `OPTIMAL_OPENBAO_TOKEN` | none | OpenBao address and token. With both set, connector credentials are kept in OpenBao and the secret references above resolve. |
+| `OPTIMAL_OPENBAO_ADDR`, `OPTIMAL_OPENBAO_TOKEN` | none | OpenBao address and token. With both set the secret references above resolve; connector credentials stay in the Engine unless `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`. |
 | `OPTIMAL_OPENBAO_KV_MOUNT` | `secret` | KV version 2 mount for references and connector credentials; enabled on first write when the token may. |
 | `OPTIMAL_OPENBAO_TRANSIT_KEY`, `OPTIMAL_OPENBAO_TRANSIT_MOUNT` | none, `transit` | Transit key that wraps each offsite backup's data key beside `OPTIMAL_BACKUP_KEY`, which stays required so a copy restores without this OpenBao. |
 | `OPTIMAL_BACKUP_TRANSIT_ONLY` | `false` | `true` lets a transit key seal copies without `OPTIMAL_BACKUP_KEY`. Risk: those copies open only through that OpenBao, and are lost with it (its machine, storage or unseal keys). |
-| `OPTIMAL_CONNECTOR_CREDENTIAL_STORE` | `openbao` when OpenBao is configured, else `engine` | `engine` keeps connector credentials as database envelopes; `openbao` refuses writes without OpenBao. |
+| `OPTIMAL_CONNECTOR_CREDENTIAL_STORE` | `engine` | `openbao` keeps new connector credentials in OpenBao (refused without OpenBao configured). They are then not in Engine backups: back up OpenBao's storage and unseal keys yourself. Anything else keeps them as database envelopes. |
 
 The mirror is not what retrieval reads: the graph that search and assembly read is the `graph_edges` table in SQLite.
 

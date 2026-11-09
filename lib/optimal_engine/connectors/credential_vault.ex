@@ -2,18 +2,26 @@ defmodule OptimalEngine.Connectors.CredentialVault do
   @moduledoc """
   Connector credentials kept in OpenBao instead of the Engine database.
 
-  When OpenBao is configured (`OPTIMAL_OPENBAO_ADDR` and
-  `OPTIMAL_OPENBAO_TOKEN`), a connector's credentials are written to the KV
-  version 2 secret `optimal/connectors/<tenant>/<connector id>` under
-  `OPTIMAL_OPENBAO_KV_MOUNT`, and the connector row holds only the marker
+  Only with `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao` (and OpenBao
+  configured: `OPTIMAL_OPENBAO_ADDR` and `OPTIMAL_OPENBAO_TOKEN`) are a
+  connector's credentials written to the KV version 2 secret
+  `optimal/connectors/<tenant>/<connector id>` under
+  `OPTIMAL_OPENBAO_KV_MOUNT`, with the connector row holding only the marker
   `"credentials_store": "openbao"`: no ciphertext, no key, nothing a copy of
-  the database could open. Without OpenBao they are sealed into the row with
-  `CONNECTOR_KEY` as before (`OptimalEngine.Connectors.Credential`).
+  the database could open. Otherwise, OpenBao configured or not, they are
+  sealed into the row with `CONNECTOR_KEY` as before
+  (`OptimalEngine.Connectors.Credential`): configuring OpenBao for secret
+  references does not move credentials anywhere.
 
-  `OPTIMAL_CONNECTOR_CREDENTIAL_STORE` overrides the choice: `openbao` (a
-  write without OpenBao configured is refused) or `engine` (always the
-  database envelope). Rows written either way keep being read the way they
-  were written, so switching never strands a connector.
+  `openbao` with OpenBao not configured refuses the write. Rows written either
+  way keep being read the way they were written, so switching never strands
+  a connector.
+
+  Engine backups do not include OpenBao: a backup of the Engine database holds
+  the marker, not the credentials. Back up OpenBao's own storage (for its
+  integrated storage, `bao operator raft snapshot save`; for file storage, its
+  data directory) together with its unseal keys, or a restored Engine has
+  connectors whose credentials are gone.
 
   The path is derived from the row's own tenant and id, never read from the
   row, so a config cannot point a connector at another connector's secret.
@@ -35,15 +43,15 @@ defmodule OptimalEngine.Connectors.CredentialVault do
   def marker_key, do: @marker_key
 
   @doc """
-  Where new credentials go: `:openbao` or `:engine`. An unknown value of
-  `OPTIMAL_CONNECTOR_CREDENTIAL_STORE` is read as unset.
+  Where new credentials go: `:openbao` only when
+  `OPTIMAL_CONNECTOR_CREDENTIAL_STORE` is `openbao`; otherwise `:engine`,
+  whether or not OpenBao is configured. An unknown value is read as unset.
   """
   @spec mode() :: :openbao | :engine
   def mode do
     case System.get_env(@mode_env) |> to_string() |> String.trim() |> String.downcase() do
       "openbao" -> :openbao
-      "engine" -> :engine
-      _auto -> if OpenBao.configured?(), do: :openbao, else: :engine
+      _engine_or_unset -> :engine
     end
   end
 

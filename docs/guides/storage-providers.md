@@ -535,13 +535,19 @@ A backup is then refused with `backup_key_unavailable`, an authority key is not 
 
 ### Connector Credentials
 
-With OpenBao configured, connector credentials are written to `optimal/connectors/<tenant>/<connector id>` under the mount, and the connector row keeps only the marker `"credentials_store": "openbao"`: nothing in the Engine database can open them, and `CONNECTOR_KEY` is not needed for them.
+Connector credentials move into OpenBao only when the operator opts in with `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`.
+Configuring OpenBao (for secret references, say) does not move them: without that setting they are sealed into the connector row with `CONNECTOR_KEY`, as they always were.
+Opted in, they are written to `optimal/connectors/<tenant>/<connector id>` under the mount, and the connector row keeps only the marker `"credentials_store": "openbao"`: nothing in the Engine database can open them, and `CONNECTOR_KEY` is not needed for them.
+
+**Engine backups do not include OpenBao.** A backup of the Engine (local or offsite) copies the Engine database, which holds the marker, not the credentials.
+An operator who opts in must back up OpenBao separately: its storage (for integrated storage, `bao operator raft snapshot save <file>`; for file storage, its data directory) and its unseal keys or recovery keys.
+Restoring an Engine backup without that OpenBao gives connectors that fail every sync with `credentials_not_found` until their credentials are entered again.
 The path comes from the row's own tenant and id, never from its config.
 A sync reads the secret just before the adapter starts, for that cycle only; OpenBao sealed or unreachable fails the run with `credentials_unavailable` and the reason, before any adapter code runs.
 A write OpenBao refuses is refused (`503 openbao_sealed`, `openbao_unreachable`, ...), and no row is left claiming credentials.
 Removing a connector's credentials or deleting the connector deletes the secret; a delete OpenBao refuses keeps the connector, so no secret outlives it unseen.
 Rows sealed with `CONNECTOR_KEY` before OpenBao was configured keep being read the way they were written.
-`OPTIMAL_CONNECTOR_CREDENTIAL_STORE=engine` keeps writing database envelopes with OpenBao configured, and `openbao` refuses a write when OpenBao is not configured.
+`OPTIMAL_CONNECTOR_CREDENTIAL_STORE` unset, `engine` or any other value writes database envelopes; `openbao` refuses a write when OpenBao is not configured.
 
 A server initialised without a secrets engine (as the in-guest one is) gets its KV version 2 mount enabled by the Engine's first write, when the token may do that (the in-guest root token may); otherwise the write fails with `openbao_mount_missing`, and `bao secrets enable -path=secret -version=2 kv` fixes it.
 
@@ -569,7 +575,8 @@ A transit key named without OpenBao configured is refused, never replaced by the
 Rotating the transit key (`bao write -f transit/keys/optimal-backup/rotate`) keeps every older copy restorable; deleting the key loses every copy sealed with it.
 `GET /api/backup/offsite` reports `schedule.encryption.key_source` (`openbao_transit+env`, `openbao_transit+openbao`, `openbao_transit`, `openbao`, `env`, or `unset`), `recoverable_without_openbao`, and the key id, never the key.
 
-`OptimalEngine.Storage.OpenBao.Adapter.status/1` reports, without reading a secret, which of the Engine's secrets are references (`secret_references`), where connector credentials are written (`connector_credentials`), and the transit key id (`backup_transit_key`).
+`OptimalEngine.Storage.OpenBao.Adapter.status/1` reports, without reading a secret, which of the Engine's secrets are references (`secret_references`), where connector credentials are written (`connector_credentials`, `engine` unless opted in), and the transit key id (`backup_transit_key`).
+`GET /api/storage/providers` lists what is routed through it in `serves` (`secret_references`, `connector_credentials`, `backup_key_wrapping`); a configured OpenBao none of them uses is `probe_only`.
 
 ## Provider Status
 
@@ -587,7 +594,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
 | `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`) and the proof (a Parquet file written and read back) | No Engine projection is written to it yet |
-| `openbao` | Wired, in the data path | Secret references for the backup, authority, connector and S3 keys; connector credentials kept in KV instead of the database; backup data keys wrapped by transit; the probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` ([OpenBao](#openbao)) | PKI; the OpenBao token itself still comes from the environment; peer sync credentials are still sealed with `CONNECTOR_KEY` |
+| `openbao` | Wired, in the data path | Secret references for the backup, authority, connector and S3 keys; connector credentials kept in KV instead of the database (opt in, not in Engine backups); backup data keys wrapped by transit beside `OPTIMAL_BACKUP_KEY`; the probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` ([OpenBao](#openbao)) | PKI; the OpenBao token itself still comes from the environment; peer sync credentials are still sealed with `CONNECTOR_KEY` |
 | `fractal` | Declared, no adapter yet | | Everything |
 
 `GET /api/storage/providers` reports `adapter_implemented` for each entry and `adapter_missing` as the lifecycle state of the declared ones, whatever is configured.

@@ -14,7 +14,7 @@ defmodule OptimalEngine.Connectors.Credential do
   reference (`openbao:<path>#<field>`, `OptimalEngine.Secrets`). A reference
   OpenBao cannot answer is treated as no key: every encrypt and decrypt is
   refused (`:key_missing`) and the reason is logged, never a plaintext write.
-  With OpenBao configured, connector credentials themselves are kept in
+  With `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`, connector credentials themselves are kept in
   OpenBao rather than in this envelope (`OptimalEngine.Connectors.CredentialVault`). In production the master key should
   come from a KMS / HSM — this module exposes `encrypt/1` + `decrypt/1`
   as the only code paths that touch the key, so swapping providers is

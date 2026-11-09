@@ -767,7 +767,7 @@ defmodule OptimalEngine.Connectors.Runner do
   encrypted `credentials_ciphertext` envelope, and a `broker_reference` only
   as a `broker_reference_ciphertext` envelope. Without a configured
   `CONNECTOR_KEY` the write is refused with `{:error, :connector_key_missing}`.
-  With OpenBao configured the credentials are written to OpenBao instead and
+  With `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao` the credentials are written to OpenBao instead and
   the row keeps only a marker (`OptimalEngine.Connectors.CredentialVault`);
   OpenBao refusing the write refuses the upsert with its reason
   (`:openbao_sealed`, `:openbao_unreachable`, ...).

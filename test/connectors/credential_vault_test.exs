@@ -1,7 +1,8 @@
 defmodule OptimalEngine.Connectors.CredentialVaultTest do
   @moduledoc """
-  With OpenBao configured, connector credentials are written to OpenBao and
-  the connector row holds only a marker: nothing in the Engine database can
+  With OpenBao configured and `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`,
+  connector credentials are written to OpenBao and the connector row holds
+  only a marker: nothing in the Engine database can
   open them. A sync reads them for its own cycle; OpenBao sealed or refusing
   fails the sync or the write with that reason; deleting the connector deletes
   the secret.
@@ -61,6 +62,7 @@ defmodule OptimalEngine.Connectors.CredentialVaultTest do
     on_exit(fn -> OpenBaoStub.stop(stub) end)
     System.put_env("OPTIMAL_OPENBAO_ADDR", stub.endpoint)
     System.put_env("OPTIMAL_OPENBAO_TOKEN", stub.token)
+    System.put_env("OPTIMAL_CONNECTOR_CREDENTIAL_STORE", "openbao")
     :persistent_term.put({CaptureAdapter, :test}, self())
 
     %{stub: stub, id: "vault-slack-#{System.unique_integer([:positive])}"}
@@ -77,6 +79,24 @@ defmodule OptimalEngine.Connectors.CredentialVaultTest do
   defp row_config(id) do
     {:ok, [[json]]} = Store.raw_query("SELECT config FROM connectors WHERE id = ?1", [id])
     json
+  end
+
+  test "OpenBao configured is not an opt-in: without the store set, credentials stay in the Engine",
+       %{stub: stub, id: id} do
+    System.delete_env("OPTIMAL_CONNECTOR_CREDENTIAL_STORE")
+    System.put_env("CONNECTOR_KEY", Base.encode16(:crypto.strong_rand_bytes(32)))
+
+    for unset_or_unknown <- [nil, "", "auto", "bao"] do
+      if unset_or_unknown,
+        do: System.put_env("OPTIMAL_CONNECTOR_CREDENTIAL_STORE", unset_or_unknown),
+        else: System.delete_env("OPTIMAL_CONNECTOR_CREDENTIAL_STORE")
+
+      assert CredentialVault.mode() == :engine
+    end
+
+    {:ok, ^id} = register(id)
+    assert Map.has_key?(Jason.decode!(row_config(id)), "credentials_ciphertext")
+    assert OpenBaoStub.secrets(stub) == %{}
   end
 
   test "credentials go to OpenBao without CONNECTOR_KEY, and the row holds only the marker", %{
@@ -208,7 +228,7 @@ defmodule OptimalEngine.Connectors.CredentialVaultTest do
     assert OpenBaoStub.secrets(stub) == %{}
 
     # Back to OpenBao: the envelope row still syncs with its own credentials.
-    System.delete_env("OPTIMAL_CONNECTOR_CREDENTIAL_STORE")
+    System.put_env("OPTIMAL_CONNECTOR_CREDENTIAL_STORE", "openbao")
     assert {:ok, %{status: :success}} = Runner.run(id, adapter: CaptureAdapter, governed: false)
     assert_received {:init, %{"bot_token" => "xoxb-vaulted"}}
 
