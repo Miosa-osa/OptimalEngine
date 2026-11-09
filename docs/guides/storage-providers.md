@@ -23,6 +23,8 @@ configured            every required environment variable is present and non-emp
 health                healthy, unreachable, not_configured, not_installed, unknown, configured
 adapter_implemented   the engine ships a module that can actually talk to it
 lifecycle_state       active, available, configured_unverified, unavailable, not_configured, adapter_missing
+serves                what the Engine routes through it when configured and selected; [] for an adapter that only probes
+data_path             serving, standby, probe_only, none
 ```
 
 Two rules make the inventory trustworthy.
@@ -35,6 +37,12 @@ Without `probe=true` a configured service provider reports `configured_unverifie
 
 The embedded providers report `active` because the running engine uses them.
 RocksDB is the exception: it is `active` only when `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb` put the knowledge store on it, and on an ETS knowledge store it reports `available`.
+
+Reachable is not the same as in the data path.
+`lifecycle_state` says whether a provider answers; `serves` and `data_path` say whether the Engine keeps anything in it.
+`serving` means it serves something, is configured, is the store this build selected or the backend in use, and is not `unavailable`; `standby` means it would but is not configured, selected, in use or reachable; `probe_only` means the adapter only checks and proves the provider and nothing the Engine stores goes there; `none` means there is no adapter.
+An adapter that exports `serves/0` declares what it carries itself; otherwise the registry in `OptimalEngine.Storage.Providers` does.
+A platform that needs a provider to hold data checks `data_path == "serving"`, and a plan lists the providers that would hold none of its data under `probe_only`.
 
 Provider status never returns credentials, connection strings, or secret values; only the names of the environment variables a provider reads.
 
