@@ -285,7 +285,7 @@ What a Postgres build gives up:
 | SQLite-only statements | Refused by name where used (some JSON functions, date arithmetic, `rowid`, `PRAGMA`). |
 | ETS hot cache | Off. |
 | Engine backup routes | They copy the SQLite file, so they do not back up a Postgres build. Back the database up with Postgres tooling. |
-| Moving an existing Engine's data to Postgres | Not implemented (stage 4 of the provider plan). |
+| Moving an existing Engine's data to Postgres | `mix optimal.postgres.migrate` copies an SQLite Engine's store, verified by row counts, checksums and parity queries before it commits ([PostgreSQL Provider](postgres-provider.md#stage-4-moving-an-existing-engine)). |
 
 An Engine whose Postgres database holds replication data does not start.
 [PostgreSQL Provider](postgres-provider.md) lists every refusal.

@@ -94,7 +94,7 @@ A Postgres build gives up replication.
 Enabling sync is refused by name on it.
 Backups, offsite copies and restores work on it: a backup is a SQLite file holding one consistent snapshot of the store.
 Search, context assembly, and asking work on it, with FTS5's tokens and BM25 ranking.
-Moving an existing Engine's data to Postgres is not implemented.
+An existing Engine's data moves to Postgres with `mix optimal.postgres.migrate`, which commits only a copy it has verified.
 Choose it for write concurrency only when you can live without those features ([PostgreSQL Provider](postgres-provider.md)).
 
 A platform reads the recommendation to show usage and to resize.
