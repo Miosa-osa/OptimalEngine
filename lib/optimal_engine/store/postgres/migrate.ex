@@ -238,8 +238,9 @@ defmodule OptimalEngine.Store.Postgres.Migrate do
       else: {:error, {:target_not_empty, schema}}
   end
 
-  # The PostgreSQL store does not start on an Engine that uses these
-  # (OptimalEngine.Store.Postgres).
+  # A precondition of this copy: an Engine that has enabled these is not
+  # copied, because their state is not part of the copy (both work on a
+  # PostgreSQL store; turn them on again after the move).
   @in_use [
     {"replication",
      "SELECT 1 FROM sync_workspaces UNION ALL SELECT 1 FROM sync_peers WHERE status <> 'disabled'"},

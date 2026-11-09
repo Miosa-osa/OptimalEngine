@@ -160,7 +160,7 @@ Engine code keeps writing SQLite statements.
 
 ### What Does Not Work On PostgreSQL
 
-Every feature of the SQLite store works on the PostgreSQL store. One kind of statement does not, by design.
+Every feature of the SQLite store works on the PostgreSQL store except the ETS hot cache, which is off by design (a per-process cache cannot see another engine's writes). One kind of statement does not work either, by design.
 `OptimalEngine.Storage.Postgres.unavailable/0` lists it, `GET /api/storage/providers/postgres` and `mix optimal.postgres.check` report it, and it is refused by name when it is used, never answered as if it worked:
 
 | Feature | On a PostgreSQL store |
