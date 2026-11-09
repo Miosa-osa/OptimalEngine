@@ -24,10 +24,13 @@ exclude =
 # With OPTIMAL_STORE=postgres the Engine runs on PostgreSQL;
 # tests that need the embedded SQLite store as the Engine's store, or start a
 # PostgreSQL store of their own beside it, are tagged :sqlite_store.
+# and tests of how the Engine behaves on PostgreSQL itself (concurrent
+# writers, sequences drawn before commit) are tagged :postgres_store and run
+# only there.
 exclude =
   if OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres),
     do: [:sqlite_store | exclude],
-    else: exclude
+    else: [:postgres_store | exclude]
 
 # Analytics against a real DuckDB run with OPTIMAL_TEST_DUCKDB naming the
 # `duckdb` executable (test/analytics/analytics_duckdb_test.exs). CI sets it

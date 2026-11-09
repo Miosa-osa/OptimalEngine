@@ -392,6 +392,12 @@ It reads the ledger the Engine's own store keeps, so an Engine on SQLite and one
 Changes go out one at a time in ledger order, each acknowledged by the stream before the next, so a workspace's subject holds its changes in the order the Engine made them.
 A publish whose acknowledgement was lost is sent again with the same message id, and the stream stores it once.
 Where to resume is read from the stream (the `Optimal-Ledger-Seq` of the last message on the workspace's subject) at start and after every reconnect: a restart repeats nothing, and a stream that was deleted or lost is filled again from the start of the ledger.
+On PostgreSQL every writer of the ledger takes one advisory lock before it draws a sequence and holds it until it commits, so sequences commit in the order they were drawn and a reader that has seen a sequence has seen every one below it (see [PostgreSQL Provider](postgres-provider.md#replication)); without it a change that drew a lower sequence and committed later would be skipped for good.
+
+The stream stores a message id once only inside its duplicate window (the server's default, two minutes).
+Past it, a resume point older than what was already published sends those changes again: when a forget's purge removed the workspace's newest messages and the publisher stopped before the tombstone (below), when a workspace's messages aged out (`OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS`) and its ledger is published again, or when the stream was lost.
+Consumers are therefore idempotent on the workspace and `Optimal-Ledger-Seq`: keep the highest sequence applied per workspace and skip a message at or below it, or key on `Nats-Msg-Id` (the change's id, which never changes).
+No epoch is needed: a sequence belongs to the ledger, is never reused, and only grows within a workspace.
 
 `runtime.flows.ledger` in `GET /api/storage/providers/nats_jetstream` says where it stands: `state` (`off`, `buffering` while NATS is down, `publishing` while a backlog remains, `caught_up`, `error` with `last_error`), the changes published since start, and each workspace's `published_through` and `backlog`.
 
@@ -407,6 +413,7 @@ The publisher keeps the stream to what the Engine still holds instead:
 * A forget is a `delete` in the ledger (an erasure, a retention delete, a derived-data removal, any delete) or a `memories` change that sets `is_forgotten` (`Memory.forget/2`).
   Before the forget goes out, every earlier message on the row's subject is purged, and the message that replaces them is a tombstone: a delete carries the row's key only, a forgotten memory its `id` and `is_forgotten` and nothing it said.
 * A create or update that a later forget in the ledger covers is never published, so a stream filled again from the ledger (after a loss, or a first start after the forget) holds nothing forgotten either.
+* The purge and the tombstone are two calls, so a publisher stopped between them (a crash, NATS lost mid-pass) leaves the row's messages purged and no tombstone yet. The next pass resumes from the stream's last message, which is before the forget, and sends it again: the purge (nothing left to purge, so the retry is safe) and then the tombstone, with the covered create or update withheld again. The row's content does not come back, and until that pass a subscriber sees neither the row nor its tombstone. This is the same on SQLite and on PostgreSQL.
 * An archived workspace (`Workspace.archive/1`) and the old id of a renamed one (`DataSteward.rename_workspace/3`) have their whole subject tree purged (`<namespace>.ledger.<tenant>.<workspace>.>`), and an archived workspace is no longer published.
   The request is written first as an `events` row (`kind = 'nats_purge_requested'`), done at once when NATS is reachable and otherwise on the next pass after it is, so a purge asked for during an outage, or across a restart, is not lost.
 

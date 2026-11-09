@@ -1847,6 +1847,8 @@ defmodule OptimalEngine.Sync do
 
   defp record_ledger(txn, tenant_id, workspace_id, mutation) do
     payload = Jason.encode!(mutation["payload"])
+    # Sequences commit in the order they are drawn (Sync.Postgres).
+    :ok = OptimalEngine.Sync.Postgres.lock_ledger(txn)
 
     {:ok, _} =
       Store.txn_execute(

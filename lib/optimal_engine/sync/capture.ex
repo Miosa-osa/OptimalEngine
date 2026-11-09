@@ -546,6 +546,11 @@ defmodule OptimalEngine.Sync.Capture do
   ON CONFLICT DO NOTHING
   """
 
+  @doc false
+  # The statement a seal inserts ledger rows with on PostgreSQL; a test stands
+  # in for a second Engine's seal with it (test/sync/ledger_commit_order_test.exs).
+  def ledger_insert_pg, do: @ledger_insert_pg
+
   # The ledger rows of captured changes, and the captured rows gone, in one
   # transaction. Sealing is idempotent (a mutation id is the capture key, and a
   # sealed row is ignored), so on PostgreSQL it runs at READ COMMITTED: at

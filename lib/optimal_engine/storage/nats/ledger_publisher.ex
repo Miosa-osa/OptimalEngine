@@ -42,6 +42,19 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   start and after every reconnect, so a restart repeats nothing, and a stream
   that was lost is filled again from the ledger's beginning.
 
+  The stream stores a message id once only inside its duplicate window (the
+  server's default, two minutes). A resume point the stream gives that is
+  older than what was published goes out again past that window: the
+  workspace's newest messages were purged by a forget whose tombstone did not
+  go out (see below), they aged out (`OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS`, a
+  workspace idle that long), or the stream was lost. A consumer is therefore
+  idempotent on the workspace and `Optimal-Ledger-Seq`: it keeps the highest
+  sequence it applied per workspace and skips a message at or below it (or
+  keys on `Nats-Msg-Id`, the change's id, which never changes). No epoch is
+  needed: a sequence is the ledger's, never reused, and on PostgreSQL commits
+  in order (`OptimalEngine.Sync.Postgres`), so a workspace's sequences only
+  grow.
+
   No Engine write waits on this: the ledger is written in the write's
   transaction, and this process reads it afterwards. While NATS is down the
   publisher reports `buffering` with each workspace's backlog, and the
@@ -59,6 +72,13 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   `target_uri = "workspace:<id>"`) with the rows forgotten and the messages
   purged. `flush/1` runs a pass at once for an erasure, which records its
   result in the erasure's report and audit event.
+
+  The purge and the tombstone are two calls. A publisher stopped between them
+  leaves the row's earlier messages gone and no tombstone yet; the next pass
+  resumes from the stream's last message, which is before the forget, and
+  sends the forget again: the purge again (nothing left to purge), then the
+  tombstone. The create or update the forget covers is withheld on that pass
+  too, so nothing erased goes back. This is the same on either store.
 
   A workspace archived or removed (`forget_workspace/4`) has its whole subject
   tree purged. The request is an `events` row (`nats_purge_requested`) written
