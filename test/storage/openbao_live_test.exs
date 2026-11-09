@@ -36,7 +36,8 @@ defmodule OptimalEngine.Storage.OpenBaoLiveTest do
   end
 
   @env ~w(OPTIMAL_OPENBAO_ADDR OPTIMAL_OPENBAO_TOKEN OPTIMAL_OPENBAO_KV_MOUNT
-          OPTIMAL_OPENBAO_TRANSIT_KEY OPTIMAL_OPENBAO_TRANSIT_MOUNT OPTIMAL_BACKUP_KEY)
+          OPTIMAL_OPENBAO_TRANSIT_KEY OPTIMAL_OPENBAO_TRANSIT_MOUNT OPTIMAL_BACKUP_KEY
+          OPTIMAL_BACKUP_TRANSIT_ONLY)
 
   setup do
     previous = Map.new(@env, &{&1, System.get_env(&1)})
@@ -111,11 +112,16 @@ defmodule OptimalEngine.Storage.OpenBaoLiveTest do
              CredentialVault.get(marked, "default", "live:conn-1")
   end
 
-  test "a backup sealed under a transit key opens through it", %{transit: transit, tmp_dir: tmp} do
+  test "a backup sealed under a transit key opens through it, and without OpenBao", %{
+    transit: transit,
+    tmp_dir: tmp
+  } do
     assert admin(:post, "/v1/sys/mounts/#{transit}", %{type: "transit"}) in [200, 204]
     assert admin(:post, "/v1/#{transit}/keys/optimal-backup", %{}) in [200, 204]
     System.put_env("OPTIMAL_OPENBAO_TRANSIT_MOUNT", transit)
     System.put_env("OPTIMAL_OPENBAO_TRANSIT_KEY", "optimal-backup")
+    local = :crypto.strong_rand_bytes(32)
+    System.put_env("OPTIMAL_BACKUP_KEY", Base.encode16(local))
 
     source = Path.join(tmp, "plain.db")
     plaintext = :crypto.strong_rand_bytes(70_000)
@@ -124,11 +130,34 @@ defmodule OptimalEngine.Storage.OpenBaoLiveTest do
     {:ok, key} = Envelope.sealing_key()
     sealed = Path.join(tmp, "sealed.enc")
     assert {:ok, info} = Envelope.seal_file(source, sealed, key, chunk_bytes: 16_384)
-    assert info.key_id == "transit:#{transit}/optimal-backup"
+    assert info.key_id == Envelope.key_id(local)
+    assert {:ok, header} = Envelope.read_header(sealed)
+    assert header["transit_key_id"] == "transit:#{transit}/optimal-backup"
+    assert "vault:v1:" <> _ = header["transit_wrapped_key"]
 
+    # Through the real transit key, with OPTIMAL_BACKUP_KEY unset.
+    System.delete_env("OPTIMAL_BACKUP_KEY")
     opened = Path.join(tmp, "opened.db")
     assert {:ok, _result} = Envelope.open_file(sealed, opened)
     assert File.read!(opened) == plaintext
+
+    # And with no OpenBao at all, through OPTIMAL_BACKUP_KEY.
+    System.put_env("OPTIMAL_BACKUP_KEY", Base.encode16(local))
+    System.put_env("OPTIMAL_OPENBAO_ADDR", "http://127.0.0.1:9")
+    Secrets.flush_cache()
+    without = Path.join(tmp, "without-openbao.db")
+    assert {:ok, _result} = Envelope.open_file(sealed, without)
+    assert File.read!(without) == plaintext
+    System.put_env("OPTIMAL_OPENBAO_ADDR", addr())
+    Secrets.flush_cache()
+
+    # Transit alone, opted into, names the transit key.
+    System.delete_env("OPTIMAL_BACKUP_KEY")
+    System.put_env("OPTIMAL_BACKUP_TRANSIT_ONLY", "true")
+    {:ok, only} = Envelope.sealing_key()
+    alone = Path.join(tmp, "transit-only.enc")
+    assert {:ok, %{key_id: "transit:" <> _}} = Envelope.seal_file(source, alone, only)
+    assert {:ok, _result} = Envelope.open_file(alone, Path.join(tmp, "alone.db"))
 
     System.put_env("OPTIMAL_OPENBAO_TRANSIT_KEY", "no-such-key")
     {:ok, missing} = Envelope.sealing_key()
@@ -162,12 +191,21 @@ defmodule OptimalEngine.Storage.OpenBaoLiveTest do
       assert {:error, {:backup_key_unavailable, :openbao_sealed}} = Envelope.backup_key()
       assert {:error, :openbao_sealed} = CredentialVault.get(%{}, "default", "sealed-conn")
       assert {:error, :openbao_sealed} = OpenBao.kv_write("optimal/x", %{"a" => "b"})
+      # The backup key is itself a reference, so nothing can be sealed.
+      assert {:error, {:backup_key_unavailable, :openbao_sealed}} = Envelope.sealing_key()
+
+      System.put_env("OPTIMAL_BACKUP_TRANSIT_ONLY", "true")
+      System.delete_env("OPTIMAL_BACKUP_KEY")
       {:ok, transit} = Envelope.sealing_key()
 
       assert {:error, {:backup_key_unavailable, :openbao_sealed}} =
                Envelope.seal_file(source, Path.join(tmp, "never.enc"), transit)
+
+      assert OpenBao.availability() == {:error, :openbao_sealed}
     after
       admin(:post, "/v1/sys/unseal", %{key: @unseal_key})
+      # Forget the outage window this test opened.
+      Secrets.flush_cache()
     end
   end
 end
