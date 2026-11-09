@@ -55,57 +55,96 @@ defmodule OptimalEngine.Analyses do
   @doc """
   Enqueues the day's analyses for every tenant (once per kind, workspace,
   and day). Returns how many jobs were enqueued or already queued.
-  `tenant_id: id` schedules that tenant's only.
+  `tenant_id: id` (or `tenant_ids: [id]`) schedules those tenants' only.
+
+  The store calls are bounded by the jobs, not the workspaces or tenants:
+  one read of the active workspaces, one of the meeting connectors, and the
+  jobs inserted in batches (`Jobs.enqueue_many/2`). The Engine-wide export
+  goes through `Jobs.enqueue/4`, which checks its workspace is active.
   """
   @spec schedule(Date.t(), keyword()) :: non_neg_integer()
   def schedule(today \\ Date.utc_today(), opts \\ []) do
     tenant_ids =
-      case Keyword.get(opts, :tenant_id) do
-        nil ->
-          {:ok, tenants} = Tenant.list()
-          Enum.map(tenants, & &1.id)
-
-        tenant_id ->
-          [tenant_id]
+      cond do
+        is_list(opts[:tenant_ids]) -> opts[:tenant_ids]
+        is_binary(opts[:tenant_id]) -> [opts[:tenant_id]]
+        true -> nil
       end
 
-    # The Engine-wide export runs once per Engine, on the Engine's default
-    # workspace, whatever workspaces any tenant has: with every tenant, or with
-    # the default workspace's own tenant.
-    engine =
-      if DuckDB.configured?() and
-           Keyword.get(opts, :tenant_id) in [nil, Workspace.tenant_of(Workspace.default_id())],
-         do: [{Workspace.default_id(), "analytics_engine_export"}],
-         else: []
+    date = Date.to_iso8601(today)
+    workspaces = active_workspaces(tenant_ids)
+    meetings = meeting_workspaces(tenant_ids)
 
-    # One tenant at a time, its jobs inserted in batches: the store calls grow
-    # with the tenants, not with their workspaces.
-    by_tenant =
-      Enum.map(tenant_ids, fn tenant_id -> {tenant_id, due(tenant_id)} end) ++
-        Enum.map(engine, fn {workspace_id, _kind} = pair ->
-          {Workspace.tenant_of(workspace_id), [pair]}
-        end)
+    entries =
+      for {tenant_id, ids} <- workspaces,
+          {workspace_id, kind} <- due(tenant_id, ids, meetings) do
+        {tenant_id, workspace_id, job_kind(kind), %{"kind" => kind}, "analysis:#{kind}:#{date}"}
+      end
 
-    Enum.reduce(by_tenant, 0, fn {tenant_id, pairs}, count ->
-      entries =
-        for {workspace_id, kind} <- pairs do
-          {workspace_id, job_kind(kind), %{"kind" => kind},
-           "analysis:#{kind}:#{Date.to_iso8601(today)}"}
-        end
-
-      case Jobs.enqueue_many(tenant_id, entries, max_attempts: 3) do
-        {:ok, _inserted} ->
-          count + length(entries)
+    scheduled =
+      case Jobs.enqueue_many(entries, max_attempts: 3) do
+        {:ok, %{scheduled: scheduled}} ->
+          scheduled
 
         {:error, reason} ->
-          Logger.warning(
-            "[Analyses] the day's analyses of tenant #{tenant_id} were not scheduled: #{inspect(reason)}"
-          )
-
-          count
+          Logger.error("[Analyses] the day's analyses were not scheduled: #{inspect(reason)}")
+          0
       end
-    end)
+
+    scheduled + engine_export(date, tenant_ids)
   end
+
+  # The Engine-wide export runs once per Engine, on the Engine's default
+  # workspace, whatever workspaces any tenant has: with every tenant, or with
+  # the default workspace's own tenant. `Jobs.enqueue/4` refuses it while
+  # that workspace is missing or not active.
+  defp engine_export(date, tenant_ids) do
+    default = Workspace.default_id()
+
+    if DuckDB.configured?() and
+         (tenant_ids == nil or Workspace.tenant_of(default) in tenant_ids) do
+      kind = "analytics_engine_export"
+
+      case Jobs.enqueue(default, job_kind(kind), %{"kind" => kind},
+             idempotency_key: "analysis:#{kind}:#{date}",
+             max_attempts: 3
+           ) do
+        {:ok, _job} ->
+          1
+
+        {:error, reason} ->
+          Logger.warning("[Analyses] the Engine-wide export was not scheduled: #{inspect(reason)}")
+          0
+      end
+    else
+      0
+    end
+  end
+
+  # `[{tenant_id, [workspace_id]}]`, in one query: every tenant's active
+  # workspaces, or those of `tenant_ids`.
+  defp active_workspaces(tenant_ids) do
+    {where, params} = tenant_filter(tenant_ids, "tenant_id")
+
+    case Store.raw_query(
+           "SELECT tenant_id, id FROM workspaces WHERE status = 'active'#{where} ORDER BY tenant_id, id",
+           params
+         ) do
+      {:ok, rows} ->
+        rows
+        |> Enum.chunk_by(&hd/1)
+        |> Enum.map(fn [[tenant | _] | _] = group -> {tenant, Enum.map(group, &List.last/1)} end)
+
+      {:error, reason} ->
+        Logger.error("[Analyses] the active workspaces could not be read: #{inspect(reason)}")
+        []
+    end
+  end
+
+  defp tenant_filter(nil, _column), do: {"", []}
+
+  defp tenant_filter(tenant_ids, column),
+    do: {" AND #{column} IN (SELECT value FROM json_each(?1))", [Jason.encode!(tenant_ids)]}
 
   @doc """
   Runs due analysis jobs, at most `limit`. Returns the outcomes.
@@ -366,10 +405,7 @@ defmodule OptimalEngine.Analyses do
   # -- scheduling --------------------------------------------------------------
 
   # {workspace, kind} pairs due for a tenant.
-  defp due(tenant_id) do
-    {:ok, workspaces} = Workspace.list(tenant_id: tenant_id, status: :active, limit: 10_000)
-    ids = Enum.map(workspaces, & &1.id)
-
+  defp due(tenant_id, ids, meetings) do
     tenant_pairs =
       case home_workspace(tenant_id, ids) do
         nil -> []
@@ -379,8 +415,7 @@ defmodule OptimalEngine.Analyses do
     intake = CorpusOrganizer.source_workspace(tenant_id)
     population = if intake in ids, do: [{intake, "workspace_population"}], else: []
 
-    with_meetings = meeting_workspaces(tenant_id)
-    meetings = for id <- ids, MapSet.member?(with_meetings, id), do: {id, "meeting_archive"}
+    meetings = for id <- ids, MapSet.member?(meetings, {tenant_id, id}), do: {id, "meeting_archive"}
 
     analytics = if DuckDB.configured?(), do: Enum.map(ids, &{&1, "analytics_export"}), else: []
 
@@ -409,15 +444,17 @@ defmodule OptimalEngine.Analyses do
     end
   end
 
-  # The tenant's workspaces with an enabled meeting connector, in one query.
-  defp meeting_workspaces(tenant_id) do
-    placeholders = Enum.map_join(1..length(@meeting_connectors), ", ", &"?#{&1 + 1}")
+  # `{tenant_id, workspace_id}` with an enabled meeting connector, in one query.
+  defp meeting_workspaces(tenant_ids) do
+    {where, params} = tenant_filter(tenant_ids, "tenant_id")
+    offset = length(params)
+    placeholders = Enum.map_join(1..length(@meeting_connectors), ", ", &"?#{&1 + offset}")
 
     case Store.raw_query(
-           "SELECT DISTINCT workspace_id FROM connectors WHERE tenant_id = ?1 AND enabled = 1 AND kind IN (#{placeholders})",
-           [tenant_id | @meeting_connectors]
+           "SELECT DISTINCT tenant_id, workspace_id FROM connectors WHERE enabled = 1 AND kind IN (#{placeholders})#{where}",
+           params ++ @meeting_connectors
          ) do
-      {:ok, rows} -> rows |> List.flatten() |> MapSet.new()
+      {:ok, rows} -> MapSet.new(rows, fn [tenant, workspace] -> {tenant, workspace} end)
       _ -> MapSet.new()
     end
   end
