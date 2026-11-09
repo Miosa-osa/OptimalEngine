@@ -74,6 +74,34 @@ defmodule OptimalEngine.Connectors.CredentialMigrationTest do
   defp id_of({id, _reason}), do: id
   defp id_of(id), do: id
 
+  test "a secret written while the migration runs is never overwritten by the old credentials",
+       ctx do
+    # A rotation in OpenBao mode got its secret in before this run's copy.
+    [rotated_id, _other] = ctx.ids
+    path = "optimal/connectors/default/#{rotated_id}"
+    OpenBaoStub.put_secret(ctx.stub, path, %{"bot_token" => "xoxb-rotated"})
+    before = config(rotated_id)
+
+    assert {:ok, report} = CredentialVault.migrate()
+    assert {rotated_id, :secret_exists} in report.skipped
+    assert OpenBaoStub.secrets(ctx.stub)[path] == %{"bot_token" => "xoxb-rotated"}
+    assert config(rotated_id) == before
+  end
+
+  test "a copy an interrupted run already wrote is finished, not refused", ctx do
+    [id, _other] = ctx.ids
+    path = "optimal/connectors/default/#{id}"
+
+    OpenBaoStub.put_secret(ctx.stub, path, %{
+      "bot_token" => "xoxb-1",
+      "oauth" => %{"refresh" => "r-1"}
+    })
+
+    assert {:ok, report} = CredentialVault.migrate()
+    assert id in report.migrated
+    assert CredentialVault.stored?(config(id))
+  end
+
   test "a dry run names the rows it would move and changes nothing", ctx do
     before = Enum.map(ctx.ids, &config/1)
 

@@ -321,8 +321,16 @@ defmodule OptimalEngine.Storage.OpenBao do
   def kv_write(path, data, opts \\ []) when is_map(data) do
     with {:ok, config} <- data_config(opts),
          {:ok, segments} <- secret_path(path) do
+      # `cas: n` is KV version 2's check-and-set: written only if the
+      # secret's current version is n (0: only where nothing is stored).
+      body =
+        case Keyword.get(opts, :cas) do
+          nil -> %{data: data}
+          version -> %{data: data, options: %{cas: version}}
+        end
+
       write = fn ->
-        guarded_call(config, :post, "/v1/#{config.mount}/data/#{segments}", %{data: data}, opts)
+        guarded_call(config, :post, "/v1/#{config.mount}/data/#{segments}", body, opts)
       end
 
       case write.() do
@@ -333,7 +341,11 @@ defmodule OptimalEngine.Storage.OpenBao do
           {:error, :openbao_not_kv_version_2}
 
         {:ok, status, body} = missing when status in [400, 404] ->
-          if no_route?(body), do: enable_kv_and_retry(config, write, opts), else: failure(missing)
+          cond do
+            no_route?(body) -> enable_kv_and_retry(config, write, opts)
+            cas_mismatch?(body) -> {:error, :openbao_cas_mismatch}
+            true -> failure(missing)
+          end
 
         other ->
           failure(other)
@@ -582,6 +594,11 @@ defmodule OptimalEngine.Storage.OpenBao do
     do: Enum.any?(errors, &(is_binary(&1) and &1 =~ "no handler for route"))
 
   defp no_route?(_body), do: false
+
+  defp cas_mismatch?(%{"errors" => errors}) when is_list(errors),
+    do: Enum.any?(errors, &(is_binary(&1) and &1 =~ "check-and-set"))
+
+  defp cas_mismatch?(_body), do: false
 
   defp call(config, method, path, body, opts) do
     # Sent once, and over https only to a verified certificate and host name:

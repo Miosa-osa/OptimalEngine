@@ -8,6 +8,10 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
   read has no metadata), `delete: :forbidden` (deleting metadata is 403),
   `transit_keys:` (the names of the keys a `transit` mount holds; a data key
   is made under one and decrypted only by it) and `transit_mount:` (`transit`).
+  A KV write with `options.cas` is a check-and-set: `cas: 0` writes only
+  where nothing is stored, as KV version 2 does. `renew_ttls:` lists the
+  lease each successive `renew-self` answers (the last repeats), for a token
+  nearing its maximum TTL.
   `token_ttl:` and `renewable:` (what `lookup-self` reports: seconds left,
   0 by default as a root token has, and whether `renew-self` extends it),
   `read: :tampered` (every KV read answers with one field changed, as a
@@ -36,6 +40,7 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
       read: Keyword.get(opts, :read, :ok),
       token_ttl: Keyword.get(opts, :token_ttl, 0),
       renewable: Keyword.get(opts, :renewable, false),
+      renew_ttls: Keyword.get(opts, :renew_ttls, []),
       mount_enable: Keyword.get(opts, :mount_enable, :ok),
       transit_mount: Keyword.get(opts, :transit_mount, "transit"),
       transit_keys: Keyword.get(opts, :transit_keys, []),
@@ -107,7 +112,20 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
         })
 
       {"POST", ["v1", "auth", "token", "renew-self"]} when state.renewable ->
-        json(conn, 200, %{auth: %{lease_duration: state.token_ttl, renewable: true}})
+        ttl =
+          case state.renew_ttls do
+            [] ->
+              state.token_ttl
+
+            [ttl] ->
+              ttl
+
+            [ttl | rest] ->
+              Agent.update(agent, &%{&1 | renew_ttls: rest})
+              ttl
+          end
+
+        json(conn, 200, %{auth: %{lease_duration: ttl, renewable: true}})
 
       {"POST", ["v1", "auth", "token", "renew-self"]} ->
         json(conn, 400, %{errors: ["lease is not renewable"]})
@@ -126,8 +144,14 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
         send_resp(conn, 204, "")
 
       {"POST", ["v1", ^mount, "data" | path]} ->
-        Agent.update(agent, &put_in(&1, [:secrets, Enum.join(path, "/")], body["data"]))
-        json(conn, 200, %{data: %{version: 1}})
+        key = Enum.join(path, "/")
+
+        if get_in(body, ["options", "cas"]) == 0 and Map.has_key?(state.secrets, key) do
+          json(conn, 400, %{errors: ["check-and-set parameter did not match the current version"]})
+        else
+          Agent.update(agent, &put_in(&1, [:secrets, key], body["data"]))
+          json(conn, 200, %{data: %{version: 1}})
+        end
 
       {"GET", ["v1", ^mount, "data" | path]} ->
         case Map.get(state.secrets, Enum.join(path, "/")) do
