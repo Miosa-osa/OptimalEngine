@@ -127,11 +127,13 @@ defmodule OptimalEngine.Backup do
   store, and mark its catalog row offsite and encrypted.
 
   The copy is sealed under `OptimalEngine.Backup.Envelope.sealing_key/0`: the
-  OpenBao transit key named by `OPTIMAL_OPENBAO_TRANSIT_KEY` when one is, or
-  else the backup key from `OPTIMAL_BACKUP_KEY` (a value or an OpenBao
-  reference). Without either nothing is uploaded and
-  `{:error, :backup_key_missing}` is returned; a sealed or unreachable
-  OpenBao is `{:error, {:backup_key_unavailable, reason}}`. The backup must
+  backup key from `OPTIMAL_BACKUP_KEY` (a value or an OpenBao reference), and
+  with `OPTIMAL_OPENBAO_TRANSIT_KEY` set the OpenBao transit key as well, so
+  the copy still opens with the backup key alone when that OpenBao is gone.
+  Without the backup key nothing is uploaded: `{:error, :backup_key_missing}`,
+  or `{:error, :backup_recovery_key_missing}` with a transit key (unless
+  `OPTIMAL_BACKUP_TRANSIT_ONLY=true`); a sealed or unreachable OpenBao is
+  `{:error, {:backup_key_unavailable, reason}}`. The backup must
   already be a verified `backup_records` row: the local file is re-hashed
   while it is encrypted and must match the catalog checksum before anything is
   uploaded, and the checksum the object store reports back must match the
@@ -400,8 +402,10 @@ defmodule OptimalEngine.Backup do
 
   This is the path after losing the machine: the catalog went with it, but the
   sealed object carries its own plaintext checksum and the id of the key that
-  sealed it. The object is decrypted with the configured key the object names
-  (the OpenBao transit key or `OPTIMAL_BACKUP_KEY`), every chunk is
+  sealed it. The object is decrypted with the configured key the object names:
+  `OPTIMAL_BACKUP_KEY`, which opens every copy sealed while it was set (with or
+  without OpenBao transit, and with no OpenBao reachable or configured), or
+  else the OpenBao transit key. Every chunk is
   authenticated, and the plaintext must match the checksum sealed into the
   object before `restore/2` applies its usual checks. Only sealed copies are
   accepted; find the keys with `list_offsite_objects/1`.
@@ -411,7 +415,7 @@ defmodule OptimalEngine.Backup do
   """
   @spec restore_offsite_object(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def restore_offsite_object(object_key, opts \\ []) when is_binary(object_key) do
-    with {:ok, _key} <- Envelope.sealing_key(),
+    with {:ok, _key} <- Envelope.opening_key(),
          {:ok, target} <- restore_target(opts) do
       name = "object-" <> (S3.sha256(object_key) |> binary_part(0, 16))
       download = download_path(name, ".enc")
@@ -459,6 +463,10 @@ defmodule OptimalEngine.Backup do
   def explain(:backup_key_invalid),
     do: "OPTIMAL_BACKUP_KEY must be 64 hex characters (32 bytes)."
 
+  def explain(:backup_recovery_key_missing),
+    do:
+      "OPTIMAL_OPENBAO_TRANSIT_KEY is set but OPTIMAL_BACKUP_KEY is not. Backups are wrapped by both so a copy opens without the OpenBao on this machine, which is lost with it. Set OPTIMAL_BACKUP_KEY (64 hex characters, kept off this machine), or set OPTIMAL_BACKUP_TRANSIT_ONLY=true to accept copies only that OpenBao can open."
+
   def explain({:backup_key_unavailable, reason}),
     do:
       "The backup key could not be read from OpenBao: #{OptimalEngine.Secrets.describe(reason)}. Nothing was sealed or opened."
@@ -503,8 +511,17 @@ defmodule OptimalEngine.Backup do
 
   defp restore_key(%{metadata: metadata}) do
     case metadata["offsite_key_id"] do
-      sealed_with when is_binary(sealed_with) -> Envelope.key_for(sealed_with)
-      _ -> Envelope.sealing_key()
+      sealed_with when is_binary(sealed_with) ->
+        # A copy named by the backup key may also carry a transit wrap; with
+        # only the transit key configured, the header decides.
+        with {:error, _reason} = error <- Envelope.key_for(sealed_with) do
+          if match?({:ok, %{transit: _}}, Envelope.opening_key()),
+            do: {:ok, :configured},
+            else: error
+        end
+
+      _ ->
+        Envelope.opening_key()
     end
   end
 

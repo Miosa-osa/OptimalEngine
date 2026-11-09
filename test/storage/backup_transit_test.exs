@@ -4,6 +4,10 @@ defmodule OptimalEngine.Storage.BackupTransitTest do
   wrapped by OpenBao transit, so the key that protects every copy never leaves
   OpenBao. A copy sealed that way opens only through the same transit key, and
   a sealed or unreachable OpenBao fails the seal or the open with that reason.
+
+  These are copies wrapped by transit alone, which the operator opts into with
+  `OPTIMAL_BACKUP_TRANSIT_ONLY=true`; the default wraps each data key with
+  `OPTIMAL_BACKUP_KEY` too (`OptimalEngine.Storage.BackupDualWrapTest`).
   """
   use ExUnit.Case, async: false
 
@@ -19,7 +23,7 @@ defmodule OptimalEngine.Storage.BackupTransitTest do
   @moduletag :tmp_dir
 
   @env ~w(OPTIMAL_OPENBAO_ADDR OPTIMAL_OPENBAO_TOKEN OPTIMAL_OPENBAO_TRANSIT_KEY
-          OPTIMAL_OPENBAO_TRANSIT_MOUNT OPTIMAL_BACKUP_KEY)
+          OPTIMAL_OPENBAO_TRANSIT_MOUNT OPTIMAL_BACKUP_KEY OPTIMAL_BACKUP_TRANSIT_ONLY)
 
   setup %{tmp_dir: tmp} do
     previous = Map.new(@env, &{&1, System.get_env(&1)})
@@ -38,6 +42,7 @@ defmodule OptimalEngine.Storage.BackupTransitTest do
     System.put_env("OPTIMAL_OPENBAO_ADDR", stub.endpoint)
     System.put_env("OPTIMAL_OPENBAO_TOKEN", stub.token)
     System.put_env("OPTIMAL_OPENBAO_TRANSIT_KEY", "optimal-backup")
+    System.put_env("OPTIMAL_BACKUP_TRANSIT_ONLY", "true")
 
     source = Path.join(tmp, "plain.db")
     plaintext = :crypto.strong_rand_bytes(9_000) <> "SQLite format 3\0"

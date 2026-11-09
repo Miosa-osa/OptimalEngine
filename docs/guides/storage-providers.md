@@ -547,7 +547,10 @@ A server initialised without a secrets engine (as the in-guest one is) gets its 
 
 ### Backups Under Transit
 
-With `OPTIMAL_OPENBAO_TRANSIT_KEY` set, each offsite copy's data key is made and wrapped by that OpenBao transit key (under `OPTIMAL_OPENBAO_TRANSIT_MOUNT`, default `transit`), so the key that protects every copy never leaves OpenBao and `OPTIMAL_BACKUP_KEY` is not needed for new copies.
+With `OPTIMAL_OPENBAO_TRANSIT_KEY` set, each offsite copy's data key is made by that OpenBao transit key (under `OPTIMAL_OPENBAO_TRANSIT_MOUNT`, default `transit`) and wrapped twice: by transit, and by `OPTIMAL_BACKUP_KEY`.
+The OpenBao beside the Engine (the in-guest one on a managed MIOSA Engine) is lost with the machine, and an offsite copy only it could open would be lost with it.
+So the copy is named by the backup key and restores on a new machine with `OPTIMAL_BACKUP_KEY` alone, no OpenBao reachable or configured; keep that key off the machine.
+With `OPTIMAL_BACKUP_KEY` set, the transit wrap adds a second way in while that OpenBao is up; it never replaces the backup key.
 
 ```bash
 bao secrets enable transit
@@ -555,11 +558,16 @@ bao write -f transit/keys/optimal-backup
 export OPTIMAL_OPENBAO_TRANSIT_KEY=optimal-backup
 ```
 
-The sealed header records `key_wrap: openbao-transit` and the key id `transit:<mount>/<name>`, and its `wrapped_key` is OpenBao's ciphertext of the data key.
+A transit key without `OPTIMAL_BACKUP_KEY` is refused (`backup_recovery_key_missing`), and no backup is taken or shipped.
+`OPTIMAL_BACKUP_TRANSIT_ONLY=true` accepts copies wrapped by transit alone. **Risk:** such a copy opens only through that OpenBao's transit key, so losing that OpenBao (the machine it runs on, its storage, or its unseal keys) loses every copy sealed that way, which is exactly the loss an offsite backup is for.
+`OPTIMAL_BACKUP_KEY` given as an OpenBao reference to the same OpenBao gives no such protection either; the Engine logs a warning when it is.
+
+The sealed header of a copy wrapped twice records the backup key's id as `key_id` with its `wrapped_key`, and the transit key as `transit_key_id` (`transit:<mount>/<name>`) with `transit_wrapped_key`, OpenBao's ciphertext of the same data key; the header is authenticated with the first chunk.
+A transit-only copy records `key_wrap: openbao-transit`, the key id `transit:<mount>/<name>`, and OpenBao's ciphertext as its `wrapped_key`.
 A copy opens with whichever configured key its header names, so copies sealed under `OPTIMAL_BACKUP_KEY` before the switch still restore while that key is set.
 A transit key named without OpenBao configured is refused, never replaced by the local key, and a missing transit key is `openbao_transit_key_missing`.
 Rotating the transit key (`bao write -f transit/keys/optimal-backup/rotate`) keeps every older copy restorable; deleting the key loses every copy sealed with it.
-`GET /api/backup/offsite` reports `schedule.encryption.key_source` (`openbao_transit`, `openbao`, `env`, or `unset`) and the key id, never the key.
+`GET /api/backup/offsite` reports `schedule.encryption.key_source` (`openbao_transit+env`, `openbao_transit+openbao`, `openbao_transit`, `openbao`, `env`, or `unset`), `recoverable_without_openbao`, and the key id, never the key.
 
 `OptimalEngine.Storage.OpenBao.Adapter.status/1` reports, without reading a secret, which of the Engine's secrets are references (`secret_references`), where connector credentials are written (`connector_credentials`), and the transit key id (`backup_transit_key`).
 

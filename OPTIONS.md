@@ -49,7 +49,7 @@ bin/optimal close "what changed and how verified"
 | `OPTIMAL_BUNDLE_MAX_BYTES` | `5368709120` (5 GiB) | Largest raw bundle upload `POST /api/bundles/import` accepts; a larger one is refused with 413 before or while it is read. |
 | `OPTIMAL_BUNDLE_URL_HOSTS` | none | Comma-separated hosts a bundle import job may download its bundle from (`source_url`); with none, `source_url` is refused. A `*.` entry covers a domain's hosts. |
 | `OPTIMAL_BUNDLE_RETENTION_HOURS` | `168` | How long a finished bundle export job's bundle is kept before it is removed. |
-| `OPTIMAL_BACKUP_KEY` | none | 64 hex characters, or an OpenBao reference `openbao:<path>#<field>`; encrypts every offsite backup copy with AES-256-GCM. Offsite copies are refused without it (or a transit key, below). Losing it loses every copy sealed with it. |
+| `OPTIMAL_BACKUP_KEY` | none | 64 hex characters, or an OpenBao reference `openbao:<path>#<field>`; encrypts every offsite backup copy with AES-256-GCM. Offsite copies are refused without it, also when a transit key is set (unless `OPTIMAL_BACKUP_TRANSIT_ONLY=true`, below). Losing it loses every copy sealed with it. |
 | `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS` | unset (off) | Interval for scheduled encrypted offsite backups; 0 or unset disables, otherwise at least 60000. |
 | `OPTIMAL_OFFSITE_BACKUP_KEEP` | `14` | Scheduled offsite copies kept; older ones are deleted from the bucket. |
 | `OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL` | `3` | Scheduled local backup files kept in `OPTIMAL_BACKUP_DIR`. |
@@ -99,7 +99,8 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 | `OPTIMAL_AUTHORITY_KEY` | none | 64 hex characters, or `openbao:<path>#<field>`; wraps the authority signing keys. |
 | `OPTIMAL_OPENBAO_ADDR`, `OPTIMAL_OPENBAO_TOKEN` | none | OpenBao address and token. With both set, connector credentials are kept in OpenBao and the secret references above resolve. |
 | `OPTIMAL_OPENBAO_KV_MOUNT` | `secret` | KV version 2 mount for references and connector credentials; enabled on first write when the token may. |
-| `OPTIMAL_OPENBAO_TRANSIT_KEY`, `OPTIMAL_OPENBAO_TRANSIT_MOUNT` | none, `transit` | Transit key that wraps each offsite backup's data key instead of `OPTIMAL_BACKUP_KEY`. |
+| `OPTIMAL_OPENBAO_TRANSIT_KEY`, `OPTIMAL_OPENBAO_TRANSIT_MOUNT` | none, `transit` | Transit key that wraps each offsite backup's data key beside `OPTIMAL_BACKUP_KEY`, which stays required so a copy restores without this OpenBao. |
+| `OPTIMAL_BACKUP_TRANSIT_ONLY` | `false` | `true` lets a transit key seal copies without `OPTIMAL_BACKUP_KEY`. Risk: those copies open only through that OpenBao, and are lost with it (its machine, storage or unseal keys). |
 | `OPTIMAL_CONNECTOR_CREDENTIAL_STORE` | `openbao` when OpenBao is configured, else `engine` | `engine` keeps connector credentials as database envelopes; `openbao` refuses writes without OpenBao. |
 
 The mirror is not what retrieval reads: the graph that search and assembly read is the `graph_edges` table in SQLite.

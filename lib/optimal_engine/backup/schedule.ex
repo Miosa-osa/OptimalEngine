@@ -211,6 +211,7 @@ defmodule OptimalEngine.Backup.Schedule do
         key_configured: match?({:ok, _}, key),
         key_id: key_id(key),
         key_source: key_source(),
+        recoverable_without_openbao: recoverable?(key),
         problem: problem(key)
       },
       object_store: %{configured: match?({:ok, _}, store), problem: problem(store)},
@@ -379,12 +380,21 @@ defmodule OptimalEngine.Backup.Schedule do
   defp key_id({:ok, key}), do: Envelope.key_id(key)
   defp key_id({:error, _reason}), do: nil
 
-  # Where the sealing key lives, named without reading it.
+  # Where the sealing key lives, named without reading it: the transit key,
+  # and beside it where OPTIMAL_BACKUP_KEY comes from when it is set.
   defp key_source do
-    if OptimalEngine.Storage.OpenBao.transit_key(),
-      do: "openbao_transit",
-      else: OptimalEngine.Secrets.source("OPTIMAL_BACKUP_KEY")
+    local = OptimalEngine.Secrets.source("OPTIMAL_BACKUP_KEY")
+
+    cond do
+      is_nil(OptimalEngine.Storage.OpenBao.transit_key()) -> local
+      local == "unset" -> "openbao_transit"
+      true -> "openbao_transit+" <> local
+    end
   end
+
+  # Whether a copy sealed now opens on a machine without this OpenBao.
+  defp recoverable?({:ok, key}), do: Envelope.recoverable_without_openbao?(key)
+  defp recoverable?({:error, _reason}), do: false
 
   defp problem({:ok, _}), do: nil
   defp problem({:error, reason}), do: Backup.explain(reason)
