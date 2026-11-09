@@ -572,10 +572,47 @@ defmodule OptimalEngine.AnalyticsTest do
              end)
     end
 
-    test "an export waits for a slot instead of failing", ctx do
+    test "a query is answered while an export holds its own slot", ctx do
       seed(ctx, ctx.workspace, "mine")
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
       System.put_env("OPTIMAL_ANALYTICS_MAX_PROCESSES", "1")
-      holder = hold_slot()
+      exporting = hold_slot(:export)
+
+      assert {:ok, _} = Analytics.query(ctx.workspace, %{"dataset" => "usage"})
+      release_slot(exporting)
+    end
+
+    test "an export runs with a lower memory limit, spilling the rest to disk", ctx do
+      seed(ctx, ctx.workspace, "mine")
+      File.write!(ctx.log, "")
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+      exports = lines(ctx.log)
+      assert exports != []
+      assert Enum.all?(exports, &(&1 =~ "SET memory_limit = '256MB'"))
+
+      File.write!(ctx.log, "")
+      {:ok, _} = Analytics.query(ctx.workspace, %{"dataset" => "usage"})
+      assert Enum.all?(lines(ctx.log), &(&1 =~ "SET memory_limit = '512MB'"))
+    end
+
+    test "a boot removes the spill and staging directories a crash left behind", ctx do
+      seed(ctx, ctx.workspace, "mine")
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+      dir = Analytics.workspace_dir(ctx.root, ctx.workspace)
+      leftovers = for name <- ["~duckdb-tmp-0a1b2c", ".staging-3d4e5f"], do: Path.join(dir, name)
+      Enum.each(leftovers, &File.mkdir_p!(Path.join(&1, "inside")))
+
+      # As at boot: the slots server starts again and sweeps before any statement runs.
+      :ok = Supervisor.terminate_child(OptimalEngine.Supervisor, Slots)
+      {:ok, _} = Supervisor.restart_child(OptimalEngine.Supervisor, Slots)
+      _ = Slots.limit()
+      assert eventually(fn -> Enum.all?(leftovers, &(not File.exists?(&1))) end)
+      assert File.exists?(Path.join(dir, "metrics.parquet"))
+    end
+
+    test "an export waits behind another export instead of failing", ctx do
+      seed(ctx, ctx.workspace, "mine")
+      holder = hold_slot(:export)
       export = Task.async(fn -> Export.run(ctx.tenant, ctx.workspace) end)
       refute Task.yield(export, 300)
       release_slot(holder)
@@ -606,12 +643,12 @@ defmodule OptimalEngine.AnalyticsTest do
   end
 
   # A process that holds one DuckDB slot until told to let it go.
-  defp hold_slot do
+  defp hold_slot(class \\ :query) do
     test = self()
 
     pid =
       spawn(fn ->
-        :ok = Slots.acquire(0)
+        :ok = Slots.acquire(class, 0)
         send(test, {:holding, self()})
 
         receive do

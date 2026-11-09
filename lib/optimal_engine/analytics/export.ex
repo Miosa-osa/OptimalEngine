@@ -173,14 +173,16 @@ defmodule OptimalEngine.Analytics.Export do
          {:ok, _} <-
            Analytics.run_locked(config, staging, convert(dataset, ndjson, parquet),
              timeout: @convert_timeout,
-             wait: @slot_wait
+             wait: @slot_wait,
+             slot: :export
            ),
          {:ok, [%{"n" => rows}]} <-
            Analytics.run_locked(
              config,
              staging,
              "SELECT count(*) AS n FROM read_parquet(#{Analytics.literal(parquet)})",
-             wait: @slot_wait
+             wait: @slot_wait,
+             slot: :export
            ) do
       {:ok, rows}
     else

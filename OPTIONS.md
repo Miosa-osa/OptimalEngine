@@ -131,7 +131,7 @@ See [Storage providers](docs/guides/storage-providers.md) and [Installation and 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OPTIMAL_ANALYTICS_PATH` | none (analytics off) | A writable directory; the daily `analytics_export` analysis writes each workspace's Parquet files under it, and `GET /api/analytics/query` reads them. Needs the `duckdb` executable on the PATH (the Engine image ships it). |
-| `OPTIMAL_ANALYTICS_MAX_PROCESSES` | `1` | How many `duckdb` processes analytics runs at once. Each may use 512 MB, so `1` suits a 1 GiB guest; raise it on a larger machine. A query past the cap is `503 {"error": "analytics_busy"}` with `Retry-After: 5`; an export waits for a free process. |
+| `OPTIMAL_ANALYTICS_MAX_PROCESSES` | `1` | How many `duckdb` processes analytics runs at once. Each may use 512 MB, so `1` suits a 1 GiB guest; raise it on a larger machine. A query past the cap is `503 {"error": "analytics_busy"}` with `Retry-After: 5`. An export runs on one process of its own beside the cap, at 256 MB with the rest spilled to disk, so the daily export never turns queries away (peak: the cap at 512 MB each plus 256 MB); a second export waits for it. |
 | `OPTIMAL_ANALYSES_INTERVAL_MS` | `300000` | How often the analyses worker schedules and drains analyses, the export among them; `0` turns it off. |
 
 See [DuckDB And Parquet Analytics](docs/guides/storage-providers.md#duckdb-and-parquet-analytics).

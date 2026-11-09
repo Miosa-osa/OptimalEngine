@@ -42,6 +42,9 @@ defmodule OptimalEngine.Analytics do
   @query_timeout 15_000
   @manifest "manifest.json"
   @memory_limit "512MB"
+  # An export runs on a slot of its own beside the queries, so it takes less
+  # memory and spills the rest into its staging directory.
+  @export_memory_limit "256MB"
 
   # The column each dataset's question buckets by.
   @time_column %{
@@ -352,8 +355,8 @@ defmodule OptimalEngine.Analytics do
   as DuckDB requires); and the configuration locked, so nothing after it can
   turn any of this back on.
   """
-  @spec lockdown(Path.t(), Path.t()) :: String.t()
-  def lockdown(dir, temp) do
+  @spec lockdown(Path.t(), Path.t(), String.t()) :: String.t()
+  def lockdown(dir, temp, memory_limit \\ @memory_limit) do
     Enum.map_join(
       [
         "SET autoinstall_known_extensions = false",
@@ -361,7 +364,7 @@ defmodule OptimalEngine.Analytics do
         "SET allowed_directories = [#{literal(Path.expand(dir) <> "/")}]",
         "SET temp_directory = #{literal(temp)}",
         "SET enable_external_access = false",
-        "SET memory_limit = '#{@memory_limit}'",
+        "SET memory_limit = '#{memory_limit}'",
         "SET threads = 2",
         "SET lock_configuration = true"
       ],
@@ -384,7 +387,10 @@ defmodule OptimalEngine.Analytics do
     if config.executable == nil do
       {:error, :not_installed}
     else
-      Slots.run(Keyword.get(opts, :wait, 0), fn ->
+      slot = Keyword.get(opts, :slot, :query)
+      memory = if slot == :export, do: @export_memory_limit, else: @memory_limit
+
+      Slots.run(slot, Keyword.get(opts, :wait, 0), fn ->
         temp =
           Path.join(
             Path.expand(dir),
@@ -392,12 +398,35 @@ defmodule OptimalEngine.Analytics do
           )
 
         try do
-          DuckDB.query(config, lockdown(dir, temp) <> sql, Keyword.delete(opts, :wait))
+          DuckDB.query(
+            config,
+            lockdown(dir, temp, memory) <> sql,
+            Keyword.drop(opts, [:wait, :slot])
+          )
         after
           File.rm_rf(temp)
         end
       end)
     end
+  end
+
+  @doc """
+  Removes what a statement or an export leaves only when it was killed with
+  the Engine: `~duckdb-tmp-*` spill directories and `.staging-*` export
+  directories in every workspace's directory. Run when the slots server
+  starts, before any statement can hold one. Nothing configured is `:ok`.
+  """
+  @spec sweep_leftovers() :: :ok
+  def sweep_leftovers do
+    with {:ok, config} <- DuckDB.config() do
+      [config.path, "workspaces", "*", "{~duckdb-tmp-*,.staging-*}"]
+      |> Path.join()
+      |> Path.expand()
+      |> Path.wildcard(match_dot: true)
+      |> Enum.each(&File.rm_rf/1)
+    end
+
+    :ok
   end
 
   @doc """

@@ -8,11 +8,16 @@ defmodule OptimalEngine.Analytics.Slots do
   take: `OPTIMAL_ANALYTICS_MAX_PROCESSES` (default 1, which keeps a 1 GiB
   guest out of the OOM killer; raise it on a larger machine).
 
-  A query asks with no wait and is refused with `{:error, :busy}` when every
-  slot is taken (the API answers 503 with `Retry-After`). An export asks with
-  a wait, so a scheduled export queues behind a running one instead of
-  failing. A slot is released when its holder says so or exits, so a killed
-  caller never strands one.
+  Two classes of slot. Queries share the cap: a query asks with no wait and
+  is refused with `{:error, :busy}` when every query slot is taken (the API
+  answers 503 with `Retry-After`). An export holds the one export slot,
+  separate from the cap, so the daily export never turns queries away; it
+  runs with a lower memory limit (256 MB) and spills the rest to disk, and a
+  second export queues behind it instead of failing. A slot is released when
+  its holder says so or exits, so a killed caller never strands one.
+
+  When the server starts it removes the spill and staging directories a
+  killed Engine left behind (`OptimalEngine.Analytics.sweep_leftovers/0`).
   """
 
   use GenServer
@@ -26,7 +31,11 @@ defmodule OptimalEngine.Analytics.Slots do
 
   @doc "The cap now: a whole number above 0 from `OPTIMAL_ANALYTICS_MAX_PROCESSES`, else #{@default}."
   @spec limit() :: pos_integer()
-  def limit do
+  def limit, do: limit(:query)
+
+  defp limit(:export), do: 1
+
+  defp limit(:query) do
     case Integer.parse(String.trim(System.get_env(@env) || "")) do
       {n, ""} when n > 0 -> n
       _ -> @default
@@ -40,9 +49,10 @@ defmodule OptimalEngine.Analytics.Slots do
   `:ok` or `{:error, :busy}`. Without the server running (a task that did not
   start the application) the statement runs unbounded, as before the cap.
   """
-  @spec acquire(non_neg_integer()) :: :ok | {:error, :busy}
-  def acquire(wait_ms) when is_integer(wait_ms) and wait_ms >= 0 do
-    GenServer.call(__MODULE__, {:acquire, self(), wait_ms}, wait_ms + 5_000)
+  @spec acquire(:query | :export, non_neg_integer()) :: :ok | {:error, :busy}
+  def acquire(class \\ :query, wait_ms)
+      when class in [:query, :export] and is_integer(wait_ms) and wait_ms >= 0 do
+    GenServer.call(__MODULE__, {:acquire, self(), class, wait_ms}, wait_ms + 5_000)
   catch
     :exit, {:noproc, _} -> :ok
     :exit, {:timeout, _} -> {:error, :busy}
@@ -57,9 +67,10 @@ defmodule OptimalEngine.Analytics.Slots do
   end
 
   @doc "Runs `fun` holding a slot, or returns `{:error, :busy}`."
-  @spec run(non_neg_integer(), (-> result)) :: result | {:error, :busy} when result: term()
-  def run(wait_ms, fun) do
-    case acquire(wait_ms) do
+  @spec run(:query | :export, non_neg_integer(), (-> result)) :: result | {:error, :busy}
+        when result: term()
+  def run(class \\ :query, wait_ms, fun) do
+    case acquire(class, wait_ms) do
       :ok ->
         try do
           fun.()
@@ -72,28 +83,31 @@ defmodule OptimalEngine.Analytics.Slots do
     end
   end
 
-  # holders: monitor ref => pid; waiters: queue of {from, pid, timer ref}
+  # holders: monitor ref => {pid, class}; waiters: queue of {from, pid, class, timer ref}
 
   @impl true
-  def init(:ok), do: {:ok, %{holders: %{}, waiters: :queue.new()}}
+  def init(:ok) do
+    OptimalEngine.Analytics.sweep_leftovers()
+    {:ok, %{holders: %{}, waiters: :queue.new()}}
+  end
 
   @impl true
-  def handle_call({:acquire, pid, wait_ms}, from, state) do
+  def handle_call({:acquire, pid, class, wait_ms}, from, state) do
     cond do
-      map_size(state.holders) < limit() ->
-        {:reply, :ok, hold(state, pid)}
+      free?(state, class) ->
+        {:reply, :ok, hold(state, pid, class)}
 
       wait_ms == 0 ->
         {:reply, {:error, :busy}, state}
 
       true ->
         timer = Process.send_after(self(), {:give_up, from}, wait_ms)
-        {:noreply, %{state | waiters: :queue.in({from, pid, timer}, state.waiters)}}
+        {:noreply, %{state | waiters: :queue.in({from, pid, class, timer}, state.waiters)}}
     end
   end
 
   def handle_call({:release, pid}, _from, state) do
-    case Enum.find(state.holders, fn {_ref, holder} -> holder == pid end) do
+    case Enum.find(state.holders, fn {_ref, {holder, _class}} -> holder == pid end) do
       {ref, _pid} ->
         Process.demonitor(ref, [:flush])
         {:reply, :ok, state |> drop(ref) |> grant()}
@@ -110,36 +124,40 @@ defmodule OptimalEngine.Analytics.Slots do
 
   def handle_info({:give_up, from}, state) do
     {gone, waiting} =
-      state.waiters |> :queue.to_list() |> Enum.split_with(fn {f, _, _} -> f == from end)
+      state.waiters |> :queue.to_list() |> Enum.split_with(fn {f, _, _, _} -> f == from end)
 
     if gone != [], do: GenServer.reply(from, {:error, :busy})
     {:noreply, %{state | waiters: :queue.from_list(waiting)}}
   end
 
-  defp hold(state, pid), do: put_in(state.holders[Process.monitor(pid)], pid)
+  defp free?(state, class),
+    do: Enum.count(state.holders, fn {_ref, {_pid, held}} -> held == class end) < limit(class)
+
+  defp hold(state, pid, class), do: put_in(state.holders[Process.monitor(pid)], {pid, class})
 
   defp drop(state, ref), do: %{state | holders: Map.delete(state.holders, ref)}
 
-  # Hands free slots to the oldest waiters that are still alive.
+  # Hands free slots to the oldest waiters of each class that are still alive.
   defp grant(state) do
-    if map_size(state.holders) < limit() do
-      case :queue.out(state.waiters) do
-        {{:value, {from, pid, timer}}, rest} ->
-          Process.cancel_timer(timer)
-          state = %{state | waiters: rest}
+    {granted, waiting} =
+      state.waiters
+      |> :queue.to_list()
+      |> Enum.reduce({state, []}, fn {from, pid, class, timer} = waiter, {state, keep} ->
+        cond do
+          not Process.alive?(pid) ->
+            Process.cancel_timer(timer)
+            {state, keep}
 
-          if Process.alive?(pid) do
+          free?(state, class) ->
+            Process.cancel_timer(timer)
             GenServer.reply(from, :ok)
-            state |> hold(pid) |> grant()
-          else
-            grant(state)
-          end
+            {hold(state, pid, class), keep}
 
-        {:empty, _} ->
-          state
-      end
-    else
-      state
-    end
+          true ->
+            {state, [waiter | keep]}
+        end
+      end)
+
+    %{granted | waiters: waiting |> Enum.reverse() |> :queue.from_list()}
   end
 end
