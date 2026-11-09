@@ -84,14 +84,15 @@ defmodule OptimalEngine.Secrets.OpenBaoSecretsTest do
       assert Secrets.fetch("OPTIMAL_BACKUP_KEY") == {:ok, hex}
       assert Secrets.fetch("CONNECTOR_KEY") == {:ok, "x"}
       assert Secrets.fetch("OPTIMAL_BACKUP_KEY") == {:ok, hex}
-      assert kv_reads(stub, "optimal/engine") == 1
+      # One read per field: only the field asked for is kept.
+      assert kv_reads(stub, "optimal/engine") == 2
 
       # A rotated secret is read again once the kept copy is dropped.
       rotated = String.duplicate("a", 64)
       OpenBaoStub.put_secret(stub, "optimal/engine", %{"backup_key" => rotated})
       Secrets.flush_cache()
       assert Secrets.fetch("OPTIMAL_BACKUP_KEY") == {:ok, rotated}
-      assert kv_reads(stub, "optimal/engine") == 2
+      assert kv_reads(stub, "optimal/engine") == 3
     end
 
     test "a reference fails clearly, naming the variable and never the secret or token", %{
@@ -165,7 +166,8 @@ defmodule OptimalEngine.Secrets.OpenBaoSecretsTest do
       end
 
       System.put_env("OPTIMAL_OPENBAO_TOKEN", "openbao:optimal/engine#token")
-      assert Secrets.fetch("OPTIMAL_OPENBAO_TOKEN") == {:ok, "openbao:optimal/engine#token"}
+      # Not an Engine secret: never fetched through Secrets, so never resolved.
+      assert Secrets.fetch("OPTIMAL_OPENBAO_TOKEN") == {:error, :not_an_engine_secret}
       assert Secrets.source("OPTIMAL_OPENBAO_TOKEN") == "env"
     end
   end

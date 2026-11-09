@@ -183,59 +183,84 @@ defmodule OptimalEngine.Secrets.ProviderCredentialsTest do
 
     # Every HTTP request goes through the mock once it is installed, OpenBao's
     # too, so the reference is read (and kept for a minute) before it is.
-    test "a peer key given as a reference is sent as the secret OpenBao holds", %{bao: bao} = ctx do
-      OpenBaoStub.put_secret(bao, "optimal/peer", %{"api_key" => "peer-key-from-bao"})
-      assert {:ok, "peer-key-from-bao"} = Secrets.resolve_value("t", "openbao:optimal/peer#api_key")
-      sent = :ets.new(:sent, [:public])
+    # The api_key arrives through the API (`POST /api/sync/peers`,
+    # `POST /api/federation/peers`): a reference in it would have the Engine
+    # read any secret its own OpenBao token can and send it to the peer URL the
+    # caller chose. A reference is refused, and one already stored is a
+    # literal string, never resolved.
+    test "a peer key that is an OpenBao reference is refused, for sync and federation", ctx do
+      ref = "openbao:optimal/engine#connector_key"
 
-      Application.put_env(:optimal_engine, :http_mock, fn _url, opts ->
-        :ets.insert(sent, {List.keyfind(opts[:headers], "authorization", 0)})
-        {:ok, {{~c"HTTP/1.1", 401, ~c"No"}, [], "{}"}}
-      end)
+      assert {:error, :api_key_reference_refused} = add_peer(ctx, ref)
+      assert {:error, :api_key_reference_refused} = add_peer(ctx, "  " <> ref)
 
-      assert {:ok, _peer} = add_peer(ctx, "openbao:optimal/peer#api_key")
-      _ = run(ctx)
-
-      assert [{{"authorization", "Bearer peer-key-from-bao"}} | _] = :ets.tab2list(sent)
-    end
-
-    test "a peer key reference OpenBao cannot answer is the reason, and nothing is sent",
-         %{bao: bao} = ctx do
-      assert {:ok, _peer} = add_peer(ctx, "openbao:optimal/peer#api_key")
-
-      Application.put_env(:optimal_engine, :http_mock, fn url, _opts ->
-        if String.starts_with?(url, bao.endpoint),
-          do: {:ok, {{~c"HTTP/1.1", 503, ~c"Sealed"}, [], ~s({"errors":["Vault is sealed"]})}},
-          else: flunk("nothing is sent to the peer without the key")
-      end)
-
-      assert %{status: "error", reason: {:peer_key_unavailable, :openbao_sealed}} = run(ctx)
-    end
-
-    test "a federation peer key may be a reference too", %{bao: bao} = ctx do
-      OpenBaoStub.put_secret(bao, "optimal/fed", %{"api_key" => "fed-key-from-bao"})
-      assert {:ok, "fed-key-from-bao"} = Secrets.resolve_value("t", "openbao:optimal/fed#api_key")
-      sent = :ets.new(:fed_sent, [:public])
-
-      Application.put_env(:optimal_engine, :http_mock, fn _url, opts ->
-        :ets.insert(sent, {List.keyfind(opts[:headers], "authorization", 0)})
-        {:ok, {{~c"HTTP/1.1", 200, ~c"OK"}, [], ~s({"results": []})}}
-      end)
-
-      assert {:ok, _} =
+      assert {:error, :api_key_reference_refused} =
                Federation.add_peer(
                  ctx.tenant,
                  %{
                    "workspace_id" => ctx.ws,
                    "url" => "https://fed.example",
-                   "api_key" => "openbao:optimal/fed#api_key",
+                   "api_key" => ref,
                    "share_up" => "read"
                  },
                  "u"
                )
+    end
 
-      _ = Federation.search(ctx.tenant, "anything", allowed: [ctx.ws])
-      assert [{{"authorization", "Bearer fed-key-from-bao"}} | _] = :ets.tab2list(sent)
+    test "the API refuses a reference with 422" do
+      n = System.unique_integer([:positive])
+      {:ok, ws} = Workspace.create(%{slug: "peer-ref-api-#{n}", name: "Peer ref"})
+
+      conn =
+        Plug.Test.conn(
+          :post,
+          "/api/sync/peers",
+          Jason.encode!(%{
+            "workspace_id" => ws.id,
+            "url" => "https://attacker.example",
+            "api_key" => "openbao:optimal/engine#backup_key"
+          })
+        )
+        |> Plug.Conn.put_req_header("content-type", "application/json")
+        |> OptimalEngine.API.Router.call(OptimalEngine.API.Router.init([]))
+
+      assert conn.status == 422
+      assert conn.resp_body =~ "api_key_reference_refused"
+    end
+
+    test "a reference already stored is sent as the literal it is, and OpenBao is never read",
+         %{bao: bao} = ctx do
+      OpenBaoStub.put_secret(bao, "optimal/engine", %{"connector_key" => "the-real-secret"})
+      ref = "openbao:optimal/engine#connector_key"
+      assert {:ok, _peer} = add_peer(ctx, "plain-key")
+
+      # As an older build stored it.
+      {:ok, envelope} = OptimalEngine.Connectors.Credential.encrypt(%{"api_key" => ref})
+
+      {:ok, _} =
+        OptimalEngine.Store.raw_query(
+          "UPDATE sync_peers SET credential = ?1 WHERE workspace_id = ?2",
+          [
+            envelope,
+            ctx.ws
+          ]
+        )
+
+      sent = :ets.new(:sent_literal, [:public, :bag])
+
+      Application.put_env(:optimal_engine, :http_mock, fn url, opts ->
+        :ets.insert(sent, {url, List.keyfind(opts[:headers] || [], "authorization", 0)})
+        {:ok, {{~c"HTTP/1.1", 401, ~c"No"}, [], "{}"}}
+      end)
+
+      _ = run(ctx)
+
+      calls = :ets.tab2list(sent)
+      assert [_ | _] = calls
+      refute Enum.any?(calls, fn {url, _} -> String.starts_with?(url, bao.endpoint) end)
+      refute inspect(calls) =~ "the-real-secret"
+      assert Enum.any?(calls, fn {_url, auth} -> auth == {"authorization", "Bearer " <> ref} end)
+      assert OpenBaoStub.requests(bao) == []
     end
   end
 

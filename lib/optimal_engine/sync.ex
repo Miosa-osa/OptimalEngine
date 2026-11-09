@@ -608,6 +608,12 @@ defmodule OptimalEngine.Sync do
       not is_binary(attrs["api_key"]) ->
         {:error, :api_key_required}
 
+      # The key arrives through the API and is stored: it is never an OpenBao
+      # reference, or its sender could have the Engine read any secret its
+      # token can and send it to the URL they chose.
+      OptimalEngine.Secrets.reference?(String.trim(attrs["api_key"])) ->
+        {:error, :api_key_reference_refused}
+
       policy not in ~w(push pull both none) ->
         {:error, :invalid_policy}
 
@@ -2996,19 +3002,14 @@ defmodule OptimalEngine.Sync do
     end
   end
 
-  # The stored key may be an `openbao:<path>#<field>` reference, resolved for
-  # each use (`OptimalEngine.Secrets.resolve_value/2`). A master key that
-  # cannot be used is named as such, not as an unreadable credential.
+  # The stored key is the key, a literal: a value stored from the API is never
+  # resolved as an OpenBao reference (one stored by an older build included).
+  # A master key that cannot be used is named as such, not as an unreadable
+  # credential.
   defp peer_key(%{credential: envelope}) do
     case Credential.decrypt(envelope) do
       {:ok, %{"api_key" => key}} when is_binary(key) ->
-        case OptimalEngine.Secrets.resolve_value("Sync peer key", key) do
-          {:ok, key} ->
-            {:ok, key}
-
-          {:error, {:secret_unavailable, _label, reason}} ->
-            {:error, {:peer_key_unavailable, reason}}
-        end
+        {:ok, key}
 
       {:error, reason} ->
         if Credential.key_error?(reason),
