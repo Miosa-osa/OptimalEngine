@@ -60,7 +60,8 @@ defmodule OptimalEngine.AnalysesTest do
 
   test "the day's analyses are scheduled once and drained", ctx do
     today = Date.utc_today()
-    first = Analyses.schedule(today)
+    # Scoped to this test's tenant and workspace: the suite shares one store.
+    first = Analyses.schedule(today, tenant_id: ctx.tenant)
     assert first >= 2
 
     {:ok, jobs} = Jobs.list(ctx.workspace)
@@ -68,11 +69,11 @@ defmodule OptimalEngine.AnalysesTest do
     assert "analysis.promises" in kinds
 
     # Scheduling again the same day adds no new jobs.
-    Analyses.schedule(today)
+    Analyses.schedule(today, tenant_id: ctx.tenant)
     {:ok, again} = Jobs.list(ctx.workspace)
     assert length(again) == length(jobs)
 
-    ran = Analyses.drain(200)
+    ran = Analyses.drain(200, workspace_id: ctx.workspace)
     assert Enum.any?(ran, &(&1[:kind] == "analysis.promises" and &1[:outcome] == :completed))
     assert [_ | _] = Analyses.reports(ctx.tenant, [ctx.workspace], kind: "promises")
   end

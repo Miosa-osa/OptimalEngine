@@ -54,13 +54,22 @@ defmodule OptimalEngine.Analyses do
   @doc """
   Enqueues the day's analyses for every tenant (once per kind, workspace,
   and day). Returns how many jobs were enqueued or already queued.
+  `tenant_id: id` schedules that tenant's only.
   """
-  @spec schedule(Date.t()) :: non_neg_integer()
-  def schedule(today \\ Date.utc_today()) do
-    {:ok, tenants} = Tenant.list()
+  @spec schedule(Date.t(), keyword()) :: non_neg_integer()
+  def schedule(today \\ Date.utc_today(), opts \\ []) do
+    tenant_ids =
+      case Keyword.get(opts, :tenant_id) do
+        nil ->
+          {:ok, tenants} = Tenant.list()
+          Enum.map(tenants, & &1.id)
 
-    tenants
-    |> Enum.flat_map(&due(&1.id))
+        tenant_id ->
+          [tenant_id]
+      end
+
+    tenant_ids
+    |> Enum.flat_map(&due/1)
     |> Enum.count(fn {workspace_id, kind} ->
       match?(
         {:ok, _},
@@ -72,11 +81,17 @@ defmodule OptimalEngine.Analyses do
     end)
   end
 
-  @doc "Runs due analysis jobs, at most `limit`. Returns the outcomes."
-  @spec drain(pos_integer()) :: [map()]
-  def drain(limit \\ 20) do
+  @doc """
+  Runs due analysis jobs, at most `limit`. Returns the outcomes.
+  `workspace_id: id` runs that workspace's only.
+  """
+  @spec drain(pos_integer(), keyword()) :: [map()]
+  def drain(limit \\ 20, opts \\ []) do
+    claim =
+      [kinds: Enum.map(@kinds, &job_kind/1), retry_in: 60] ++ Keyword.take(opts, [:workspace_id])
+
     Enum.reduce_while(1..limit, [], fn _, acc ->
-      case Jobs.run_next(&handle/1, kinds: Enum.map(@kinds, &job_kind/1), retry_in: 60) do
+      case Jobs.run_next(&handle/1, claim) do
         {:ok, %{job: job, outcome: outcome}} ->
           {:cont, [%{job_id: job.id, kind: job.kind, outcome: outcome} | acc]}
 

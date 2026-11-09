@@ -640,25 +640,18 @@ defmodule OptimalEngine.AnalyticsTest do
 
   describe "scheduling" do
     test "the daily analyses export every active workspace while analytics is configured", ctx do
-      {:ok, before} = Store.raw_query("SELECT id FROM jobs", [])
-
       try do
-        Analyses.schedule(Date.utc_today())
+        Analyses.schedule(Date.utc_today(), tenant_id: ctx.tenant)
         {:ok, jobs} = Jobs.list(ctx.workspace)
         assert "analysis.analytics_export" in Enum.map(jobs, & &1.kind)
 
         System.delete_env(DuckDB.env_name())
-        Analyses.schedule(Date.add(Date.utc_today(), 1))
+        Analyses.schedule(Date.add(Date.utc_today(), 1), tenant_id: ctx.tenant)
         {:ok, jobs} = Jobs.list(ctx.workspace)
         assert Enum.count(jobs, &(&1.kind == "analysis.analytics_export")) == 1
       after
-        # Scheduling queued the day's analyses for every workspace the suite
-        # made; the analyses tests drain a bounded number of jobs, so every job
-        # queued here is removed again.
-        {:ok, now} = Store.raw_query("SELECT id FROM jobs", [])
-
-        for [id] <- now -- before,
-            do: Store.raw_execute("DELETE FROM jobs WHERE id = ?1", [id])
+        # Scheduling is scoped to this test's tenant; the jobs it queued go.
+        :ok = Store.raw_execute("DELETE FROM jobs WHERE tenant_id = ?1", [ctx.tenant])
       end
     end
   end

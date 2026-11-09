@@ -141,6 +141,50 @@ defmodule OptimalEngine.Store do
     end
   end
 
+  @doc """
+  Holds `tables` against every other writer until the transaction ends, for a
+  transaction that reads and rewrites rows across many tables (a workspace
+  renamed or merged). At SERIALIZABLE such a transaction conflicts with nearly
+  every concurrent writer and, being the longest, is the one aborted, again and
+  again; with the tables held, writers wait for it as they wait for SQLite's
+  one writer, and a writer that read what it changed is the one run again.
+  Readers do not wait. The locks are taken before the transaction's snapshot,
+  so the transaction sees every write committed before it holds them; call it
+  first in the transaction, with a list read before it began. The locks are
+  taken in name order, one statement, in SHARE ROW EXCLUSIVE mode, which two
+  such transactions cannot hold at once. SQLite's store runs one writer at a
+  time, so there it does nothing.
+  """
+  @spec txn_lock_tables(term(), [String.t()]) :: :ok | {:error, term()}
+  def txn_lock_tables(_txn, []), do: :ok
+
+  def txn_lock_tables(txn, tables) when is_list(tables) do
+    if selected?(OptimalEngine.Store.Postgres) do
+      list =
+        tables
+        |> Enum.uniq()
+        |> Enum.sort()
+        |> Enum.map_join(", ", &~s("#{String.replace(&1, ~s("), ~s(""))}"))
+
+      sql = "LOCK TABLE #{list} IN SHARE ROW EXCLUSIVE MODE"
+      with {:ok, _} <- OptimalEngine.Store.Postgres.txn_execute_native(txn, sql, []), do: :ok
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  The clause that ends a `SELECT` of rows to claim from a queue: on PostgreSQL
+  ` FOR UPDATE SKIP LOCKED`, so the rows are locked until the transaction ends
+  and a concurrent claimer passes over them instead of waiting for them or
+  claiming them too. Used with `txn_read_committed/1`. SQLite's store runs one
+  writer at a time, so there it is empty.
+  """
+  @spec skip_locked() :: String.t()
+  def skip_locked do
+    if selected?(OptimalEngine.Store.Postgres), do: " FOR UPDATE SKIP LOCKED", else: ""
+  end
+
   def insert_chunks(chunks), do: adapter().insert_chunks(chunks)
 
   def insert_classifications(rows), do: adapter().insert_classifications(rows)

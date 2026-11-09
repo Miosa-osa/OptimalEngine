@@ -41,12 +41,21 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   - A transaction that meets either one is rolled back and its fun runs again
     from the start, so a fun must not have effects outside the database.
 
-  Retries back off with jitter, at most 25 attempts, and stop at the call's
-  timeout: each attempt gets only the time that is left, and a timeout must be
-  finite. Each retry emits `[:optimal_engine, :store, :retry]` with the attempt
-  number and, as metadata, the scope (`:statement` or `:transaction`) and the
-  reason. A call that runs out of attempts or time returns
-  `{:error, {:serialization_failure, detail}}`.
+  Retries back off exponentially with full jitter (a random pause up to a
+  window that doubles from 4 ms to 1 second), at most 25 attempts, and stop at
+  the call's timeout: each attempt gets only the time that is left, and a
+  timeout must be finite. Each retry emits `[:optimal_engine, :store, :retry]`
+  with the attempt number and, as metadata, the scope (`:statement` or
+  `:transaction`) and the reason. A call that runs out of attempts or time
+  returns `{:error, {:serialization_failure, detail}}`, where the detail says
+  how many attempts ran over how long, and which statement met the last
+  conflict and why.
+
+  A transaction that by its nature conflicts with every concurrent writer
+  should not lean on these retries: under load it loses every time. It takes
+  the locks it needs before it reads instead (`Store.txn_read_committed/1` with
+  row locks, `Store.skip_locked/0` for a queue, `Store.txn_lock_tables/2` for a
+  long rewrite of many tables).
 
   ## Statements inside a transaction
 
@@ -74,6 +83,8 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   @default_timeout 15_000
   @max_attempts 25
   @unique_violation {__MODULE__, :unique_violation}
+  @last_conflict {__MODULE__, :last_conflict}
+  @max_pause 1_000
   @rollback_to ~r/\A\s*ROLLBACK\s+(TRANSACTION\s+)?TO\b/i
   @dollar ~r/\$(\d+)(?!\d)/
   # A retry starts only with at least this much of the call's time left, and a
@@ -257,12 +268,17 @@ defmodule OptimalEngine.Store.Postgres.Connection do
         transaction(pool, &txn_query(&1, sql, params, opts), timeout)
       else
         deadline = deadline(timeout)
+        Process.put({@last_conflict, :started, deadline}, System.monotonic_time(:millisecond))
 
-        fn remaining ->
-          execute(pool, statement, bound, Keyword.put(opts, :timeout, remaining))
+        try do
+          fn remaining ->
+            execute(pool, statement, bound, Keyword.put(opts, :timeout, remaining))
+          end
+          |> retrying(1, deadline)
+          |> json_columns(json)
+        after
+          Process.delete({@last_conflict, :started, deadline})
         end
-        |> retrying(1, deadline)
-        |> json_columns(json)
       end
     end
   end
@@ -276,7 +292,23 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   @spec transaction(GenServer.server(), (txn() -> {:ok, term()} | {:error, term()}), timeout()) ::
           {:ok, term()} | {:error, term()}
   def transaction(pool, fun, timeout) when is_function(fun, 1) do
-    attempt_transaction(pool, fun, 1, deadline(timeout!(timeout)))
+    deadline = deadline(timeout!(timeout))
+    Process.put({@last_conflict, :started, deadline}, System.monotonic_time(:millisecond))
+
+    try do
+      attempt_transaction(pool, fun, 1, deadline)
+    after
+      Process.delete({@last_conflict, :started, deadline})
+      Process.delete({@last_conflict, deadline})
+    end
+  end
+
+  # A statement of the transaction met a conflict: the transaction is rolled
+  # back and run again, and the statement is kept for the error a transaction
+  # that runs out of attempts returns.
+  defp doomed_by(doomed, deadline, statement, error) do
+    Process.put({@last_conflict, deadline}, {statement, error})
+    :atomics.put(doomed, 1, 1)
   end
 
   @doc """
@@ -305,7 +337,7 @@ defmodule OptimalEngine.Store.Postgres.Connection do
 
         {:error, error} ->
           cond do
-            Errors.retryable?(error) -> :atomics.put(doomed, 1, 1)
+            Errors.retryable?(error) -> doomed_by(doomed, deadline, statement, error)
             mode == [] and unique_violation?(error) -> unique_met(doomed, error)
             true -> :ok
           end
@@ -491,9 +523,45 @@ defmodule OptimalEngine.Store.Postgres.Connection do
 
           true ->
             {:error,
-             {:serialization_failure, "#{error.postgres.code}; gave up after #{attempt} attempts"}}
+             {:serialization_failure,
+              gave_up(error.postgres.code, attempt, deadline, {:statement, error})}}
         end
     end
+  end
+
+  # What a call that ran out of attempts or time was doing, for the error it
+  # returns: how many attempts over how long, and the statement that met the
+  # last conflict with the server's reason.
+  defp gave_up(reason, attempt, deadline, conflict) do
+    started = Process.get({@last_conflict, :started, deadline})
+    elapsed = if started, do: " in #{System.monotonic_time(:millisecond) - started} ms", else: ""
+
+    "#{reason}; gave up after #{attempt} attempts#{elapsed}" <> conflict_detail(conflict)
+  end
+
+  defp conflict_detail({:statement, %Postgrex.Error{query: query} = error}),
+    do: "; last conflict at: #{excerpt(query)}#{server_detail(error)}"
+
+  defp conflict_detail({:transaction, nil}), do: ""
+
+  defp conflict_detail({:transaction, {statement, error}}),
+    do: "; last conflict at: #{excerpt(statement)}#{server_detail(error)}"
+
+  defp server_detail(%Postgrex.Error{postgres: %{} = fields}) do
+    case fields[:detail] || fields[:hint] do
+      nil -> ""
+      text -> " (#{text})"
+    end
+  end
+
+  defp server_detail(_error), do: ""
+
+  defp excerpt(nil), do: "(statement)"
+  defp excerpt(%{statement: statement}), do: excerpt(statement)
+
+  defp excerpt(statement) do
+    flat = statement |> String.replace(~r/\s+/, " ") |> String.trim()
+    if String.length(flat) > 160, do: String.slice(flat, 0, 160) <> "...", else: flat
   end
 
   defp timeout!(timeout) when is_integer(timeout) and timeout > 0, do: timeout
@@ -507,10 +575,12 @@ defmodule OptimalEngine.Store.Postgres.Connection do
 
   defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
-  # Full jitter over an exponential window capped at 200 ms; true when enough
-  # of the call's time is left after it for another attempt.
+  # Full jitter over an exponential window (4 ms after the first attempt,
+  # doubling to at most a second), so writers that met the same conflict do not
+  # meet again at once; true when enough of the call's time is left after the
+  # pause for another attempt.
   defp retry_after_backoff?(attempt, deadline) do
-    pause = :rand.uniform(min(200, 2 ** min(attempt + 1, 8)))
+    pause = :rand.uniform(min(@max_pause, 2 ** min(attempt + 1, 10)))
 
     if remaining(deadline) - pause >= @min_attempt do
       Process.sleep(pause)
@@ -553,7 +623,7 @@ defmodule OptimalEngine.Store.Postgres.Connection do
 
   # The lock comes first, in a statement of its own, so the sequence is read
   # and moved by one transaction at a time.
-  defp advance_identity({__MODULE__, conn, doomed, _deadline}, {table, column}, timeout) do
+  defp advance_identity({__MODULE__, conn, doomed, deadline}, {table, column}, timeout) do
     table_name = ~s("#{String.replace(table, ~s("), ~s(""))}")
     column_name = ~s("#{String.replace(column, ~s("), ~s(""))}")
 
@@ -574,7 +644,7 @@ defmodule OptimalEngine.Store.Postgres.Connection do
       :ok
     else
       {:error, error} ->
-        if Errors.retryable?(error), do: :atomics.put(doomed, 1, 1)
+        if Errors.retryable?(error), do: doomed_by(doomed, deadline, advance, error)
         {:error, Errors.message(error)}
     end
   end
@@ -650,6 +720,7 @@ defmodule OptimalEngine.Store.Postgres.Connection do
 
       {:commit, error} ->
         if Errors.retryable?(error) do
+          Process.put({@last_conflict, deadline}, {"COMMIT", error})
           retry_transaction(pool, fun, {attempt, deadline}, error.postgres.code)
         else
           {:error, {:commit_failed, commit_reason(error)}}
@@ -675,7 +746,10 @@ defmodule OptimalEngine.Store.Postgres.Connection do
       retried(:transaction, reason, attempt)
       attempt_transaction(pool, fun, attempt + 1, deadline, last_unique)
     else
-      {:error, {:serialization_failure, "#{reason}; gave up after #{attempt} attempts"}}
+      conflict = Process.get({@last_conflict, deadline})
+
+      {:error,
+       {:serialization_failure, gave_up(reason, attempt, deadline, {:transaction, conflict})}}
     end
   end
 
