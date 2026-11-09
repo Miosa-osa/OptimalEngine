@@ -188,10 +188,19 @@ defmodule OptimalEngine.Analytics do
   delete, a discarded import, a purge that failed). Run with the daily
   Engine-wide export (`analytics_engine_export`), so a removal path that does
   not purge the files itself is covered within a day. Never touches the
-  Engine-wide directory. Returns how many directories went.
+  Engine-wide directory.
+
+  Only a definite answer removes a directory: no such workspace, or one
+  that is not active. A lookup that fails (the store busy, a PostgreSQL
+  blip) is no verdict, and the directory is kept for the next prune.
+  Returns how many directories went and how many were skipped. `:lookup`
+  replaces the store lookup (tests).
   """
-  @spec prune_removed() :: {:ok, %{removed: non_neg_integer()}} | {:error, term()}
-  def prune_removed do
+  @spec prune_removed(keyword()) ::
+          {:ok, %{removed: non_neg_integer(), skipped: non_neg_integer()}} | {:error, term()}
+  def prune_removed(opts \\ []) do
+    lookup = Keyword.get(opts, :lookup, &workspace_state/1)
+
     with {:ok, config} <- DuckDB.config() do
       root = Path.join(Path.expand(config.path), "workspaces")
 
@@ -201,28 +210,45 @@ defmodule OptimalEngine.Analytics do
           {:error, _} -> []
         end
 
-      removed =
-        Enum.count(names, fn name ->
+      counts =
+        Enum.reduce(names, %{removed: 0, skipped: 0}, fn name, acc ->
           id = String.replace(name, "~", ":")
 
-          if active_workspace?(id),
-            do: false,
-            else: match?({:ok, _}, File.rm_rf(Path.join(root, name)))
+          case if(workspace_id?(id), do: lookup.(id), else: {:ok, :absent}) do
+            {:ok, :active} ->
+              acc
+
+            {:ok, gone} when gone in [:absent, :inactive] ->
+              case File.rm_rf(Path.join(root, name)) do
+                {:ok, _} -> Map.update!(acc, :removed, &(&1 + 1))
+                {:error, _reason, _file} -> Map.update!(acc, :skipped, &(&1 + 1))
+              end
+
+            _unknown ->
+              Map.update!(acc, :skipped, &(&1 + 1))
+          end
         end)
 
-      {:ok, %{removed: removed}}
+      {:ok, counts}
     else
-      {:error, :not_configured} -> {:ok, %{removed: 0}}
+      {:error, :not_configured} -> {:ok, %{removed: 0, skipped: 0}}
       other -> other
     end
   end
 
-  defp active_workspace?(id) do
-    workspace_id?(id) and
-      match?(
-        {:ok, [_ | _]},
-        Store.raw_query("SELECT 1 FROM workspaces WHERE id = ?1 AND status = 'active'", [id])
-      )
+  # `{:ok, :active | :inactive | :absent}`, or the store's error.
+  defp workspace_state(id) do
+    case Store.raw_query("SELECT status FROM workspaces WHERE id = ?1", [id]) do
+      {:ok, [["active"]]} -> {:ok, :active}
+      {:ok, [[_other]]} -> {:ok, :inactive}
+      {:ok, []} -> {:ok, :absent}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:unexpected, other}}
+    end
+  rescue
+    error -> {:error, error}
+  catch
+    :exit, reason -> {:error, reason}
   end
 
   @doc """
@@ -359,6 +385,10 @@ defmodule OptimalEngine.Analytics do
   def purge_workspace(workspace_id) do
     with {:ok, config} <- DuckDB.config(),
          true <- workspace_id?(workspace_id) do
+      :telemetry.execute([:optimal_engine, :analytics, :purge], %{count: 1}, %{
+        workspace_id: workspace_id
+      })
+
       case File.rm_rf(workspace_dir(config.path, workspace_id)) do
         {:ok, _} -> :ok
         {:error, reason, _file} -> {:error, {:analytics_purge_failed, reason}}

@@ -244,15 +244,128 @@ defmodule OptimalEngine.AnalyticsLifecycleTest do
     end
   end
 
+  describe "review: what is not known is not removed" do
+    test "a workspace lookup that fails removes nothing", ctx do
+      kept = workspace(ctx, "kept-on-error")
+      dir = exported!(ctx, kept)
+      orphan = Analytics.workspace_dir(ctx.root, "#{ctx.tenant}:orphan")
+      File.mkdir_p!(orphan)
+
+      # The store busy or a PostgreSQL blip: no answer is no verdict.
+      failing = fn _id -> {:error, :busy} end
+      assert {:ok, %{removed: 0, skipped: skipped}} = Analytics.prune_removed(lookup: failing)
+      assert skipped >= 2
+      assert File.regular?(Path.join(dir, "metrics.parquet"))
+      assert File.dir?(orphan)
+    end
+
+    test "the prune runs when the export cannot", ctx do
+      gone = Analytics.workspace_dir(ctx.root, "#{ctx.tenant}:gone-no-duckdb")
+      File.mkdir_p!(gone)
+      home = workspace(ctx, "no-duckdb-home")
+
+      # No duckdb on the PATH: the export fails, the prune does not depend on it.
+      path = System.get_env("PATH")
+      System.put_env("PATH", "/nonexistent")
+      on_exit(fn -> System.put_env("PATH", path) end)
+
+      assert {:ok, _} = Analyses.run_now(ctx.tenant, home, "analytics_engine_export")
+      System.put_env("PATH", path)
+      refute File.exists?(gone)
+    end
+
+    test "the Engine export is scheduled on the Engine's default workspace, not a tenant's" do
+      {:ok, before} = Store.raw_query("SELECT id FROM jobs", [])
+      today = Date.utc_today()
+
+      try do
+        Analyses.schedule(today)
+
+        assert {:ok, [[workspace]]} =
+                 Store.raw_query(
+                   "SELECT workspace_id FROM jobs WHERE kind = ?1 AND idempotency_key = ?2",
+                   [
+                     "analysis.analytics_engine_export",
+                     "analysis:analytics_engine_export:#{Date.to_iso8601(today)}"
+                   ]
+                 )
+
+        assert workspace == Workspace.default_id()
+      after
+        {:ok, now} = Store.raw_query("SELECT id FROM jobs", [])
+        for [id] <- now -- before, do: Store.raw_execute("DELETE FROM jobs WHERE id = ?1", [id])
+      end
+    end
+
+    test "a finished move purges the files once the workspace is no longer active", ctx do
+      moving = workspace(ctx, "moving-order")
+      exported!(ctx, moving)
+      test = self()
+      handler = "analytics-purge-#{ctx.n}"
+
+      :telemetry.attach(
+        handler,
+        [:optimal_engine, :analytics, :purge],
+        fn _e, _m, meta, _ ->
+          {:ok, [[status]]} =
+            Store.raw_query("SELECT status FROM workspaces WHERE id = ?1", [meta.workspace_id])
+
+          send(test, {:purged_while, meta.workspace_id, status})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      path = Path.join(System.tmp_dir!(), "analytics-order-#{ctx.n}.tar.gz")
+      on_exit(fn -> File.rm(path) end)
+      {:ok, manifest} = WorkspaceBundle.export(ctx.tenant, moving, path)
+      :ok = WorkspaceBundle.prepare_move(ctx.tenant, moving, manifest["bundle_sha256"])
+
+      assert {:ok, _} =
+               WorkspaceBundle.finalize_move(ctx.tenant, moving, manifest["bundle_sha256"], %{
+                 "target_url" => "https://target.example"
+               })
+
+      assert_received {:purged_while, ^moving, "archived"}
+    end
+
+    test "an export whose directory is removed under it fails, and does not raise", ctx do
+      ws = workspace(ctx, "vanishing")
+      sample(ctx.tenant, ws, "x.latency")
+      dir = Analytics.workspace_dir(ctx.root, ws)
+
+      # A duckdb that, like a purge running beside the export, removes the
+      # workspace's directory as the first dataset converts.
+      [fake] = System.find_executable("duckdb") |> List.wrap()
+      wrapper = Path.join(ctx.root, "vanish-bin")
+      File.mkdir_p!(wrapper)
+
+      File.write!(Path.join(wrapper, "duckdb"), """
+      #!/usr/bin/env bash
+      "#{fake}" "$@"; rc=$?
+      rm -rf "#{dir}"
+      exit $rc
+      """)
+
+      File.chmod!(Path.join(wrapper, "duckdb"), 0o755)
+      path = System.get_env("PATH")
+      System.put_env("PATH", wrapper <> ":" <> path)
+      on_exit(fn -> System.put_env("PATH", path) end)
+
+      assert {:error, {:export_failed, _}} = Export.run(ctx.tenant, ws)
+    end
+  end
+
   describe "the Engine-wide routes" do
     setup ctx do
       ws = workspace(ctx, "routes")
       {:ok, _} = Export.run_engine()
 
-      mint = fn scopes, workspaces ->
+      mint = fn scopes, workspaces, tenant ->
         {:ok, %{key: key}} =
           ApiKey.mint(%{
-            tenant_id: ctx.tenant,
+            tenant_id: tenant,
             name: "k",
             scopes: scopes,
             workspace_scope: workspaces
@@ -262,9 +375,10 @@ defmodule OptimalEngine.AnalyticsLifecycleTest do
       end
 
       %{
-        reader: mint.(["read"], ["*"]),
-        narrow_admin: mint.(["admin"], [ws]),
-        admin: mint.(["admin"], ["*"])
+        reader: mint.(["read"], ["*"], ctx.tenant),
+        narrow_admin: mint.(["admin"], [ws], ctx.tenant),
+        tenant_admin: mint.(["admin"], ["*"], ctx.tenant),
+        operator: mint.(["admin"], ["*"], Tenant.default_id())
       }
     end
 
@@ -291,7 +405,7 @@ defmodule OptimalEngine.AnalyticsLifecycleTest do
       end
     end
 
-    test "need admin on a key not restricted to named workspaces", ctx do
+    test "are the Engine operator's: admin of the default tenant with every workspace", ctx do
       System.put_env("DUCKDB_FAKE_ROWS", ~s([{"bucket":"2026-11-01T00:00:00Z","samples":1}]))
 
       with_auth_required(fn ->
@@ -299,19 +413,42 @@ defmodule OptimalEngine.AnalyticsLifecycleTest do
           assert {401, _} = call(path, nil)
           assert {403, _} = call(path, ctx.reader)
           assert {403, %{"error" => "workspace_scope_denied"}} = call(path, ctx.narrow_admin)
+          # Another tenant's admin sees no Engine-wide counters.
+          assert {403, %{"error" => "operator_only"}} = call(path, ctx.tenant_admin)
         end
 
         assert {200, %{"exported_at" => at, "datasets" => %{"metrics" => _}}} =
-                 call("/api/analytics/engine", ctx.admin)
+                 call("/api/analytics/engine", ctx.operator)
 
         assert is_binary(at)
 
         assert {200, %{"rows" => [%{"samples" => 1}], "scope" => "engine"}} =
-                 call("/api/analytics/engine/query?dataset=metrics&bucket=hour", ctx.admin)
+                 call("/api/analytics/engine/query?dataset=metrics&bucket=hour", ctx.operator)
 
         assert {400, %{"error" => "invalid_parameter"}} =
-                 call("/api/analytics/engine/query?dataset=usage", ctx.admin)
+                 call("/api/analytics/engine/query?dataset=usage", ctx.operator)
       end)
+    end
+
+    test "running the Engine export is the Engine operator's too", ctx do
+      home = workspace(ctx, "run-home")
+
+      with_auth_required(fn ->
+        body = %{"workspace" => home, "kind" => "analytics_engine_export"}
+
+        assert {403, %{"error" => "operator_only"}} =
+                 post("/api/analyses/run", ctx.tenant_admin, body)
+      end)
+    end
+
+    defp post(path, key, body) do
+      conn =
+        conn(:post, path, Jason.encode!(body))
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("authorization", "Bearer " <> key)
+        |> Router.call(Router.init([]))
+
+      {conn.status, Jason.decode!(conn.resp_body)}
     end
   end
 end

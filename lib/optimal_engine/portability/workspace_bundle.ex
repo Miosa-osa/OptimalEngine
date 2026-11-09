@@ -989,14 +989,6 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       cache_purged =
         Cache.summary(Cache.purge_workspace(workspace_id, :move, plan_option(plan)))
 
-      # Its analytics files are a projection of rows that are gone; the daily
-      # prune (`Analytics.prune_removed/0`) retries one that failed here.
-      analytics_purged =
-        case OptimalEngine.Analytics.purge_workspace(workspace_id) do
-          :ok -> :ok
-          {:error, cause} -> inspect(cause)
-        end
-
       # Only the move keys are written; the archived stub keeps its slugs and
       # its external id value (archiving releases the id itself).
       {:ok, _} =
@@ -1019,6 +1011,15 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           """,
           [tenant_id, workspace_id, target_url, target["target_workspace_id"] || workspace_id]
         )
+
+      # Its analytics files go once it is archived, so no export can write them
+      # again behind the purge; the daily prune (`Analytics.prune_removed/1`)
+      # retries one that failed here.
+      analytics_purged =
+        case OptimalEngine.Analytics.purge_workspace(workspace_id) do
+          :ok -> :ok
+          {:error, cause} -> inspect(cause)
+        end
 
       {:ok,
        %{

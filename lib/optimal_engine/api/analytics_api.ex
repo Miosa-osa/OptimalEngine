@@ -58,13 +58,32 @@ defmodule OptimalEngine.API.AnalyticsAPI do
 
   @doc "`GET /api/analytics/engine`: what the Engine-wide metrics hold."
   def engine_status(conn) do
-    json(conn, 200, Map.put(Analytics.engine_status(), :scope, "engine"))
+    if operator?(conn),
+      do: json(conn, 200, Map.put(Analytics.engine_status(), :scope, "engine")),
+      else: operator_only(conn)
   end
 
   @doc "`GET /api/analytics/engine/query`: the metrics question over the Engine-wide metrics."
   def engine_query(conn) do
-    conn = fetch_query_params(conn)
-    reply(conn, Analytics.query_engine(conn.query_params), &Map.put(&1, :scope, "engine"))
+    if operator?(conn) do
+      conn = fetch_query_params(conn)
+      reply(conn, Analytics.query_engine(conn.query_params), &Map.put(&1, :scope, "engine"))
+    else
+      operator_only(conn)
+    end
+  end
+
+  # The Engine-wide counters span every tenant: they are the Engine operator's
+  # (`OptimalEngine.API.Actor.engine_operator?/1`, an admin key of the default
+  # tenant whose workspace scope is `*`), not any tenant's admin.
+  defp operator?(conn), do: OptimalEngine.API.Actor.engine_operator?(conn)
+
+  defp operator_only(conn) do
+    json(conn, 403, %{
+      error: "operator_only",
+      message:
+        "the Engine-wide analytics need an admin key of the default tenant whose workspace scope is *"
+    })
   end
 
   defp answer(conn, workspace) do

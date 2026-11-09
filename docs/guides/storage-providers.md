@@ -662,7 +662,7 @@ No payload, entity id, run message, principal or target leaves the store: the le
 Every export starts again from the store, a page at a time, into a staging directory beside the files; the files are moved into place only when every dataset converted, so a failed export leaves the previous files as they were.
 Deleting the directory loses nothing; the next export writes it again.
 Archiving a workspace removes its directory, and so do a data steward rename (for the id the rows moved away from), a finished move (`WorkspaceBundle.finalize_move/4`, reported as `analytics_purged`) and a discarded import that removes the workspace record.
-Whatever else takes a workspace out of the active set (a row deleted by hand, a purge that failed) is caught by the daily prune (`Analytics.prune_removed/0`, run by `analytics_engine_export`), which removes the directory of every workspace that is not active.
+Whatever else takes a workspace out of the active set (a row deleted by hand, a purge that failed) is caught by the daily prune (`Analytics.prune_removed/1`, run by `analytics_engine_export` before, and whatever happens to, its export), which removes the directory of every workspace the store says is absent or not active; a lookup that fails is no answer, and its directory is kept for the next prune.
 
 The export runs once a day for every active workspace while `OPTIMAL_ANALYTICS_PATH` is set, through the analyses worker (`OPTIMAL_ANALYSES_INTERVAL_MS`, see [Operating layer](operating-layer.md)), and on demand:
 
@@ -675,7 +675,7 @@ optimal analytics export acme:ops
 ### Engine-wide metrics
 
 The `analytics_engine_export` analysis writes `<OPTIMAL_ANALYTICS_PATH>/engine/metrics.parquet`: the samples the Engine records about itself (`metric_samples` under the `engine` scope, `OptimalEngine.Telemetry.History`), in the same columns as a workspace's `metrics.parquet`.
-It runs once a day for the whole Engine (on the default tenant's home workspace) while `OPTIMAL_ANALYTICS_PATH` is set, and prunes removed workspaces on the way.
+It runs once a day for the whole Engine (as a job of the Engine's default workspace, whatever workspaces the tenants have) while `OPTIMAL_ANALYTICS_PATH` is set, and prunes removed workspaces first.
 What it may hold is fixed in code, so no workspace's data can reach it:
 
 * rows of the `engine` scope only, never a workspace's samples;
@@ -683,7 +683,7 @@ What it may hold is fixed in code, so no workspace's data can reach it:
 * of the labels, only `quantile`.
 
 The directory sits beside `workspaces/`, never inside it: a workspace query is locked to its own directory and cannot read it, and an Engine query is locked to `engine/` and cannot read a workspace's.
-`GET /api/analytics/engine` (status) and `GET /api/analytics/engine/query?dataset=metrics` (the `metrics` question, with the parameters below) need the `admin` grant on a key that is not restricted to named workspaces; a narrower key is `403 workspace_scope_denied`.
+`GET /api/analytics/engine` (status) and `GET /api/analytics/engine/query?dataset=metrics` (the `metrics` question, with the parameters below) are the Engine operator's: the `admin` grant on a key of the default tenant whose workspace scope is `*` (or the local operator on an Engine that requires no key). A key restricted to named workspaces is `403 workspace_scope_denied`, another tenant's admin `403 operator_only`, and so is running `analytics_engine_export` through `POST /api/analyses/run`.
 
 ### The query
 

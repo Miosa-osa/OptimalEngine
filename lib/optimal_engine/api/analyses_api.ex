@@ -29,7 +29,23 @@ defmodule OptimalEngine.API.AnalysesAPI do
     })
   end
 
-  def run(conn) do
+  # The Engine-wide export reads and prunes across every tenant: the Engine
+  # operator's alone (`OptimalEngine.API.Actor.engine_operator?/1`).
+  def run(%{body_params: %{"kind" => "analytics_engine_export"}} = conn)
+      when not is_struct(conn.body_params) do
+    if OptimalEngine.API.Actor.engine_operator?(conn),
+      do: do_run(conn),
+      else:
+        json(conn, 403, %{
+          error: "operator_only",
+          message:
+            "analytics_engine_export needs an admin key of the default tenant whose workspace scope is *"
+        })
+  end
+
+  def run(conn), do: do_run(conn)
+
+  defp do_run(conn) do
     body = body(conn)
     payload = if is_map(body["payload"]), do: body["payload"], else: %{}
 

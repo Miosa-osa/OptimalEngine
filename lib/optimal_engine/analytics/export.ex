@@ -69,6 +69,15 @@ defmodule OptimalEngine.Analytics.Export do
 
       try do
         export(config, tenant_id, workspace_id, dir, staging)
+      rescue
+        # A purge beside the export (an archive, a discarded import) removed
+        # the directory: the export has nothing to write into.
+        error in [File.Error, File.RenameError, File.CopyError] ->
+          Logger.warning(
+            "[Analytics] export of #{workspace_id} lost its directory: #{error.reason}"
+          )
+
+          {:error, {:export_failed, :directory_removed}}
       after
         File.rm_rf(staging)
       end
