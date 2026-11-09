@@ -22,8 +22,8 @@ defmodule OptimalEngine.Storage.Shared do
 
   A namespace is an atom, which is also the name of the local ETS table its
   owner creates with `Shared.Local.new_table/1`. On Valkey a key lives at
-  `<prefix>:shared:<namespace>:<generation>:<key>`, with this Engine's prefix
-  (`key_prefix/0`): a binary key as it is (when
+  `<prefix>:<namespace>:<generation>:<key>`, with this Engine's prefix
+  (`key_prefix/0`, `optimal:shared:<engine hash>` by default): a binary key as it is (when
   short and printable), any other term as the SHA-256 of its external form.
   `clear/1` moves the namespace's generation, so a clear is one command
   however many keys the namespace holds; the old keys expire on their own.
@@ -276,7 +276,13 @@ defmodule OptimalEngine.Storage.Shared do
       end,
       fn ->
         # Configured but not answering: an outage, not a node without Valkey.
-        opts = if Pool.running?(), do: [missing: :empty, mark: :fallback], else: []
+        # An Engine that cannot be named shares nothing on Valkey, so its
+        # local bucket is all there is, as on a node without Valkey.
+        opts =
+          if Pool.running?() and not unidentified?(),
+            do: [missing: :empty, mark: :fallback],
+            else: []
+
         Local.take_token(ns, key, capacity, refill_per_ms, deny, ttl_ms, opts)
       end
     )
@@ -298,7 +304,9 @@ defmodule OptimalEngine.Storage.Shared do
   @doc "The Valkey key a namespace and key resolve to under `generation`."
   @spec valkey_key(namespace(), term(), non_neg_integer()) :: String.t()
   def valkey_key(ns, key, generation \\ 0),
-    do: namespace_prefix(ns) <> Integer.to_string(generation) <> ":" <> encode_key(key)
+    do:
+      (key_prefix() || "") <>
+        ":" <> Atom.to_string(ns) <> ":" <> Integer.to_string(generation) <> ":" <> encode_key(key)
 
   # ---------------------------------------------------------------------------
 
@@ -336,19 +344,32 @@ defmodule OptimalEngine.Storage.Shared do
   end
 
   defp apply_invalidation({:clear, ns}) do
-    case Pool.command(["INCR", generation_key(ns)]) do
-      {:ok, n} when is_integer(n) -> :ok
+    with {:ok, prefix} <- keyspace(),
+         {:ok, n} when is_integer(n) <- Pool.command(["INCR", generation_key(prefix, ns)]) do
+      :ok
+    else
       other -> {:error, other}
     end
   end
 
+  # Without a prefix (this Engine cannot be named yet) nothing goes to
+  # Valkey: the caller runs on local ETS, and an invalidation is deferred.
   defp eval(name, ns, key, args) do
-    {sha, source} = Map.fetch!(@scripts, name)
-    tail = ["1", generation_key(ns), namespace_prefix(ns), encode_key(key) | args]
+    with {:ok, prefix} <- keyspace() do
+      {sha, source} = Map.fetch!(@scripts, name)
+      tail = ["1", generation_key(prefix, ns), namespace_prefix(prefix, ns), encode_key(key) | args]
 
-    case Pool.command(["EVALSHA", sha | tail]) do
-      {:error, {:server, "NOSCRIPT" <> _}} -> Pool.command(["EVAL", source | tail])
-      other -> other
+      case Pool.command(["EVALSHA", sha | tail]) do
+        {:error, {:server, "NOSCRIPT" <> _}} -> Pool.command(["EVAL", source | tail])
+        other -> other
+      end
+    end
+  end
+
+  defp keyspace do
+    case key_prefix() do
+      nil -> {:error, :no_key_prefix}
+      prefix -> {:ok, prefix}
     end
   end
 
@@ -361,24 +382,46 @@ defmodule OptimalEngine.Storage.Shared do
 
   defp limited(_tokens, _elapsed), do: :unavailable
 
-  defp namespace_prefix(ns), do: key_prefix() <> ":shared:" <> Atom.to_string(ns) <> ":"
-  defp generation_key(ns), do: key_prefix() <> ":shared:" <> Atom.to_string(ns) <> ":gen"
+  defp namespace_prefix(prefix, ns), do: prefix <> ":" <> Atom.to_string(ns) <> ":"
+  defp generation_key(prefix, ns), do: prefix <> ":" <> Atom.to_string(ns) <> ":gen"
 
   @doc """
-  The prefix every key this Engine writes to Valkey starts with (the keys are
-  `<prefix>:shared:<namespace>:...`). `OPTIMAL_VALKEY_KEY_PREFIX` sets it (1
-  to 64 of `A-Z a-z 0-9 : _ . -`, starting with a letter or digit); otherwise
-  it is `optimal:` and 16 hex characters of a hash of this Engine's replica id,
-  so the processes on one store share their keys and Engines with stores of
-  their own never collide on one Valkey. Read once per process.
+  The prefix every key this Engine writes to Valkey starts with (keys are
+  `<prefix>:<namespace>:...`), or `nil` while this Engine cannot be named.
+
+    * `OPTIMAL_VALKEY_KEY_PREFIX=P` (1 to 64 of `A-Z a-z 0-9 : _ . -`,
+      starting with a letter or digit) gives `P:shared`.
+    * Otherwise it is `optimal:shared:` and 16 hex characters of a hash of
+      this Engine's identity, so it stays inside `optimal:shared:*` (a Valkey
+      ACL written for the keys before the prefix still covers it). The
+      identity is the store's replica id; on a store without one (the
+      PostgreSQL store), `OPTIMAL_POSTGRES_URL` without its user and password
+      plus `OPTIMAL_POSTGRES_SCHEMA`.
+
+  A prefix is kept for the life of the process only once it was read from one
+  of those. A replica id that could not be read (the store busy or not up) is
+  `nil` and read again on the next call, so no process ever pins a second
+  keyspace; meanwhile calls run on local ETS. With none of them at all it is
+  `nil` with a warning, once: set `OPTIMAL_VALKEY_KEY_PREFIX`, or Engines that
+  share a Valkey would share each other's buckets and caches.
   """
-  @spec key_prefix() :: String.t()
+  @spec key_prefix() :: String.t() | nil
   def key_prefix do
     case :persistent_term.get({__MODULE__, :key_prefix}, nil) do
       nil ->
-        prefix = configured_prefix() || default_prefix()
-        :persistent_term.put({__MODULE__, :key_prefix}, prefix)
-        prefix
+        case resolve_prefix() do
+          {:ok, prefix} ->
+            :persistent_term.put({__MODULE__, :key_prefix}, prefix)
+            :persistent_term.erase({__MODULE__, :prefix_warned})
+            prefix
+
+          :retry ->
+            nil
+
+          :unidentified ->
+            warn_unidentified()
+            nil
+        end
 
       prefix ->
         prefix
@@ -390,7 +433,40 @@ defmodule OptimalEngine.Storage.Shared do
   @spec reset_key_prefix() :: :ok
   def reset_key_prefix do
     :persistent_term.erase({__MODULE__, :key_prefix})
+    :persistent_term.erase({__MODULE__, :prefix_warned})
     :ok
+  end
+
+  defp resolve_prefix do
+    case configured_prefix() do
+      nil ->
+        case identity() do
+          {:ok, identity} -> {:ok, "optimal:shared:" <> digest(identity)}
+          other -> other
+        end
+
+      prefix ->
+        {:ok, prefix <> ":shared"}
+    end
+  end
+
+  defp digest(identity) do
+    :crypto.hash(:sha256, "optimal-engine valkey prefix:" <> identity)
+    |> Base.encode16(case: :lower)
+    |> binary_part(0, 16)
+  end
+
+  defp unidentified?, do: :persistent_term.get({__MODULE__, :prefix_warned}, false)
+
+  defp warn_unidentified do
+    unless :persistent_term.get({__MODULE__, :prefix_warned}, false) do
+      :persistent_term.put({__MODULE__, :prefix_warned}, true)
+
+      Logger.warning(
+        "[Valkey] this Engine has no replica id and no OPTIMAL_POSTGRES_URL to name it by; " <>
+          "set #{@prefix_env} to a value of its own. Until then shared state stays in local ETS."
+      )
+    end
   end
 
   defp configured_prefix do
@@ -419,37 +495,48 @@ defmodule OptimalEngine.Storage.Shared do
     end
   end
 
-  # The replica id is this Engine's identity; a store without one is named by
-  # where it lives, which is as stable for that Engine.
-  defp default_prefix do
-    identity =
-      case replica_id() do
-        id when is_binary(id) ->
-          id
-
-        nil ->
-          "store:" <>
-            inspect(
-              {Application.get_env(:optimal_engine, :db_path),
-               Application.get_env(:optimal_engine, :root_path)}
-            )
-      end
-
-    "optimal:" <>
-      (:crypto.hash(:sha256, "optimal-engine valkey prefix:" <> identity)
-       |> Base.encode16(case: :lower)
-       |> binary_part(0, 16))
+  defp identity do
+    case read_replica_id() do
+      {:ok, id} when is_binary(id) and id != "" -> {:ok, id}
+      :none -> postgres_identity()
+      _transient -> :retry
+    end
   end
 
-  defp replica_id do
+  defp read_replica_id do
+    case Application.get_env(:optimal_engine, :valkey_identity_reader) do
+      reader when is_function(reader, 0) -> reader.()
+      _ -> stored_replica_id()
+    end
+  end
+
+  defp stored_replica_id do
     case OptimalEngine.Store.raw_query("SELECT replica_id FROM sync_identity WHERE id = 1", []) do
-      {:ok, [[id]]} when is_binary(id) -> id
-      _ -> nil
+      {:ok, [[id]]} when is_binary(id) -> {:ok, id}
+      {:ok, _no_row} -> :none
+      other -> {:error, other}
     end
   rescue
-    _ -> nil
+    error -> {:error, error}
   catch
-    :exit, _ -> nil
+    :exit, reason -> {:error, reason}
+  end
+
+  # The database an Engine lives in, without the credentials that reach it
+  # (a rotated password must not move the keys).
+  defp postgres_identity do
+    with url when is_binary(url) and url != "" <- System.get_env("OPTIMAL_POSTGRES_URL"),
+         %URI{host: host} = uri when is_binary(host) <- URI.parse(String.trim(url)) do
+      schema = System.get_env("OPTIMAL_POSTGRES_SCHEMA") |> to_string() |> String.trim()
+      schema = if schema == "", do: "public", else: schema
+
+      {:ok,
+       "postgres://" <>
+         String.downcase(host) <>
+         ":" <> to_string(uri.port || 5432) <> (uri.path || "") <> "#" <> schema}
+    else
+      _none -> :unidentified
+    end
   end
 
   defp encode_key(key) when is_binary(key) and byte_size(key) <= @max_plain_key do

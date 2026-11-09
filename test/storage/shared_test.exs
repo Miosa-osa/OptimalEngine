@@ -60,7 +60,7 @@ defmodule OptimalEngine.Storage.SharedTest do
   end
 
   defp generation(stub, ns) do
-    case ValkeyStub.keys(stub)["#{Shared.key_prefix()}:shared:#{ns}:gen"] do
+    case ValkeyStub.keys(stub)["#{Shared.key_prefix()}:#{ns}:gen"] do
       nil -> 0
       gen -> String.to_integer(gen)
     end
@@ -71,7 +71,7 @@ defmodule OptimalEngine.Storage.SharedTest do
       stub
       |> ValkeyStub.keys()
       |> Map.keys()
-      |> Enum.filter(&String.starts_with?(&1, Shared.key_prefix() <> ":shared:"))
+      |> Enum.filter(&String.starts_with?(&1, Shared.key_prefix() <> ":"))
 
   describe "without Valkey" do
     test "the pool does not start and everything runs locally" do
@@ -209,7 +209,7 @@ defmodule OptimalEngine.Storage.SharedTest do
       assert {:ok, 3} = Shared.get(@ns, "k3")
       :ok = Shared.clear(@ns)
       assert Shared.get(@ns, "k3") == :miss
-      assert ValkeyStub.keys(stub)["#{Shared.key_prefix()}:shared:#{@ns}:gen"] == "1"
+      assert ValkeyStub.keys(stub)["#{Shared.key_prefix()}:#{@ns}:gen"] == "1"
     end
 
     test "counters and leases are shared through Valkey" do
@@ -321,14 +321,26 @@ defmodule OptimalEngine.Storage.SharedTest do
 
   describe "the key prefix" do
     setup do
-      previous = System.get_env("OPTIMAL_VALKEY_KEY_PREFIX")
-      System.delete_env("OPTIMAL_VALKEY_KEY_PREFIX")
+      previous =
+        Map.new(
+          ~w(OPTIMAL_VALKEY_KEY_PREFIX OPTIMAL_POSTGRES_URL OPTIMAL_POSTGRES_SCHEMA),
+          &{&1, System.get_env(&1)}
+        )
+
+      Enum.each(Map.keys(previous), &System.delete_env/1)
+      previous_reader = Application.fetch_env(:optimal_engine, :valkey_identity_reader)
       Shared.reset_key_prefix()
 
       on_exit(fn ->
-        if previous,
-          do: System.put_env("OPTIMAL_VALKEY_KEY_PREFIX", previous),
-          else: System.delete_env("OPTIMAL_VALKEY_KEY_PREFIX")
+        Enum.each(previous, fn
+          {name, nil} -> System.delete_env(name)
+          {name, value} -> System.put_env(name, value)
+        end)
+
+        case previous_reader do
+          {:ok, reader} -> Application.put_env(:optimal_engine, :valkey_identity_reader, reader)
+          :error -> Application.delete_env(:optimal_engine, :valkey_identity_reader)
+        end
 
         Shared.reset_key_prefix()
       end)
@@ -336,16 +348,93 @@ defmodule OptimalEngine.Storage.SharedTest do
       :ok
     end
 
-    test "defaults to one derived from this Engine's replica id, the same every time" do
-      digest =
-        :crypto.hash(:sha256, "optimal-engine valkey prefix:" <> OptimalEngine.Sync.replica_id())
+    defp digest(identity),
+      do:
+        :crypto.hash(:sha256, "optimal-engine valkey prefix:" <> identity)
         |> Base.encode16(case: :lower)
         |> binary_part(0, 16)
 
-      assert Shared.key_prefix() == "optimal:" <> digest
+    defp read_identity_as(fun),
+      do: Application.put_env(:optimal_engine, :valkey_identity_reader, fun)
+
+    test "defaults to optimal:shared:<hash of the replica id>, the same every time" do
+      expected = "optimal:shared:" <> digest(OptimalEngine.Sync.replica_id())
+
+      assert Shared.key_prefix() == expected
       Shared.reset_key_prefix()
-      assert Shared.key_prefix() == "optimal:" <> digest
-      assert String.starts_with?(Shared.valkey_key(@ns, "k"), "optimal:#{digest}:shared:#{@ns}:")
+      assert Shared.key_prefix() == expected
+      # Inside optimal:shared:*, so a Valkey ACL written for the old keys still covers it.
+      assert String.starts_with?(Shared.valkey_key(@ns, "k"), expected <> ":#{@ns}:")
+    end
+
+    test "a replica id that cannot be read is not pinned, and Valkey waits for it" do
+      stub = stub!()
+      start_pool(stub)
+      parent = self()
+
+      read_identity_as(fn ->
+        send(parent, :read)
+        {:error, :busy}
+      end)
+
+      # No prefix to share yet: the call runs on local ETS and writes nothing.
+      assert Shared.key_prefix() == nil
+      :ok = Shared.put(@ns, "doc", :v, 60_000)
+      assert {:ok, :v} = Shared.get(@ns, "doc")
+      assert ValkeyStub.keys(stub) |> Map.keys() |> Enum.filter(&(&1 =~ "#{@ns}")) == []
+
+      # Read again on the next call, never kept from the failure.
+      assert_received :read
+      _ = Shared.key_prefix()
+      assert_received :read
+
+      read_identity_as(fn -> {:ok, "replica-xyz"} end)
+      assert Shared.key_prefix() == "optimal:shared:" <> digest("replica-xyz")
+
+      # Once read, it is kept even if a later read would fail.
+      read_identity_as(fn -> {:error, :busy} end)
+      assert Shared.key_prefix() == "optimal:shared:" <> digest("replica-xyz")
+    end
+
+    test "without a replica id the PostgreSQL URL names the Engine, never its credentials" do
+      read_identity_as(fn -> :none end)
+
+      System.put_env(
+        "OPTIMAL_POSTGRES_URL",
+        "postgres://engine:s3cret@db.example:5432/eng_a?sslmode=require"
+      )
+
+      a = Shared.key_prefix()
+      assert "optimal:shared:" <> _ = a
+      refute a =~ "s3cret"
+
+      Shared.reset_key_prefix()
+      System.put_env("OPTIMAL_POSTGRES_URL", "postgres://other:rotated@db.example:5432/eng_a")
+      assert Shared.key_prefix() == a
+
+      Shared.reset_key_prefix()
+      System.put_env("OPTIMAL_POSTGRES_URL", "postgres://engine:s3cret@db.example:5432/eng_b")
+      refute Shared.key_prefix() == a
+
+      Shared.reset_key_prefix()
+      System.put_env("OPTIMAL_POSTGRES_SCHEMA", "tenant_b")
+      System.put_env("OPTIMAL_POSTGRES_URL", "postgres://engine:s3cret@db.example:5432/eng_a")
+      refute Shared.key_prefix() == a
+    end
+
+    test "with nothing to name the Engine, it warns and keeps Valkey out of it" do
+      stub = stub!()
+      start_pool(stub)
+      read_identity_as(fn -> :none end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Shared.key_prefix() == nil
+          assert :ok = Shared.take_token(@ns, "bucket", 2, 1.0e-9, :keep, 60_000)
+        end)
+
+      assert log =~ "OPTIMAL_VALKEY_KEY_PREFIX"
+      assert ValkeyStub.keys(stub) |> Map.keys() |> Enum.filter(&(&1 =~ "#{@ns}")) == []
     end
 
     test "OPTIMAL_VALKEY_KEY_PREFIX sets it, and Engines with different prefixes never collide" do
@@ -354,7 +443,7 @@ defmodule OptimalEngine.Storage.SharedTest do
 
       System.put_env("OPTIMAL_VALKEY_KEY_PREFIX", "engine-a")
       Shared.reset_key_prefix()
-      assert Shared.key_prefix() == "engine-a"
+      assert Shared.key_prefix() == "engine-a:shared"
       :ok = Shared.put(@ns, "doc", :from_a, 60_000)
       for _ <- 1..2, do: assert(:ok = Shared.take_token(@ns, "bucket", 2, 1.0e-9, :keep, 60_000))
       assert {:limited, _, _} = Shared.take_token(@ns, "bucket", 2, 1.0e-9, :keep, 60_000)
@@ -376,8 +465,31 @@ defmodule OptimalEngine.Storage.SharedTest do
     test "an invalid prefix is refused with a warning, and the default is used" do
       System.put_env("OPTIMAL_VALKEY_KEY_PREFIX", "has space{}")
 
-      log = ExUnit.CaptureLog.capture_log(fn -> assert "optimal:" <> _ = Shared.key_prefix() end)
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert "optimal:shared:" <> _ = Shared.key_prefix()
+        end)
+
       assert log =~ "OPTIMAL_VALKEY_KEY_PREFIX"
+    end
+  end
+
+  describe "the bucket mirror" do
+    setup do
+      previous = Application.fetch_env(:optimal_engine, :shared_bucket_max_entries)
+      Application.put_env(:optimal_engine, :shared_bucket_max_entries, 10)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:optimal_engine, :shared_bucket_max_entries, value)
+          :error -> Application.delete_env(:optimal_engine, :shared_bucket_max_entries)
+        end
+      end)
+    end
+
+    test "every Valkey answer is mirrored, but the table never grows past its bound" do
+      for n <- 1..50, do: :ok = Local.mirror_bucket(@ns, "client-#{n}", 3.0, 60_000)
+      assert :ets.info(@ns, :size) <= 10
     end
   end
 

@@ -204,8 +204,25 @@ defmodule OptimalEngine.Storage.Shared.Local do
   def mirror_bucket(table, key, tokens, ttl_ms) do
     new_table(table)
     now = now()
+    max = bucket_max_entries()
+
+    # Bounded like `put/5`: a new key into a full table first drops the
+    # expired rows, and every row when the live ones still fill it (a bucket
+    # dropped that way opens empty in an outage, the conservative side).
+    if not :ets.member(table, key) and :ets.info(table, :size) >= max,
+      do: make_room(table, now, max)
+
     :ets.insert(table, {key, {tokens * 1.0, now}, now + ttl_ms})
     :ok
+  end
+
+  @default_bucket_max_entries 100_000
+
+  defp bucket_max_entries do
+    case Application.get_env(:optimal_engine, :shared_bucket_max_entries) do
+      max when is_integer(max) and max > 0 -> max
+      _ -> @default_bucket_max_entries
+    end
   end
 
   @doc """

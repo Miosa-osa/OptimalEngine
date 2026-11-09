@@ -6,7 +6,7 @@ defmodule OptimalEngine.Storage.ValkeyIntegrationTest do
       docker run --rm -p 6390:6379 valkey/valkey:8.1
       OPTIMAL_TEST_VALKEY_URL=redis://127.0.0.1:6390/15 mix test --only valkey
 
-  It writes only under `<Shared.key_prefix()>:shared:optimal_valkey_it*` and clears that.
+  It writes only under `<Shared.key_prefix()>:optimal_valkey_it*` and clears that.
   """
   use ExUnit.Case, async: false
 
@@ -146,7 +146,7 @@ defmodule OptimalEngine.Storage.ValkeyIntegrationTest do
   end
 
   defp gen do
-    case Pool.command(["GET", "#{Shared.key_prefix()}:shared:#{@ns}:gen"]) do
+    case Pool.command(["GET", "#{Shared.key_prefix()}:#{@ns}:gen"]) do
       {:ok, nil} -> 0
       {:ok, g} -> String.to_integer(g)
     end
