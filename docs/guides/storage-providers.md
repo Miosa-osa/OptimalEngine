@@ -546,7 +546,22 @@ The path comes from the row's own tenant and id, never from its config.
 A sync reads the secret just before the adapter starts, for that cycle only; OpenBao sealed or unreachable fails the run with `credentials_unavailable` and the reason, before any adapter code runs.
 A write OpenBao refuses is refused (`503 openbao_sealed`, `openbao_unreachable`, ...), and no row is left claiming credentials.
 Removing a connector's credentials or deleting the connector deletes the secret; a delete OpenBao refuses keeps the connector, so no secret outlives it unseen.
-Rows sealed with `CONNECTOR_KEY` before OpenBao was configured keep being read the way they were written.
+Rows sealed with `CONNECTOR_KEY` before the opt-in keep being read the way they were written, until they are migrated.
+
+To move them, opt in and run the migration, first as a dry run:
+
+```bash
+mix optimal.connector migrate-credentials --dry-run   # lists would_migrate, changes nothing
+mix optimal.connector migrate-credentials
+# in a release:
+bin/optimal eval 'OptimalEngine.Release.migrate_connector_credentials(dry_run: true)'
+bin/optimal eval 'OptimalEngine.Release.migrate_connector_credentials()'
+```
+
+Each row's envelope is opened with `CONNECTOR_KEY`, the credentials are written to OpenBao, read back and compared, and only then is the row rewritten to the marker, if it is still the row that was read.
+Any failure (a wrong `CONNECTOR_KEY`, OpenBao sealed, a copy that reads back different) leaves that row unchanged and is listed under `failed`; the run exits non-zero.
+Running it again is safe: marked rows are `already_migrated`, a running connector is `skipped` until the next run, and the output names connector ids, never a credential.
+Keep `CONNECTOR_KEY` until every row is migrated.
 `OPTIMAL_CONNECTOR_CREDENTIAL_STORE` unset, `engine` or any other value writes database envelopes; `openbao` refuses a write when OpenBao is not configured.
 
 A server initialised without a secrets engine (as the in-guest one is) gets its KV version 2 mount enabled by the Engine's first write, when the token may do that (the in-guest root token may); otherwise the write fails with `openbao_mount_missing`, and `bao secrets enable -path=secret -version=2 kv` fixes it.

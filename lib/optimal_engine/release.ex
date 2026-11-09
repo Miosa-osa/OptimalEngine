@@ -66,6 +66,34 @@ defmodule OptimalEngine.Release do
     end
   end
 
+  @doc """
+  Move connector credentials sealed into the database into OpenBao, with
+  `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao` set. `dry_run: true` reports
+  and changes nothing. See `OptimalEngine.Connectors.CredentialVault.Migration`.
+  Exits non-zero when any connector was not migrated (its row is unchanged).
+  """
+  @spec migrate_connector_credentials(keyword()) :: :ok | no_return()
+  def migrate_connector_credentials(opts \\ []) do
+    load_app()
+    {:ok, _} = Application.ensure_all_started(@app)
+
+    case OptimalEngine.Connectors.CredentialVault.migrate(opts) do
+      {:ok, report} ->
+        Logger.info(
+          "[Release] connector credentials#{if report.dry_run, do: " (dry run)", else: ""}: " <>
+            "migrated #{inspect(report.migrated)}, would migrate #{inspect(report.would_migrate)}, " <>
+            "already #{inspect(report.already_migrated)}, skipped #{inspect(report.skipped)}, " <>
+            "failed #{inspect(report.failed)}"
+        )
+
+        if report.failed == [], do: :ok, else: System.halt(1)
+
+      {:error, reason} ->
+        Logger.error("[Release] connector credential migration refused: #{inspect(reason)}")
+        System.halt(1)
+    end
+  end
+
   @doc "Create a backup file. See `OptimalEngine.Backup.create/1`."
   @spec backup(String.t()) :: :ok | no_return()
   def backup(path) when is_binary(path) do

@@ -8,7 +8,8 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
   read has no metadata), `delete: :forbidden` (deleting metadata is 403),
   `transit_keys:` (the names of the keys a `transit` mount holds; a data key
   is made under one and decrypted only by it) and `transit_mount:` (`transit`).
-  `mount: nil` (no KV mount until `sys/mounts` enables one; `mount_enable:
+  `read: :tampered` (every KV read answers with one field changed, as a
+  copy that did not survive would), `mount: nil` (no KV mount until `sys/mounts` enables one; `mount_enable:
   :forbidden` refuses that), `put_secret/3` seeds a secret, and `seal/1` and `unseal/1` change the seal of
   a running stub. No test here talks to a real OpenBao.
   """
@@ -30,6 +31,7 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
       mount: Keyword.get(opts, :mount, "secret"),
       kv: Keyword.get(opts, :kv, 2),
       delete: Keyword.get(opts, :delete, :ok),
+      read: Keyword.get(opts, :read, :ok),
       mount_enable: Keyword.get(opts, :mount_enable, :ok),
       transit_mount: Keyword.get(opts, :transit_mount, "transit"),
       transit_keys: Keyword.get(opts, :transit_keys, []),
@@ -117,8 +119,12 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
 
       {"GET", ["v1", ^mount, "data" | path]} ->
         case Map.get(state.secrets, Enum.join(path, "/")) do
-          nil -> json(conn, 404, %{errors: []})
-          data -> json(conn, 200, %{data: %{data: data, metadata: %{version: 1}}})
+          nil ->
+            json(conn, 404, %{errors: []})
+
+          data ->
+            data = if state.read == :tampered, do: Map.put(data, "tampered", "1"), else: data
+            json(conn, 200, %{data: %{data: data, metadata: %{version: 1}}})
         end
 
       {"POST", ["v1", transit, "datakey", "plaintext", name]}

@@ -93,4 +93,12 @@ defmodule OptimalEngine.Connectors.CredentialVault do
   @doc "Deletes the connector's credentials (every version). Nothing stored is `:ok`."
   @spec delete(String.t(), String.t()) :: :ok | {:error, term()}
   def delete(tenant_id, connector_id), do: OpenBao.kv_delete(path(tenant_id, connector_id))
+
+  @doc """
+  Moves credentials already sealed into connector rows (`CONNECTOR_KEY`
+  envelopes) into OpenBao. See `OptimalEngine.Connectors.CredentialVault.Migration`.
+  """
+  @spec migrate(keyword()) ::
+          {:ok, OptimalEngine.Connectors.CredentialVault.Migration.report()} | {:error, term()}
+  def migrate(opts \\ []), do: OptimalEngine.Connectors.CredentialVault.Migration.run(opts)
 end
