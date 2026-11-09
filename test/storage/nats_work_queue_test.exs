@@ -346,6 +346,35 @@ defmodule OptimalEngine.Storage.NATSWorkQueueTest do
       assert length(lines) == 1
     end
 
+    test "a kept list that drained and fills again warns again, and the drops keep counting" do
+      fill = fn state, from, to ->
+        Enum.reduce(from..to, state, &WorkQueue.keep_unsent(&2, {"t", "p", "id-#{&1}"}))
+      end
+
+      state = %{
+        callback: JobQueue,
+        unsent: :queue.new(),
+        unsent_count: 0,
+        counts: %{unsent_dropped: 0}
+      }
+
+      {state, first} = ExUnit.CaptureLog.with_log(fn -> fill.(state, 1, 10_002) end)
+
+      # Reconnected: the list is sent and empties.
+      {sent, state} = WorkQueue.take_unsent(state)
+      assert length(sent) == 10_000
+
+      {state, second} = ExUnit.CaptureLog.with_log(fn -> fill.(state, 1, 10_001) end)
+
+      assert first =~ "kept announcements are full"
+      assert second =~ "kept announcements are full"
+      assert state.counts.unsent_dropped == 3
+    end
+
+    test "a pull's counts carry every count the queue keeps" do
+      assert Map.has_key?(WorkQueue.no_counts(), :unsent_dropped)
+    end
+
     test "Jobs.enqueue announces to the Engine's queue, and an enqueue with the flow off still works",
          ctx do
       # The Engine's own queue is off in tests: the announce is a no-op and the
