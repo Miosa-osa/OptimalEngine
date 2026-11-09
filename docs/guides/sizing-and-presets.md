@@ -90,8 +90,9 @@ At 70 percent of any limit the recommendation is `resize` to the next profile, w
 
 The recommendation names a provider whether or not the Engine can use it, so check `GET /api/storage/providers` (`adapter_implemented`) before acting on it.
 
-A Postgres build gives up full-text search and replication, and app data collections.
-Search, context assembly, and asking are refused by name on it, enabling sync is refused, and the Engine's backup routes (which copy the SQLite file) do not cover it.
+A Postgres build gives up replication and app data collections.
+Enabling sync is refused by name on it, and the Engine's backup routes (which copy the SQLite file) do not cover it.
+Search, context assembly, and asking work on it, with FTS5's tokens and BM25 ranking.
 Moving an existing Engine's data to Postgres is not implemented.
 Choose it for write concurrency only when you can live without those features ([PostgreSQL Provider](postgres-provider.md)).
 

@@ -1,0 +1,34 @@
+# Test files that pass with the whole Engine on PostgreSQL (OPTIMAL_STORE=postgres),
+# run by CI's test-postgres-store job. Each feature ported to PostgreSQL adds
+# the files it makes pass, until the list is the whole suite. Tests tagged
+# :sqlite_store are excluded on a PostgreSQL build (test/test_helper.exs).
+test/storage/store_adapter_contract_test.exs
+test/storage/dialect_test.exs
+test/storage/sql_census_test.exs
+test/storage/postgres_test.exs
+test/store/postgres
+test/mix_tasks/optimal_search_test.exs
+test/retrieval/as_of_test.exs
+test/retrieval/bandwidth_planner_test.exs
+test/retrieval/bandwidth_planner_tiered_test.exs
+test/retrieval/candidate_portfolio_test.exs
+test/retrieval/context_assembler_decisions_test.exs
+test/retrieval/context_loop_test.exs
+test/retrieval/deliver_test.exs
+test/retrieval/graph_boost_test.exs
+test/retrieval/grep_ranking_test.exs
+test/retrieval/grep_test.exs
+test/retrieval/intent_keywords_test.exs
+test/retrieval/mcts_test.exs
+test/retrieval/principal_filter_test.exs
+test/retrieval/profile_router_test.exs
+test/retrieval/quality_benchmark_test.exs
+test/retrieval/ranking_test.exs
+test/retrieval/receiver_test.exs
+test/retrieval/rrf_test.exs
+test/retrieval/search_busy_test.exs
+test/retrieval/search_determinism_test.exs
+test/retrieval/search_failure_test.exs
+test/retrieval/search_hardening_test.exs
+test/retrieval/wiki_first_ranking_test.exs
+test/retrieval/wiki_first_test.exs

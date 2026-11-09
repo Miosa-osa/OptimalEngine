@@ -672,7 +672,7 @@ The scripts need a standalone Valkey (or Redis 7 or later); Valkey Cluster is no
 
 The Engine has no adapter for Fractal, and the provider inventory says so; NATS JetStream, Qdrant, OpenBao and DuckDB are reached and proved, but no Engine feature is served from them yet.
 Valkey carries the rate limits and caches listed under [Valkey](#valkey) and nothing durable.
-PostgreSQL holds the canonical relational store but not full-text search, replication, or app data collections, and moving an existing Engine's data to it (stage 4 of [PostgreSQL Provider](postgres-provider.md)) is not implemented.
+PostgreSQL holds the canonical relational store but not replication or app data collections, and moving an existing Engine's data to it (stage 4 of [PostgreSQL Provider](postgres-provider.md)) is not implemented.
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.
 
 ## Related

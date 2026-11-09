@@ -16,6 +16,9 @@ defmodule OptimalEngine.Store.PostgresReadsTest do
   alias OptimalEngine.Test.PostgresStore
 
   @moduletag :postgres
+  # Starts its own PostgreSQL store beside the embedded one, which a
+  # PostgreSQL build already runs as OptimalEngine.Store.
+  @moduletag :sqlite_store
 
   @insert """
   INSERT INTO contexts (

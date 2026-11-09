@@ -139,6 +139,77 @@ jobs:
         if: always()
         run: cat /tmp/sql-census.txt || true
 
+  # The same engine built with the PostgreSQL store (OPTIMAL_STORE=postgres):
+  # the test files listed in test/support/postgres_store_suite.txt run with
+  # the whole Engine on PostgreSQL, so code paths that only a PostgreSQL build
+  # compiles (full-text search on posting lists, app data DDL, ...) are tested.
+  # The list grows with each feature ported until it is the whole suite.
+  test-postgres-store:
+    name: test-postgres-store
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: optimal_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      MIX_ENV: test
+      OPTIMAL_STORE: postgres
+      OPTIMAL_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/optimal_test
+      OPTIMAL_POSTGRES_SCHEMA: oe_ci_store
+      OPTIMAL_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/optimal_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/OTP and Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.5.0.5"
+          elixir-version: "1.19.5"
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev libssl-dev libzstd-dev liblz4-dev
+
+      - name: Identify the runner image
+        id: image
+        run: . /etc/os-release && echo "id=${ID}-${VERSION_ID}" >> "$GITHUB_OUTPUT"
+
+      # The SQLite job's cache: the dependencies are the same, and the one
+      # module that reads the store choice recompiles.
+      - name: Restore deps and _build
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-${{ steps.image.outputs.id }}-mix-28.5.0.5-1.19.5-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ steps.image.outputs.id }}-mix-28.5.0.5-1.19.5-
+
+      - name: Install deps
+        run: mix deps.get
+
+      # The store is chosen at compile time and the restored _build chose
+      # SQLite. Mix recompiles by content, not by the environment, so the
+      # project is compiled again in full (the dependencies are not).
+      - name: Compile with the PostgreSQL store
+        run: mix compile --force --warnings-as-errors
+
+      - name: Run the PostgreSQL store suite
+        run: mix test --warnings-as-errors $(grep -v '^#' test/support/postgres_store_suite.txt)
+
   mcp:
     name: mcp server (build and test)
     runs-on: ubuntu-24.04

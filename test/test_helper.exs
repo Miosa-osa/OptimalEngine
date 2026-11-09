@@ -21,6 +21,14 @@ exclude =
     do: [:valkey | exclude],
     else: exclude
 
+# A PostgreSQL build (OPTIMAL_STORE=postgres) runs the Engine on PostgreSQL;
+# tests that need the embedded SQLite store as the Engine's store, or start a
+# PostgreSQL store of their own beside it, are tagged :sqlite_store.
+exclude =
+  if OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres),
+    do: [:sqlite_store | exclude],
+    else: exclude
+
 # The 100 MB Notion import timing runs only when asked for (--only notion_scale).
 ExUnit.configure(exclude: [:notion_scale | exclude])
 

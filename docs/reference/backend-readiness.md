@@ -33,7 +33,7 @@ It is not yet complete for:
 
 ```text
 full enterprise deployment
-full Postgres runtime (the Postgres build refuses full-text search, replication, and app data collections)
+full Postgres runtime (the Postgres build refuses replication and app data collections)
 rich human review UI
 full FTS/vector/graph/temporal retrieval planner
 real provider-specific connector downloads for every adapter
@@ -59,7 +59,7 @@ The backend uses multiple storage roles. They should not be confused.
 | Store role | Current state | Owns |
 | --- | --- | --- |
 | SQLite | Current local canonical runtime store. | Workspaces, Nodes, Sources, Claims, Facts, Memories, Context Packages, pools, workflows, skills, governance rows. |
-| Postgres | Optional provider for scale, wired but partial (compile-time `OPTIMAL_STORE=postgres`). | Same lifecycle model as SQLite where the build supports it; no full-text search, replication, or app data collections. |
+| Postgres | Optional provider for scale, wired but partial (compile-time `OPTIMAL_STORE=postgres`). | Same lifecycle model as SQLite where the build supports it; no replication or app data collections. |
 | Raw artifact storage | Local file-backed evidence path by default; S3-compatible object storage is wired for assets and offsite backups. | Files, uploads, attachments, media, source payloads. |
 | FTS/vector/chunk indexes | Rebuildable acceleration layer. | Search candidates, embeddings, chunks, summaries, rerank state. |
 | ETS | In-memory triple-store mirror: the config default, and what the Docker image and MIOSA template run. | Fast process-local graph state, reloaded from the SQLite `graph_edges` table at each start. |

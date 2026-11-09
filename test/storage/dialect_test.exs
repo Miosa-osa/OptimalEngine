@@ -341,7 +341,7 @@ defmodule OptimalEngine.Store.DialectTest do
       assert {"INSERT OR REPLACE", reason} = List.keyfind(refusals, "INSERT OR REPLACE", 0)
       assert reason =~ "delete-and-insert"
       assert {"FTS5 MATCH", reason} = List.keyfind(refusals, "FTS5 MATCH", 0)
-      assert reason =~ "full-text search is not available"
+      assert reason =~ "optimal_fts_match"
     end
   end
 end

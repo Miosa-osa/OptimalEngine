@@ -89,7 +89,8 @@ defmodule OptimalEngine.Storage.PostgresTest do
     assert description.adapter_registered
     assert description.stage == 3
     assert description.selected == selected
-    assert Enum.any?(description.unavailable, &(&1.feature == "full_text_search"))
+    refute Enum.any?(description.unavailable, &(&1.feature == "full_text_search"))
+    assert Enum.any?(description.ported, &(&1.feature == "full_text_search"))
   end
 
   test "a round trip against nothing reports unreachable" do

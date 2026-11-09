@@ -25,6 +25,9 @@ defmodule OptimalEngine.Store.PostgresTwoWritersTest do
   alias OptimalEngine.Test.{PostgresStore, PostgresWriter}
 
   @moduletag :postgres
+  # Starts its own PostgreSQL store beside the embedded one, which a
+  # PostgreSQL build already runs as OptimalEngine.Store.
+  @moduletag :sqlite_store
   @moduletag timeout: 600_000
 
   @rounds 50

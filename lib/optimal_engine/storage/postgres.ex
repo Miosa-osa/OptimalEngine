@@ -38,15 +38,38 @@ defmodule OptimalEngine.Storage.Postgres do
       adapter: "OptimalEngine.Store.Postgres",
       selected: OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres),
       env: @env,
-      unavailable: unavailable()
+      unavailable: unavailable(),
+      ported: ported()
     }
+  end
+
+  @doc """
+  Features that work on the PostgreSQL store through statements of its own,
+  although the SQLite statements behind them are refused there: each call site
+  runs its PostgreSQL statement on a PostgreSQL store, and `refused_as` are the
+  refusals the SQLite statements still meet, so one that reaches PostgreSQL
+  is refused by name, never answered wrongly.
+  """
+  @spec ported() :: [%{feature: String.t(), how: String.t(), refused_as: [String.t()]}]
+  def ported do
+    [
+      %{
+        feature: "full_text_search",
+        how:
+          "contexts_fts and memories_fts are posting lists kept current from a trigger queue, " <>
+            "tokenized by SQLite's own FTS5 tokenizer and ranked by optimal_fts_match with " <>
+            "FTS5's bm25() (OptimalEngine.Store.FullText); search, context assembly and " <>
+            "asking run on them",
+        refused_as: ["FTS5 MATCH"]
+      }
+    ]
   end
 
   @doc """
   What the PostgreSQL store does not do yet. Each feature is refused by name
   when it is used, never answered as if it worked; `refused_as` are the
   reasons it is refused with, and every reason the dialect refuses a statement
-  with is under one of them. A store that finds one of the first two in use in
+  with is under one of them or under a feature of `ported/0`. A store that finds one of the first two in use in
   its database does not start (`OptimalEngine.Store.Postgres`).
   """
   @spec unavailable() :: [%{feature: String.t(), reason: String.t(), refused_as: [String.t()]}]
@@ -68,13 +91,6 @@ defmodule OptimalEngine.Storage.Postgres do
           "app data collections are not available on the PostgreSQL store",
           "schema change outside the migrations"
         ]
-      },
-      %{
-        feature: "full_text_search",
-        reason:
-          "FTS5 tables are not created on PostgreSQL; search and MATCH are refused " <>
-            "until a tsvector slice",
-        refused_as: ["full-text search is not available on the PostgreSQL store", "FTS5 MATCH"]
       },
       %{
         feature: "sqlite_json_functions",

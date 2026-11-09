@@ -11,7 +11,7 @@ defmodule OptimalEngine.Store.Postgres.UnavailableTest do
   alias OptimalEngine.Store.Postgres.{Connection, Schema}
   alias OptimalEngine.Test.PostgresStore
 
-  @features ~w(replication app_data_collections full_text_search sqlite_json_functions
+  @features ~w(replication app_data_collections sqlite_json_functions
                date_time_arithmetic sqlite_catalog rowid sqlite_functions replace_writes
                runtime_schema_and_transactions)
 
@@ -39,7 +39,7 @@ defmodule OptimalEngine.Store.Postgres.UnavailableTest do
     sources = Enum.map_join(@refusing, &File.read!/1)
 
     unknown =
-      for %{refused_as: names} <- Provider.unavailable(),
+      for %{refused_as: names} <- Provider.unavailable() ++ Provider.ported(),
           name <- names,
           not MapSet.member?(dialect, name),
           not String.contains?(sources, ~s({:unsupported, "#{name})),
@@ -50,7 +50,7 @@ defmodule OptimalEngine.Store.Postgres.UnavailableTest do
 
   test "every refusal the dialect makes by name is in the inventory" do
     listed =
-      for %{refused_as: names} <- Provider.unavailable(),
+      for %{refused_as: names} <- Provider.unavailable() ++ Provider.ported(),
           name <- names,
           into: MapSet.new(),
           do: name
@@ -65,6 +65,8 @@ defmodule OptimalEngine.Store.Postgres.UnavailableTest do
 
   describe "a store whose database holds data of a feature it cannot run" do
     @describetag :postgres
+    # Starts a store of its own, which a PostgreSQL build already runs.
+    @describetag :sqlite_store
 
     setup do
       schema = PostgresStore.unique_schema()
