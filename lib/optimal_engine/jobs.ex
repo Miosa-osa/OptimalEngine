@@ -93,6 +93,71 @@ defmodule OptimalEngine.Jobs do
   end
 
   @doc """
+  Enqueues many jobs of one tenant's active workspaces at once: `entries` are
+  `{workspace_id, kind, payload, idempotency_key}`, each with
+  `:max_attempts` from `opts` (and priority 0, due now). The rows go in
+  batches of #{100}, one statement each; an entry whose key the workspace
+  already holds is left as it is (`ON CONFLICT DO NOTHING`), as `enqueue/4`
+  leaves it. The caller has read the workspaces as the tenant's and active.
+  Returns `{:ok, inserted}`, the jobs this call inserted, each announced.
+  """
+  @spec enqueue_many(String.t(), [{String.t(), String.t(), map(), String.t()}], keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def enqueue_many(tenant_id, entries, opts \\ []) when is_binary(tenant_id) and is_list(entries) do
+    max_attempts = Keyword.get(opts, :max_attempts, @default_max_attempts)
+
+    with :ok <- validate_max_attempts(max_attempts),
+         :ok <-
+           Enum.reduce_while(entries, :ok, fn {_ws, kind, _payload, _key}, :ok ->
+             case validate_kind(kind) do
+               :ok -> {:cont, :ok}
+               error -> {:halt, error}
+             end
+           end) do
+      entries
+      |> Enum.chunk_every(100)
+      |> Enum.reduce_while({:ok, 0}, fn chunk, {:ok, total} ->
+        case insert_many(tenant_id, chunk, max_attempts) do
+          {:ok, inserted} ->
+            Enum.each(inserted, &announced({:ok, &1}))
+            {:cont, {:ok, total + length(inserted)}}
+
+          {:error, _} = error ->
+            {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp insert_many(tenant_id, chunk, max_attempts) do
+    {values, params} =
+      chunk
+      |> Enum.with_index()
+      |> Enum.map_reduce([], fn {{workspace_id, kind, payload, _key}, i}, acc ->
+        base = i * 6
+
+        {"(?#{base + 1}, ?#{base + 2}, ?#{base + 3}, ?#{base + 4}, ?#{base + 5}, 0, ?#{base + 6}, datetime('now'), ?#{length(chunk) * 6 + i + 1})",
+         acc ++
+           [new_id("job_"), tenant_id, workspace_id, kind, Jason.encode!(payload), max_attempts]}
+      end)
+
+    keys = Enum.map(chunk, fn {_ws, _kind, _payload, key} -> key end)
+
+    sql = """
+    INSERT INTO jobs (
+      id, tenant_id, workspace_id, kind, payload, priority, max_attempts,
+      run_at, idempotency_key
+    ) VALUES #{Enum.join(values, ", ")}
+    ON CONFLICT(tenant_id, workspace_id, idempotency_key) DO NOTHING
+    RETURNING id, kind
+    """
+
+    with {:ok, rows} <- Store.raw_query(sql, params ++ keys) do
+      {:ok, Enum.map(rows, fn [id, kind] -> %{id: id, kind: kind, status: "available"} end)}
+    end
+  end
+
+  @doc """
   Enqueue a job unless the workspace already has one of `kinds` queued or
   running, checked and inserted in one Store transaction so two requests
   never both enqueue. With `:idempotency_key`, a job the workspace already

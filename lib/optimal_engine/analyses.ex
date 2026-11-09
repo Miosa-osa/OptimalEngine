@@ -78,17 +78,32 @@ defmodule OptimalEngine.Analyses do
          do: [{Workspace.default_id(), "analytics_engine_export"}],
          else: []
 
-    tenant_ids
-    |> Enum.flat_map(&due/1)
-    |> Kernel.++(engine)
-    |> Enum.count(fn {workspace_id, kind} ->
-      match?(
-        {:ok, _},
-        Jobs.enqueue(workspace_id, job_kind(kind), %{"kind" => kind},
-          idempotency_key: "analysis:#{kind}:#{Date.to_iso8601(today)}",
-          max_attempts: 3
-        )
-      )
+    # One tenant at a time, its jobs inserted in batches: the store calls grow
+    # with the tenants, not with their workspaces.
+    by_tenant =
+      Enum.map(tenant_ids, fn tenant_id -> {tenant_id, due(tenant_id)} end) ++
+        Enum.map(engine, fn {workspace_id, _kind} = pair ->
+          {Workspace.tenant_of(workspace_id), [pair]}
+        end)
+
+    Enum.reduce(by_tenant, 0, fn {tenant_id, pairs}, count ->
+      entries =
+        for {workspace_id, kind} <- pairs do
+          {workspace_id, job_kind(kind), %{"kind" => kind},
+           "analysis:#{kind}:#{Date.to_iso8601(today)}"}
+        end
+
+      case Jobs.enqueue_many(tenant_id, entries, max_attempts: 3) do
+        {:ok, _inserted} ->
+          count + length(entries)
+
+        {:error, reason} ->
+          Logger.warning(
+            "[Analyses] the day's analyses of tenant #{tenant_id} were not scheduled: #{inspect(reason)}"
+          )
+
+          count
+      end
     end)
   end
 
@@ -364,7 +379,8 @@ defmodule OptimalEngine.Analyses do
     intake = CorpusOrganizer.source_workspace(tenant_id)
     population = if intake in ids, do: [{intake, "workspace_population"}], else: []
 
-    meetings = for id <- ids, meeting_connectors(tenant_id, id) != [], do: {id, "meeting_archive"}
+    with_meetings = meeting_workspaces(tenant_id)
+    meetings = for id <- ids, MapSet.member?(with_meetings, id), do: {id, "meeting_archive"}
 
     analytics = if DuckDB.configured?(), do: Enum.map(ids, &{&1, "analytics_export"}), else: []
 
@@ -390,6 +406,19 @@ defmodule OptimalEngine.Analyses do
          ) do
       {:ok, rows} -> rows
       _ -> []
+    end
+  end
+
+  # The tenant's workspaces with an enabled meeting connector, in one query.
+  defp meeting_workspaces(tenant_id) do
+    placeholders = Enum.map_join(1..length(@meeting_connectors), ", ", &"?#{&1 + 1}")
+
+    case Store.raw_query(
+           "SELECT DISTINCT workspace_id FROM connectors WHERE tenant_id = ?1 AND enabled = 1 AND kind IN (#{placeholders})",
+           [tenant_id | @meeting_connectors]
+         ) do
+      {:ok, rows} -> rows |> List.flatten() |> MapSet.new()
+      _ -> MapSet.new()
     end
   end
 
