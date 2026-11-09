@@ -161,6 +161,42 @@ defmodule OptimalEngine.Storage.OpenBao do
     end
   end
 
+  @doc """
+  What OpenBao says about the configured token: `{:ok, %{ttl: seconds,
+  renewable: boolean}}`; a `ttl` of 0 never expires (a root token).
+  """
+  @spec token_lookup(keyword()) ::
+          {:ok, %{ttl: non_neg_integer(), renewable: boolean()}} | {:error, term()}
+  def token_lookup(opts \\ []) do
+    with {:ok, config} <- data_config(opts) do
+      case guarded_call(config, :get, "/v1/auth/token/lookup-self", nil, opts) do
+        {:ok, 200, %{"data" => data}} when is_map(data) ->
+          {:ok, %{ttl: non_negative(data["ttl"]), renewable: data["renewable"] == true}}
+
+        other ->
+          failure(other)
+      end
+    end
+  end
+
+  @doc """
+  Renews the configured token (`auth/token/renew-self`): `{:ok, ttl}` with
+  its new time to live in seconds.
+  """
+  @spec token_renew(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def token_renew(opts \\ []) do
+    with {:ok, config} <- data_config(opts) do
+      case guarded_call(config, :post, "/v1/auth/token/renew-self", %{}, opts) do
+        {:ok, 200, %{"auth" => %{"lease_duration" => ttl}}} -> {:ok, non_negative(ttl)}
+        {:ok, 400, _body} -> {:error, :openbao_token_not_renewable}
+        other -> failure(other)
+      end
+    end
+  end
+
+  defp non_negative(value) when is_integer(value) and value > 0, do: value
+  defp non_negative(_value), do: 0
+
   @doc "Writes a secret, reads the same value back and deletes it. Nothing is left behind."
   @spec round_trip(keyword()) :: {:ok, map()} | {:error, term()}
   def round_trip(opts \\ []) do

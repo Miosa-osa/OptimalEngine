@@ -532,6 +532,7 @@ A value read from OpenBao is kept in memory for a minute, so a rotated secret is
 A reference never falls back: OpenBao not configured, sealed, unreachable, refusing the token, or holding no such secret or field fails the caller with that reason, and the log line names the variable and the reason, never the value.
 A backup is then refused with `backup_key_unavailable`, an authority key is not created or opened (`authority_key_unavailable`, and never stored unwrapped, even on an open development Engine), connector envelopes are not sealed or opened, and the object store reports `credentials_unavailable`.
 `OPTIMAL_OPENBAO_TOKEN` itself cannot be a reference.
+A renewable token is renewed (`auth/token/renew-self`) when half its remaining time has passed, for as long as the Engine runs; a token that expires and cannot be renewed is logged once, with when it runs out; a token with no expiry (a root token) needs nothing.
 
 A sealed or unreachable OpenBao never stops the Engine from booting.
 The Engine starts and serves, and readiness (`GET /api/health`, `GET /api/status`, `Release.preflight/0`) reports it as degraded, not down: the `secrets` check warns `openbao_unavailable` with the reason (`openbao_sealed`, `openbao_unreachable`, ...), and `credential_key` warns `connector_key_unavailable` when `CONNECTOR_KEY` is a reference.

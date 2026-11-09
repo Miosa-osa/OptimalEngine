@@ -8,6 +8,8 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
   read has no metadata), `delete: :forbidden` (deleting metadata is 403),
   `transit_keys:` (the names of the keys a `transit` mount holds; a data key
   is made under one and decrypted only by it) and `transit_mount:` (`transit`).
+  `token_ttl:` and `renewable:` (what `lookup-self` reports: seconds left,
+  0 by default as a root token has, and whether `renew-self` extends it),
   `read: :tampered` (every KV read answers with one field changed, as a
   copy that did not survive would), `mount: nil` (no KV mount until `sys/mounts` enables one; `mount_enable:
   :forbidden` refuses that), `put_secret/3` seeds a secret, and `seal/1` and `unseal/1` change the seal of
@@ -32,6 +34,8 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
       kv: Keyword.get(opts, :kv, 2),
       delete: Keyword.get(opts, :delete, :ok),
       read: Keyword.get(opts, :read, :ok),
+      token_ttl: Keyword.get(opts, :token_ttl, 0),
+      renewable: Keyword.get(opts, :renewable, false),
       mount_enable: Keyword.get(opts, :mount_enable, :ok),
       transit_mount: Keyword.get(opts, :transit_mount, "transit"),
       transit_keys: Keyword.get(opts, :transit_keys, []),
@@ -98,7 +102,15 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
         json(conn, 403, %{errors: ["permission denied"]})
 
       {"GET", ["v1", "auth", "token", "lookup-self"]} ->
-        json(conn, 200, %{data: %{policies: ["root"]}})
+        json(conn, 200, %{
+          data: %{policies: ["root"], ttl: state.token_ttl, renewable: state.renewable}
+        })
+
+      {"POST", ["v1", "auth", "token", "renew-self"]} when state.renewable ->
+        json(conn, 200, %{auth: %{lease_duration: state.token_ttl, renewable: true}})
+
+      {"POST", ["v1", "auth", "token", "renew-self"]} ->
+        json(conn, 400, %{errors: ["lease is not renewable"]})
 
       # `mount: nil` starts the stub with no KV mount, as a freshly initialised
       # server has; enabling one makes it the mount every KV route answers on.
