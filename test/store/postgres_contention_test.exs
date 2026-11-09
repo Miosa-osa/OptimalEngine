@@ -81,10 +81,9 @@ defmodule OptimalEngine.Store.PostgresContentionTest do
   end
 
   # Writers that read their workspace and add a context to it, in one
-  # transaction, until told to stop; each in a workspace of its own. With
-  # `commits` (an ETS table), each writer keeps the time of its last commit
-  # there.
-  defp start_writers(ctx, count, commits \\ nil) do
+  # transaction, until told to stop; each in a workspace of its own. Each
+  # writer keeps the time of its last commit in `commits` (an ETS table).
+  defp start_writers(ctx, count, commits) do
     parent = self()
 
     for i <- 1..count do
@@ -117,7 +116,7 @@ defmodule OptimalEngine.Store.PostgresContentionTest do
             {:ok, :written}
           end)
 
-        if commits && match?({:ok, :written}, result),
+        if match?({:ok, :written}, result),
           do: :ets.insert(commits, {self(), System.monotonic_time(:millisecond)})
 
         writer_loop(ctx, ws, i, if(match?({:ok, :written}, result), do: k + 1, else: k), commits)
