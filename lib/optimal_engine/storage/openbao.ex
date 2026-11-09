@@ -129,6 +129,24 @@ defmodule OptimalEngine.Storage.OpenBao do
     end
   end
 
+  @doc """
+  Whether OpenBao can serve the Engine's data-path calls now: `:ok`, or the
+  reason it cannot (`:openbao_sealed`, `:openbao_not_initialized`,
+  `:openbao_unreachable`, `:openbao_not_configured`, ...). Never raises, so a
+  readiness check or a boot path can report a sealed OpenBao and go on.
+  """
+  @spec availability(keyword()) :: :ok | {:error, term()}
+  def availability(opts \\ []) do
+    with {:ok, config} <- data_config(opts) do
+      case call(config, :get, "/v1/sys/health?standbyok=true", nil, opts) do
+        {:ok, 200, %{"sealed" => true}} -> {:error, :openbao_sealed}
+        {:ok, 200, _body} -> :ok
+        {:ok, 501, _body} -> {:error, :openbao_not_initialized}
+        other -> failure(other)
+      end
+    end
+  end
+
   @doc "Writes a secret, reads the same value back and deletes it. Nothing is left behind."
   @spec round_trip(keyword()) :: {:ok, map()} | {:error, term()}
   def round_trip(opts \\ []) do

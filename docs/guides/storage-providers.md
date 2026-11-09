@@ -533,6 +533,10 @@ A reference never falls back: OpenBao not configured, sealed, unreachable, refus
 A backup is then refused with `backup_key_unavailable`, an authority key is not created or opened (`authority_key_unavailable`, and never stored unwrapped, even on an open development Engine), connector envelopes are not sealed or opened, and the object store reports `credentials_unavailable`.
 `OPTIMAL_OPENBAO_TOKEN` itself cannot be a reference.
 
+A sealed or unreachable OpenBao never stops the Engine from booting.
+The Engine starts and serves, and readiness (`GET /api/health`, `GET /api/status`, `Release.preflight/0`) reports it as degraded, not down: the `secrets` check warns `openbao_unavailable` with the reason (`openbao_sealed`, `openbao_unreachable`, ...), and `credential_key` warns `connector_key_unavailable` when `CONNECTOR_KEY` is a reference.
+Until OpenBao is unsealed, each feature that needs a secret fails with that reason as above; nothing needs a restart once it is.
+
 ### Connector Credentials
 
 Connector credentials move into OpenBao only when the operator opts in with `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`.

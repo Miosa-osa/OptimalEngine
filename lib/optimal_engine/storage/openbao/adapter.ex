@@ -22,7 +22,6 @@ defmodule OptimalEngine.Storage.OpenBao.Adapter do
   alias OptimalEngine.Storage.OpenBao
 
   @capabilities ~w(secrets kms pki)a
-  @engine_secrets ~w(OPTIMAL_BACKUP_KEY OPTIMAL_AUTHORITY_KEY CONNECTOR_KEY OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY)
 
   @impl OptimalEngine.Storage.Provider
   def id, do: "openbao"
@@ -41,7 +40,7 @@ defmodule OptimalEngine.Storage.OpenBao.Adapter do
   @spec serves() :: [String.t()]
   def serves do
     [
-      {"secret_references", Enum.any?(@engine_secrets, &(Secrets.source(&1) == "openbao"))},
+      {"secret_references", Secrets.references() != []},
       {"connector_credentials", CredentialVault.mode() == :openbao},
       {"backup_key_wrapping", OpenBao.transit_key() != nil}
     ]
@@ -82,7 +81,7 @@ defmodule OptimalEngine.Storage.OpenBao.Adapter do
       lifecycle_state: lifecycle_state(configured, health),
       capabilities: Enum.map(@capabilities, &Atom.to_string/1),
       kv_mount: mount(),
-      secret_references: Enum.filter(@engine_secrets, &(Secrets.source(&1) == "openbao")),
+      secret_references: Secrets.references(),
       connector_credentials: Atom.to_string(CredentialVault.mode()),
       backup_transit_key: transit_key_id()
     }

@@ -41,6 +41,8 @@ defmodule OptimalEngine.Secrets do
   @ttl_ms 60_000
   @cache_key {__MODULE__, :cache}
   @not_references ~w(OPTIMAL_OPENBAO_ADDR OPTIMAL_OPENBAO_TOKEN)
+  @engine_secrets ~w(OPTIMAL_BACKUP_KEY OPTIMAL_AUTHORITY_KEY CONNECTOR_KEY
+                     OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY)
 
   @type reason ::
           :openbao_not_configured
@@ -95,6 +97,17 @@ defmodule OptimalEngine.Secrets do
     end
   end
 
+  @doc """
+  The Engine secrets (the variables `fetch/1` is asked for by name) that are
+  OpenBao references now. Reads nothing from OpenBao.
+  """
+  @spec references() :: [String.t()]
+  def references, do: Enum.filter(@engine_secrets, &(source(&1) == "openbao"))
+
+  @doc "The environment variables the Engine reads as secrets, each of which may be a reference."
+  @spec engine_secrets() :: [String.t()]
+  def engine_secrets, do: @engine_secrets
+
   @doc "True when `value` is an OpenBao secret reference."
   @spec reference?(term()) :: boolean()
   def reference?(@prefix <> _rest), do: true
@@ -134,6 +147,9 @@ defmodule OptimalEngine.Secrets do
   def describe(:openbao_invalid_config), do: "OPTIMAL_OPENBAO_ADDR is not an http(s) URL"
   def describe(:openbao_unreachable), do: "OpenBao did not answer"
   def describe(:openbao_sealed), do: "OpenBao is sealed; unseal it and retry"
+
+  def describe(:openbao_not_initialized),
+    do: "OpenBao is not initialized (bao operator init)"
 
   def describe(:openbao_forbidden),
     do: "OpenBao refused the token (OPTIMAL_OPENBAO_TOKEN) for this path"
