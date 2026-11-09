@@ -13,7 +13,7 @@ defmodule OptimalEngine.Storage.Shared do
 
   ## What runs on it
 
-    * `OptimalEngine.API.RateLimiter`: the HTTP API token buckets (`take_token/6`)
+    * `OptimalEngine.API.RateLimiter`: the HTTP API token buckets (`take_token/6`, which an outage never refills)
     * `OptimalEngine.Connectors.RateLimit`: outbound connector token buckets
     * `OptimalEngine.Auth.KeyCache`: which API key secrets bcrypt already verified
     * `OptimalEngine.Sync.GateCache`: the workspace scans a sync gate reuses
@@ -88,9 +88,13 @@ defmodule OptimalEngine.Storage.Shared do
         if redis.call('GET', k) == ARGV[3] then return redis.call('DEL', k) end
         return 0
         """,
-    # The bucket of Shared.Local.take_token/6, on the server's clock. A
+    # The bucket of Shared.Local.take_token/7, on the server's clock. A
     # denied step answers the tokens it found and the time since the stamp;
     # with 'keep' it writes nothing, so no elapsed time is credited twice.
+    # ARGV[7], when not empty, is a ceiling: the tokens this node's bucket
+    # holds after it spent them during an outage. The bucket keeps the lower
+    # of the two, and that lowered count is written even on a 'keep' denial.
+    # A taken step answers the tokens left, so the node can mirror them.
     bucket:
       "-- optimal:bucket\n" <>
         @resolve <>
@@ -98,23 +102,27 @@ defmodule OptimalEngine.Storage.Shared do
         local cap = tonumber(ARGV[3])
         local rate = tonumber(ARGV[4])
         local ttl = tonumber(ARGV[6])
+        local ceiling = tonumber(ARGV[7] or '')
         local t = redis.call('TIME')
         local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
         local v = redis.call('HMGET', k, 'tokens', 'at')
-        if not v[1] then
-          redis.call('HSET', k, 'tokens', string.format('%.17g', cap - 1), 'at', string.format('%d', now))
-          redis.call('PEXPIRE', k, ttl)
-          return {1}
+        local current = cap
+        local elapsed = 0
+        if v[1] then
+          elapsed = math.max(0, now - tonumber(v[2]))
+          current = math.min(cap, tonumber(v[1]) + elapsed * rate)
         end
-        local at = tonumber(v[2])
-        local elapsed = math.max(0, now - at)
-        local current = math.min(cap, tonumber(v[1]) + elapsed * rate)
+        local lowered = false
+        if ceiling and ceiling < current then
+          current = math.max(0, ceiling)
+          lowered = true
+        end
         if current >= 1 then
           redis.call('HSET', k, 'tokens', string.format('%.17g', current - 1), 'at', string.format('%d', now))
           redis.call('PEXPIRE', k, ttl)
-          return {1}
+          return {1, string.format('%.17g', current - 1)}
         end
-        if ARGV[5] ~= 'keep' then
+        if ARGV[5] ~= 'keep' or lowered or not v[1] then
           redis.call('HSET', k, 'tokens', string.format('%.17g', current), 'at', string.format('%d', now))
           redis.call('PEXPIRE', k, ttl)
         end
@@ -219,9 +227,17 @@ defmodule OptimalEngine.Storage.Shared do
   end
 
   @doc """
-  One token-bucket step (see `Shared.Local.take_token/6`): `:ok` when a token
+  One token-bucket step (see `Shared.Local.take_token/7`): `:ok` when a token
   was taken, otherwise `{:limited, tokens_now, elapsed_ms}`. On Valkey the
   bucket runs on the server's clock, atomically, so every node draws on it.
+
+  Valkey dropping out never hands out a fresh bucket. Each answer from Valkey
+  is mirrored into this node's table, and while Valkey is configured but
+  cannot answer, the local step continues from that mirror; a bucket this
+  node never saw opens empty and refills at its rate. When Valkey answers
+  again, the first step gives it the tokens the local bucket holds, and the
+  server keeps the lower of its own count and that one. Both choices take the
+  conservative side: an outage can only make a limit tighter, never looser.
   """
   @spec take_token(namespace(), term(), pos_integer(), float(), :keep | :advance, pos_integer()) ::
           :ok | {:limited, float(), non_neg_integer()}
@@ -229,21 +245,45 @@ defmodule OptimalEngine.Storage.Shared do
       when deny in [:keep, :advance] and is_integer(ttl_ms) and ttl_ms > 0 do
     remote(
       fn ->
+        ceiling =
+          case Local.fallback_tokens(ns, key, capacity, refill_per_ms) do
+            nil -> ""
+            tokens -> :erlang.float_to_binary(tokens * 1.0, [:short])
+          end
+
         args = [
           Integer.to_string(capacity),
           :erlang.float_to_binary(refill_per_ms * 1.0, [:short]),
           Atom.to_string(deny),
-          Integer.to_string(ttl_ms)
+          Integer.to_string(ttl_ms),
+          ceiling
         ]
 
         case eval(:bucket, ns, key, args) do
-          {:ok, [1]} -> :ok
-          {:ok, [0, tokens, elapsed]} -> limited(tokens, elapsed)
+          {:ok, [1, left]} -> mirrored(ns, key, ttl_ms, left, :ok)
+          {:ok, [0, tokens, elapsed]} -> mirrored(ns, key, ttl_ms, tokens, limited(tokens, elapsed))
           _ -> :unavailable
         end
       end,
-      fn -> Local.take_token(ns, key, capacity, refill_per_ms, deny, ttl_ms) end
+      fn ->
+        # Configured but not answering: an outage, not a node without Valkey.
+        opts = if Pool.running?(), do: [missing: :empty, mark: :fallback], else: []
+        Local.take_token(ns, key, capacity, refill_per_ms, deny, ttl_ms, opts)
+      end
     )
+  end
+
+  defp mirrored(_ns, _key, _ttl_ms, _tokens, :unavailable), do: :unavailable
+
+  defp mirrored(ns, key, ttl_ms, tokens, result) do
+    case Float.parse(to_string(tokens)) do
+      {value, ""} ->
+        Local.mirror_bucket(ns, key, value, ttl_ms)
+        result
+
+      _ ->
+        :unavailable
+    end
   end
 
   @doc "The Valkey key a namespace and key resolve to under `generation`."

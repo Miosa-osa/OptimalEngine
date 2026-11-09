@@ -859,13 +859,16 @@ Valkey being down never fails a request.
 A connection that cannot open, or fails mid-command, is closed and opened again with a backoff of 100 ms doubling to 5 seconds; while no connection is up every call runs on ETS at once, and a server that stops answering costs one timeout per connection before that.
 A removal Valkey could not take while it was unreachable (a revoked key, a cleared gate cache) is kept and applied before anything is read from Valkey again, so a revoked key's entry is never read back.
 `ApiKey.verify/1` reads the key row on every request in any case, so a revocation takes effect at once whatever any cache holds.
+A rate limit never loosens because Valkey dropped out.
+Each answer Valkey gives for a bucket is kept in the process's ETS table, and while Valkey is configured but not answering the process steps that last-known bucket; a bucket the process never saw on Valkey opens empty and refills at its rate, instead of full.
+When Valkey answers again, the first step on a bucket the process spent during the outage gives Valkey the tokens the local bucket holds, and Valkey keeps the lower of the two counts.
 
 What is stored, and how:
 
 * Keys are `optimal:shared:<namespace>:<generation>:<key>`; clearing a namespace moves its generation in one command, and the old keys expire.
 * Cached values are signed with an HMAC: a value this Engine did not write reads as a miss. The key comes from `CONNECTOR_KEY`; give every process that shares a Valkey the same `CONNECTOR_KEY` and they share cache entries, otherwise each reads only its own (the rate limits are shared either way).
 * The key cache stores the SHA-256 of the stored bcrypt hash and the secret, never either of them.
-* A gate cache entry is keyed by the Engine's replica id, so Engines with stores of their own never share one.
+* A gate cache entry is keyed by the Engine's replica id, so Engines with stores of their own never share one; a store without a replica id keeps its gate cache entries in the process's ETS table.
 * The URL and its credential are never logged or returned; the inventory shows only whether TLS is on and how many connections are up (`OptimalEngine.Storage.Valkey.Adapter.status/1`).
 
 The scripts need a standalone Valkey (or Redis 7 or later); Valkey Cluster is not supported, because a script reads the namespace generation next to the key.

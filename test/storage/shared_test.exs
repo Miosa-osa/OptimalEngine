@@ -237,6 +237,10 @@ defmodule OptimalEngine.Storage.SharedTest do
       assert Shared.backend() == :local
       assert :ok = Shared.put(@ns, "k", :local, 60_000)
       assert {:ok, :local} = Shared.get(@ns, "k")
+      # A bucket this node never saw opens empty during an outage; at 1 token/ms
+      # it has one again a moment later.
+      assert {:limited, +0.0, 0} = Shared.take_token(@ns, "b", 1, 1.0, :keep, 60_000)
+      Process.sleep(5)
       assert :ok = Shared.take_token(@ns, "b", 1, 1.0, :keep, 60_000)
 
       ValkeyStub.set_mode(stub, :normal)
@@ -339,7 +343,54 @@ defmodule OptimalEngine.Storage.SharedTest do
       assert reset_at > System.monotonic_time(:millisecond)
 
       assert Enum.any?(shared_keys(stub), &String.contains?(&1, "optimal_api_rate_limit_buckets"))
-      assert :ets.info(:optimal_api_rate_limit_buckets, :size) == 0
+      # This node keeps only the last state Valkey answered, for an outage.
+      assert [{"key:shared", {tokens, _at}, _expires}] =
+               :ets.lookup(:optimal_api_rate_limit_buckets, "key:shared")
+
+      assert tokens < 1.0
+    end
+
+    test "a Valkey outage continues from the last bucket Valkey answered, never a full one",
+         %{stub: stub} do
+      for _ <- 1..3, do: assert(:ok = RateLimiter.check("key:blip", 3, 1))
+      assert {:rate_limited, _, _} = RateLimiter.check("key:blip", 3, 1)
+
+      go_down(stub)
+      assert {:rate_limited, _, _} = RateLimiter.check("key:blip", 3, 1)
+
+      # The connector limiter too.
+      ValkeyStub.set_mode(stub, :normal)
+      wait_until(&Pool.serving?/0)
+      for _ <- 1..3, do: :ok = RateLimit.check({:slack, "blip"}, 1, 3)
+      go_down(stub)
+      assert {:error, :rate_limited, _} = RateLimit.check({:slack, "blip"}, 1, 3)
+    end
+
+    test "a bucket this node never saw opens empty during an outage", %{stub: stub} do
+      go_down(stub)
+      assert {:rate_limited, retry_after_ms, _} = RateLimiter.check("key:unseen", 3, 1)
+      assert retry_after_ms > 0
+      assert {:error, :rate_limited, _} = RateLimit.check({:slack, "unseen"}, 1, 3)
+    end
+
+    test "when Valkey returns, the lower of the outage bucket and Valkey's wins", %{stub: stub} do
+      # Valkey keeps 2 of 3; during the outage this node spends them locally.
+      assert :ok = RateLimiter.check("key:back", 3, 1)
+      go_down(stub)
+      for _ <- 1..2, do: assert(:ok = RateLimiter.check("key:back", 3, 1))
+      assert {:rate_limited, _, _} = RateLimiter.check("key:back", 3, 1)
+
+      ValkeyStub.set_mode(stub, :normal)
+      wait_until(&Pool.serving?/0)
+      # Valkey alone still holds 2 tokens; the local spend counts.
+      assert {:rate_limited, _, _} = RateLimiter.check("key:back", 3, 1)
+      Local.clear(:optimal_api_rate_limit_buckets)
+      assert {:rate_limited, _, _} = RateLimiter.check("key:back", 3, 1)
+
+      # The other way round, Valkey's lower count is kept: another node spent it.
+      for _ <- 1..3, do: assert(:ok = RateLimiter.check("key:other", 3, 1))
+      Local.clear(:optimal_api_rate_limit_buckets)
+      assert {:rate_limited, _, _} = RateLimiter.check("key:other", 3, 1)
     end
 
     test "denied API checks on Valkey do not refill the bucket faster than its rate" do

@@ -8,7 +8,7 @@ defmodule OptimalEngine.Storage.Shared.Local do
   as before). Rows are `{key, value, expires_at}` with `expires_at` in
   monotonic milliseconds. A table that does not exist reads as empty and
   ignores writes, so a cache whose owner died builds instead of failing; only
-  `take_token/6` creates its table when it is missing, as the rate limiters
+  `take_token/7` creates its table when it is missing, as the rate limiters
   always did, so a limiter keeps limiting across a restart of its owner.
   """
 
@@ -131,37 +131,100 @@ defmodule OptimalEngine.Storage.Shared.Local do
   `:advance` stores the refilled tokens with the stamp moved to now (the
   connector limiter). Either way a denied step never credits the same
   elapsed time twice. The bucket row expires `ttl_ms` after its last write.
+
+  Options, for the steps `OptimalEngine.Storage.Shared` runs here while Valkey
+  is configured but cannot answer:
+
+    * `:missing` - `:full` (default) opens a bucket that has no row full, as a
+      node without Valkey always has; `:empty` opens it with no tokens and the
+      stamp at now, so it refills at its rate. A node that never saw the
+      bucket on Valkey does not know how much of it other nodes spent.
+    * `:mark` - `:fallback` marks the rows it writes, so the first step back on
+      Valkey hands the server the lower count (`fallback_tokens/4`).
   """
-  @spec take_token(atom(), term(), number(), float(), :keep | :advance, pos_integer()) ::
+  @spec take_token(atom(), term(), number(), float(), :keep | :advance, pos_integer(), keyword()) ::
           :ok | {:limited, float(), non_neg_integer()}
-  def take_token(table, key, capacity, refill_per_ms, deny, ttl_ms) do
+  def take_token(table, key, capacity, refill_per_ms, deny, ttl_ms, opts \\ []) do
     new_table(table)
     now = now()
+    write = fn tokens -> :ets.insert(table, {key, bucket(tokens, now, opts), now + ttl_ms}) end
 
     case :ets.lookup(table, key) do
-      [{^key, {tokens, stamp}, expires}] when expires > now ->
+      [{^key, state, expires}] when expires > now and is_tuple(state) ->
+        stamp = elem(state, 1)
         elapsed = now - stamp
-        current = min(capacity * 1.0, tokens + elapsed * refill_per_ms)
+        current = min(capacity * 1.0, elem(state, 0) + elapsed * refill_per_ms)
 
-        if current >= 1.0 do
-          :ets.insert(table, {key, {current - 1.0, now}, now + ttl_ms})
-          :ok
-        else
+        cond do
+          current >= 1.0 ->
+            write.(current - 1.0)
+            :ok
+
           # Storing `current` under the old stamp would credit `elapsed`
           # again on the next step, letting a client that keeps asking
-          # through before the rate allows.
-          if deny == :advance,
-            do: :ets.insert(table, {key, {current, now}, now + ttl_ms})
+          # through before the rate allows. A mirror of Valkey's bucket being
+          # spent locally is marked even when the step is denied.
+          deny == :advance or (Keyword.get(opts, :mark) != nil and tuple_size(state) == 2) ->
+            write.(current)
+            {:limited, current, elapsed}
 
-          {:limited, current, elapsed}
+          true ->
+            {:limited, current, elapsed}
         end
 
       _ ->
-        # A first request (or one after the bucket idled out) opens a full
-        # bucket and takes one token from it.
-        :ets.insert(table, {key, {capacity - 1.0, now}, now + ttl_ms})
-        :ok
+        case Keyword.get(opts, :missing, :full) do
+          # A first request (or one after the bucket idled out) opens a full
+          # bucket and takes one token from it.
+          :full ->
+            write.(capacity - 1.0)
+            :ok
+
+          # Written whatever `deny` says, or the stamp would never move and
+          # the bucket would never refill.
+          :empty ->
+            write.(0.0)
+            {:limited, 0.0, 0}
+        end
     end
+  end
+
+  defp bucket(tokens, now, opts) do
+    case Keyword.get(opts, :mark) do
+      nil -> {tokens, now}
+      mark -> {tokens, now, mark}
+    end
+  end
+
+  @doc """
+  Records the bucket Valkey just answered (`tokens` as of now), unmarked, so a
+  later outage continues from it instead of from a full bucket.
+  """
+  @spec mirror_bucket(atom(), term(), float(), pos_integer()) :: :ok
+  def mirror_bucket(table, key, tokens, ttl_ms) do
+    new_table(table)
+    now = now()
+    :ets.insert(table, {key, {tokens * 1.0, now}, now + ttl_ms})
+    :ok
+  end
+
+  @doc """
+  The tokens a bucket spent during an outage holds now (refilled to now, at
+  most `capacity`), or `nil` when the bucket was not written during one.
+  """
+  @spec fallback_tokens(atom(), term(), number(), float()) :: float() | nil
+  def fallback_tokens(table, key, capacity, refill_per_ms) do
+    now = now()
+
+    case :ets.lookup(table, key) do
+      [{^key, {tokens, stamp, :fallback}, expires}] when expires > now ->
+        min(capacity * 1.0, tokens + (now - stamp) * refill_per_ms)
+
+      _ ->
+        nil
+    end
+  rescue
+    ArgumentError -> nil
   end
 
   defp make_room(table, now, max) do

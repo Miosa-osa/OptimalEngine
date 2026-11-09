@@ -272,30 +272,42 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
     if Map.get(state.keys, k) == token, do: run(["DEL", k], state), else: {0, state}
   end
 
-  defp run_script("bucket", k, [cap, rate, deny, ttl], state) do
+  defp run_script("bucket", k, [cap, rate, deny, ttl | rest], state) do
     cap = parse_number(cap)
     rate = parse_number(rate)
     now = System.os_time(:millisecond)
 
-    case Map.get(state.keys, k) do
-      %{"tokens" => tokens, "at" => at} ->
-        elapsed = max(0, now - String.to_integer(at))
-        current = min(cap, parse_number(tokens) + elapsed * rate)
+    ceiling =
+      case rest do
+        [text] when text != "" -> parse_number(text)
+        _ -> nil
+      end
 
-        cond do
-          current >= 1 ->
-            {[1], save_bucket(state, k, current - 1, now, ttl)}
+    {current, elapsed, exists?} =
+      case Map.get(state.keys, k) do
+        %{"tokens" => tokens, "at" => at} ->
+          elapsed = max(0, now - String.to_integer(at))
+          {min(cap, parse_number(tokens) + elapsed * rate), elapsed, true}
 
-          # As the script: a kept denial writes nothing.
-          deny == "keep" ->
-            {[0, format(current), elapsed], state}
+        _ ->
+          {cap, 0, false}
+      end
 
-          true ->
-            {[0, format(current), elapsed], save_bucket(state, k, current, now, ttl)}
-        end
+    {current, lowered?} =
+      if ceiling != nil and ceiling < current,
+        do: {max(0.0, ceiling), true},
+        else: {current, false}
 
-      _ ->
-        {[1], save_bucket(state, k, cap - 1, now, ttl)}
+    cond do
+      current >= 1 ->
+        {[1, format(current - 1)], save_bucket(state, k, current - 1, now, ttl)}
+
+      # As the script: a kept denial writes nothing, unless it lowered the bucket.
+      deny == "keep" and exists? and not lowered? ->
+        {[0, format(current), elapsed], state}
+
+      true ->
+        {[0, format(current), elapsed], save_bucket(state, k, current, now, ttl)}
     end
   end
 

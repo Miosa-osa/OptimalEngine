@@ -99,6 +99,26 @@ defmodule OptimalEngine.Storage.ValkeyIntegrationTest do
     assert :ok = Shared.take_token(@ns, "fast", 1, 1.0, :keep, 60_000)
   end
 
+  test "after an outage the bucket script keeps the lower of the local and the server bucket" do
+    # This node spent a fresh bucket down to nothing while Valkey was away.
+    Local.new_table(@ns)
+
+    :ets.insert(
+      @ns,
+      {"after-outage", {0.0, System.monotonic_time(:millisecond), :fallback},
+       System.monotonic_time(:millisecond) + 60_000}
+    )
+
+    assert {:limited, tokens, _} = Shared.take_token(@ns, "after-outage", 3, 1.0e-6, :keep, 60_000)
+    assert tokens < 1.0
+
+    # The server bucket now carries that count; the local row is its mirror.
+    assert [{"after-outage", {mirrored, _at}, _}] = :ets.lookup(@ns, "after-outage")
+    assert mirrored < 1.0
+    :ets.delete(@ns, "after-outage")
+    assert {:limited, _, _} = Shared.take_token(@ns, "after-outage", 3, 1.0e-6, :keep, 60_000)
+  end
+
   test "denied API checks do not refill the bucket faster than its rate" do
     RateLimiter.reset()
     key = "it-hammer:#{System.unique_integer([:positive])}"
