@@ -155,8 +155,12 @@ defmodule OptimalEngine.Store do
   such transactions cannot hold at once. The cost: every writer of those
   tables, in any workspace, stalls until the transaction ends, and one that
   waits past its lock timeout (15 seconds, or its call's time when shorter) is
-  `:busy`. Keep such transactions rare and short. SQLite's store runs one
-  writer at a time, so there it does nothing.
+  `:busy`. Keep such transactions rare and short. A writer that holds a later
+  table and then wants an earlier one can deadlock with the locks being taken;
+  PostgreSQL cancels one side after `deadlock_timeout` (about a second) with
+  40P01, which the store retries. Pass plain or partitioned tables only
+  (`Store.Catalog.tables/1`); `LOCK TABLE` refuses a view. SQLite's store runs
+  one writer at a time, so there it does nothing.
   """
   @spec txn_lock_tables(term(), [String.t()]) :: :ok | {:error, term()}
   def txn_lock_tables(_txn, []), do: :ok

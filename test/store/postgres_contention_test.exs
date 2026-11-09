@@ -81,21 +81,23 @@ defmodule OptimalEngine.Store.PostgresContentionTest do
   end
 
   # Writers that read their workspace and add a context to it, in one
-  # transaction, until told to stop; each in a workspace of its own.
-  defp start_writers(ctx, count) do
+  # transaction, until told to stop; each in a workspace of its own. With
+  # `commits` (an ETS table), each writer keeps the time of its last commit
+  # there.
+  defp start_writers(ctx, count, commits \\ nil) do
     parent = self()
 
     for i <- 1..count do
       ws = workspace(ctx, "load-#{i}")
 
       spawn_link(fn ->
-        written = writer_loop(ctx, ws, i, 0)
+        written = writer_loop(ctx, ws, i, 0, commits)
         send(parent, {:writer_done, self(), written})
       end)
     end
   end
 
-  defp writer_loop(ctx, ws, i, k) do
+  defp writer_loop(ctx, ws, i, k, commits) do
     receive do
       :stop -> k
     after
@@ -115,7 +117,10 @@ defmodule OptimalEngine.Store.PostgresContentionTest do
             {:ok, :written}
           end)
 
-        writer_loop(ctx, ws, i, if(match?({:ok, :written}, result), do: k + 1, else: k))
+        if commits && match?({:ok, :written}, result),
+          do: :ets.insert(commits, {self(), System.monotonic_time(:millisecond)})
+
+        writer_loop(ctx, ws, i, if(match?({:ok, :written}, result), do: k + 1, else: k), commits)
     end
   end
 
@@ -127,6 +132,62 @@ defmodule OptimalEngine.Store.PostgresContentionTest do
       total ->
         assert_receive {:writer_done, ^pid, written}, 60_000
         total + written
+    end
+  end
+
+  # Polls PostgreSQL, from a connection of its own, for a writer waiting on a
+  # table lock that a transaction holding SHARE ROW EXCLUSIVE locks (a rename
+  # or orphan repair, Store.txn_lock_tables/2) blocks it on. `stop_lock_probe/1`
+  # answers when it first saw one, or nil.
+  defp start_lock_probe do
+    parent = self()
+
+    spawn_link(fn ->
+      {:ok, config} = OptimalEngine.Storage.Postgres.config()
+
+      {:ok, conn} =
+        config
+        |> Map.take([:hostname, :port, :database, :username, :password, :ssl])
+        |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+        |> Keyword.put(:pool_size, 1)
+        |> Postgrex.start_link()
+
+      send(parent, {:lock_probe, self(), probe_loop(conn, nil)})
+    end)
+  end
+
+  defp probe_loop(conn, seen) do
+    receive do
+      :stop -> seen
+    after
+      5 ->
+        %{rows: [[blocked]]} =
+          Postgrex.query!(
+            conn,
+            """
+            SELECT COUNT(*) FROM pg_locks w
+            WHERE w.locktype = 'relation' AND NOT w.granted AND w.mode = 'RowExclusiveLock'
+              AND EXISTS (
+                SELECT 1 FROM pg_locks h
+                WHERE h.pid = ANY (pg_blocking_pids(w.pid)) AND h.locktype = 'relation'
+                  AND h.granted AND h.mode = 'ShareRowExclusiveLock')
+            """,
+            []
+          )
+
+        if blocked > 0 and is_nil(seen),
+          do: probe_loop(conn, System.monotonic_time(:millisecond)),
+          else: probe_loop(conn, seen)
+    end
+  end
+
+  defp stop_lock_probe(probe) do
+    send(probe, :stop)
+
+    receive do
+      {:lock_probe, ^probe, seen} -> seen
+    after
+      30_000 -> flunk("the lock probe did not stop")
     end
   end
 
@@ -209,7 +270,9 @@ defmodule OptimalEngine.Store.PostgresContentionTest do
         old
       end
 
-    writers = start_writers(ctx, @writers)
+    commits = :ets.new(:contention_commits, [:public, :set])
+    writers = start_writers(ctx, @writers, commits)
+    probe = start_lock_probe()
     started = System.monotonic_time(:millisecond)
 
     task =
@@ -230,8 +293,10 @@ defmodule OptimalEngine.Store.PostgresContentionTest do
 
     outcomes = Task.await(task, 240_000)
     elapsed = System.monotonic_time(:millisecond) - started
+    blocked_at = stop_lock_probe(probe)
     written = stop_writers(writers)
     retries = retries_of(ctx, [task.pid])
+    last_commit = commits |> :ets.tab2list() |> Enum.map(&elem(&1, 1)) |> Enum.max(fn -> nil end)
 
     failed = for {r, m} <- outcomes, o <- [r, m], not match?({:ok, _}, o), do: o
 
@@ -244,8 +309,13 @@ defmodule OptimalEngine.Store.PostgresContentionTest do
     )
 
     assert failed == [], "#{inspect(Enum.take(failed, 2))}"
-    # The writers went on writing: they waited for each rename and merge.
     assert written > 0
+
+    # The writes overlapped the renames and repairs: a writer was seen waiting
+    # for a table one of them held (no write lands while it holds them; that is
+    # the point), and a write committed after that wait, once it let go.
+    assert blocked_at, "no writer was ever seen waiting for the steward's table locks"
+    assert last_commit && last_commit > blocked_at, "no write committed after waiting for them"
 
     for {old, r} <- Enum.with_index(olds, 1) do
       {:ok, [[left]]} =

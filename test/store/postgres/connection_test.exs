@@ -625,6 +625,53 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
       assert System.monotonic_time(:millisecond) - started < 2_000
     end
 
+    # The error a call that gives up returns can reach an API caller, and the
+    # server's detail and hint can quote other sessions' queries (a deadlock's
+    # does), with another tenant's values. They go to the log, never into it.
+    test "a call that gives up returns no server detail, hint or statement", %{pool: pool} do
+      {:ok, _} =
+        Connection.query(
+          pool,
+          """
+          CREATE OR REPLACE FUNCTION conflict_with_detail() RETURNS bigint
+          LANGUAGE plpgsql AS $$
+          BEGIN
+            RAISE EXCEPTION 'conflict' USING ERRCODE = '40P01',
+              DETAIL = 'Process 1 waits for ShareLock; blocked by process 2: UPDATE secrets SET v = ''other-tenant-literal''',
+              HINT = 'other-tenant-hint';
+          END $$
+          """,
+          [],
+          dialect: :postgres
+        )
+
+      statement = "SELECT conflict_with_detail()"
+
+      summary =
+        ~r/\A(deadlock_detected|serialization_failure); gave up after \d+ attempts in \d+ ms\z/
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:serialization_failure, from_statement}} =
+                   Connection.query(pool, statement, [], timeout: 300)
+
+          assert {:error, {:serialization_failure, from_transaction}} =
+                   Connection.transaction(pool, &Connection.txn_query(&1, statement), 300)
+
+          for detail <- [from_statement, from_transaction] do
+            assert detail =~ summary
+
+            for leaked <- ["other-tenant-literal", "other-tenant-hint", "conflict_with_detail"],
+                do: refute(detail =~ leaked, "#{inspect(leaked)} reached the caller: #{detail}")
+          end
+        end)
+
+      # The server's log keeps what the caller is not told.
+      assert log =~ "other-tenant-literal"
+      assert log =~ "other-tenant-hint"
+      assert log =~ "conflict_with_detail"
+    end
+
     test "a fun that swallows a serialization failure still runs again", %{pool: pool} do
       runs = :counters.new(1, [])
 

@@ -48,8 +48,11 @@ defmodule OptimalEngine.Store.Postgres.Connection do
   with the attempt number and, as metadata, the scope (`:statement` or
   `:transaction`) and the reason. A call that runs out of attempts or time
   returns `{:error, {:serialization_failure, detail}}`, where the detail says
-  how many attempts ran over how long, and which statement met the last
-  conflict and why.
+  only the reason, how many attempts ran and over how long. The error can
+  reach an API caller, and the server's detail and hint can quote other
+  sessions' queries (a deadlock's does), with another tenant's values in them,
+  so the statement that met the last conflict and the server's detail and hint
+  are logged on the server as a warning instead.
 
   A transaction that by its nature conflicts with every concurrent writer
   should not lean on these retries: under load it loses every time. It takes
@@ -529,14 +532,20 @@ defmodule OptimalEngine.Store.Postgres.Connection do
     end
   end
 
-  # What a call that ran out of attempts or time was doing, for the error it
-  # returns: how many attempts over how long, and the statement that met the
-  # last conflict with the server's reason.
+  # The error a call that ran out of attempts or time returns: the reason, the
+  # attempts and how long they took, nothing else. That error can reach an API
+  # caller, and the server's detail and hint can quote other sessions' queries
+  # (a deadlock's detail does), with another tenant's values in them. The
+  # statement that met the last conflict and the server's detail and hint are
+  # logged here, on the server, instead.
   defp gave_up(reason, attempt, deadline, conflict) do
     started = Process.get({@last_conflict, :started, deadline})
     elapsed = if started, do: " in #{System.monotonic_time(:millisecond) - started} ms", else: ""
+    summary = "#{reason}; gave up after #{attempt} attempts#{elapsed}"
 
-    "#{reason}; gave up after #{attempt} attempts#{elapsed}" <> conflict_detail(conflict)
+    Logger.warning("[Store.Postgres] #{summary}" <> conflict_detail(conflict))
+
+    summary
   end
 
   defp conflict_detail({:conflict, nil}), do: ""
@@ -545,10 +554,9 @@ defmodule OptimalEngine.Store.Postgres.Connection do
     do: "; last conflict at: #{excerpt(statement)}#{server_detail(error)}"
 
   defp server_detail(%Postgrex.Error{postgres: %{} = fields}) do
-    case fields[:detail] || fields[:hint] do
-      nil -> ""
-      text -> " (#{text})"
-    end
+    [detail: fields[:detail], hint: fields[:hint]]
+    |> Enum.reject(fn {_key, text} -> is_nil(text) end)
+    |> Enum.map_join("", fn {key, text} -> "; #{key}: #{text}" end)
   end
 
   defp server_detail(_error), do: ""
