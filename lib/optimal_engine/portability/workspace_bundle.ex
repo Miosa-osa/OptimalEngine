@@ -651,6 +651,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           tenant_id
         ])
 
+        # An export may have run while the import did; its files go with the record.
+        OptimalEngine.Analytics.purge_workspace(workspace_id)
+
       damaged + refused == 0 ->
         clear_import_token(workspace_id)
 
@@ -986,6 +989,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       cache_purged =
         Cache.summary(Cache.purge_workspace(workspace_id, :move, plan_option(plan)))
 
+      # Its analytics files are a projection of rows that are gone; the daily
+      # prune (`Analytics.prune_removed/0`) retries one that failed here.
+      analytics_purged =
+        case OptimalEngine.Analytics.purge_workspace(workspace_id) do
+          :ok -> :ok
+          {:error, cause} -> inspect(cause)
+        end
+
       # Only the move keys are written; the archived stub keeps its slugs and
       # its external id value (archiving releases the id itself).
       {:ok, _} =
@@ -1014,6 +1025,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
          workspace_id: workspace_id,
          deleted_rows: deleted,
          cache_purged: cache_purged,
+         analytics_purged: analytics_purged,
          target_url: target_url
        }}
     else

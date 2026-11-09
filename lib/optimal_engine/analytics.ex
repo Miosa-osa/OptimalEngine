@@ -29,6 +29,9 @@ defmodule OptimalEngine.Analytics do
 
   alias OptimalEngine.Analytics.Slots
   alias OptimalEngine.Storage.DuckDB
+  alias OptimalEngine.Store
+  alias OptimalEngine.Telemetry
+  alias OptimalEngine.Telemetry.History
 
   @datasets ~w(metrics sync_runs ledger usage)
   @buckets ~w(hour day week month)
@@ -109,6 +112,120 @@ defmodule OptimalEngine.Analytics do
   end
 
   @doc """
+  The directory the Engine-wide metrics live in: `<root>/engine`, beside
+  `<root>/workspaces` and never inside it, so no workspace's query (locked to
+  its own directory) can read it, and no workspace id can name it.
+  """
+  @spec engine_dir(Path.t()) :: Path.t()
+  def engine_dir(root), do: Path.join(Path.expand(root), "engine")
+
+  @doc "The scope the Engine's own samples are recorded under (`OptimalEngine.Telemetry.History`)."
+  @spec engine_scope() :: String.t()
+  def engine_scope, do: History.engine_scope()
+
+  @doc """
+  The metric names the Engine-wide export keeps: the counters and histograms
+  `OptimalEngine.Telemetry` declares, each histogram's `.count`, and the
+  uptime. Fixed in code, so a sample can never carry a workspace into the
+  file by its name.
+  """
+  @spec engine_metric_names() :: [String.t()]
+  def engine_metric_names do
+    counters = Enum.map(Telemetry.counter_names(), &Atom.to_string/1)
+    histograms = Enum.map(Telemetry.histogram_names(), &Atom.to_string/1)
+
+    counters ++
+      histograms ++ Enum.map(histograms, &(&1 <> ".count")) ++ ["optimal_engine.uptime_ms"]
+  end
+
+  @doc "What the Engine-wide metrics hold, as `status/1` says it of a workspace."
+  @spec engine_status() :: map()
+  def engine_status do
+    case DuckDB.config() do
+      {:ok, config} ->
+        manifest = read_manifest(engine_dir(config.path))
+
+        %{
+          configured: true,
+          executable_present: config.executable != nil,
+          exported_at: manifest["exported_at"],
+          datasets: Map.get(manifest, "datasets", %{}),
+          questions: Map.take(questions(), ["metrics"])
+        }
+
+      {:error, _} ->
+        %{
+          configured: false,
+          executable_present: System.find_executable(DuckDB.executable()) != nil,
+          exported_at: nil,
+          datasets: %{},
+          questions: Map.take(questions(), ["metrics"])
+        }
+    end
+  end
+
+  @doc """
+  Answers the `metrics` question over the Engine-wide metrics, locked to
+  `engine_dir/1`, with the parameters and errors of `query/2`. Any other
+  dataset is `{:invalid_parameter, "dataset", ...}`: the Engine export holds
+  metrics only.
+  """
+  @spec query_engine(map()) :: {:ok, map()} | {:error, term()}
+  def query_engine(params) when is_map(params) do
+    with :ok <- engine_dataset(params["dataset"]),
+         {:ok, plan} <- plan(params),
+         {:ok, config} <- DuckDB.config() do
+      run_question(config, engine_dir(config.path), plan)
+    end
+  end
+
+  defp engine_dataset("metrics"), do: :ok
+  defp engine_dataset(_other), do: {:error, {:invalid_parameter, "dataset", "metrics"}}
+
+  @doc """
+  Removes the analytics directory of every workspace that is not active now:
+  archived, moved, renamed away, or gone from the store by any path (a hard
+  delete, a discarded import, a purge that failed). Run with the daily
+  Engine-wide export (`analytics_engine_export`), so a removal path that does
+  not purge the files itself is covered within a day. Never touches the
+  Engine-wide directory. Returns how many directories went.
+  """
+  @spec prune_removed() :: {:ok, %{removed: non_neg_integer()}} | {:error, term()}
+  def prune_removed do
+    with {:ok, config} <- DuckDB.config() do
+      root = Path.join(Path.expand(config.path), "workspaces")
+
+      names =
+        case File.ls(root) do
+          {:ok, names} -> names
+          {:error, _} -> []
+        end
+
+      removed =
+        Enum.count(names, fn name ->
+          id = String.replace(name, "~", ":")
+
+          if active_workspace?(id),
+            do: false,
+            else: match?({:ok, _}, File.rm_rf(Path.join(root, name)))
+        end)
+
+      {:ok, %{removed: removed}}
+    else
+      {:error, :not_configured} -> {:ok, %{removed: 0}}
+      other -> other
+    end
+  end
+
+  defp active_workspace?(id) do
+    workspace_id?(id) and
+      match?(
+        {:ok, [_ | _]},
+        Store.raw_query("SELECT 1 FROM workspaces WHERE id = ?1 AND status = 'active'", [id])
+      )
+  end
+
+  @doc """
   What the workspace's analytics hold: whether the provider is configured,
   when the files were last exported and how many rows each dataset holds.
   Never the server's path.
@@ -153,10 +270,15 @@ defmodule OptimalEngine.Analytics do
   @spec query(String.t(), map()) :: {:ok, map()} | {:error, term()}
   def query(workspace_id, params) when is_map(params) do
     with {:ok, plan} <- plan(params),
-         {:ok, config} <- DuckDB.config(),
-         dir = workspace_dir(config.path, workspace_id),
-         file = Path.join(dir, plan.dataset <> ".parquet"),
-         true <- File.regular?(file) || {:error, :not_exported},
+         {:ok, config} <- DuckDB.config() do
+      run_question(config, workspace_dir(config.path, workspace_id), plan)
+    end
+  end
+
+  defp run_question(config, dir, plan) do
+    file = Path.join(dir, plan.dataset <> ".parquet")
+
+    with true <- File.regular?(file) || {:error, :not_exported},
          {:ok, rows} <- run_locked(config, dir, sql(plan, file), timeout: @query_timeout) do
       {:ok,
        %{

@@ -113,6 +113,8 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # hierarchy repairs.
   @tenant_wide [
     ["api", "maintenance", "corpus-organization"],
+    ["api", "analytics", "engine"],
+    ["api", "analytics", "engine", "query"],
     ["api", "data-steward", "nodes", "repair-types"],
     ["api", "data-steward", "hierarchy", "repair-deterministic"]
   ]
@@ -127,7 +129,7 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   # The organizer also runs as an analysis: placing the intake's records is
   # tenant wide however the request reaches it.
   defp tenant_wide?(%{path_info: ["api", "analyses", "run"], body_params: %{"kind" => kind}}),
-    do: kind == "workspace_population"
+    do: kind in ["workspace_population", "analytics_engine_export"]
 
   defp tenant_wide?(conn), do: conn.path_info in @tenant_wide
 
@@ -298,6 +300,9 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
   def workspace_scoped?(["api", "data-steward", "nodes", "repair-types"]), do: false
   def workspace_scoped?(["api", "data-steward", "hierarchy", "repair-deterministic"]), do: false
   def workspace_scoped?(["api", "maintenance", "graph", "backfill"]), do: true
+  # The Engine-wide analytics hold the Engine's own metrics, no workspace's
+  # (a key needs the whole tenant: `@tenant_wide`, and admin).
+  def workspace_scoped?(["api", "analytics", "engine" | _]), do: false
   def workspace_scoped?(["api", root | _]), do: root not in @global_roots
   def workspace_scoped?(_path_info), do: false
 

@@ -4496,6 +4496,8 @@ defmodule OptimalEngine.API.Router do
 
   get("/api/analytics", do: AnalyticsAPI.status(conn))
   get("/api/analytics/query", do: AnalyticsAPI.query(conn))
+  get("/api/analytics/engine", do: AnalyticsAPI.engine_status(conn))
+  get("/api/analytics/engine/query", do: AnalyticsAPI.engine_query(conn))
 
   # ── Imports (OptimalEngine.API.ImportsAPI) ───────────────────────────────
   alias OptimalEngine.API.ImportsAPI

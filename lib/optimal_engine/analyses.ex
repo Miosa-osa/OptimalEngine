@@ -12,6 +12,7 @@ defmodule OptimalEngine.Analyses do
   | `storage_usage` | the tenant | usage against the size profile (`OptimalEngine.Sizing`) with the resize advice |
   | `retention_sweep` | the tenant | applies the tenant's retention policies; legal holds win |
   | `analytics_export` | each workspace, while `OPTIMAL_ANALYTICS_PATH` is set | rebuilds the workspace's analytics Parquet files (`OptimalEngine.Analytics.Export`) |
+  | `analytics_engine_export` | the whole Engine, once (on the default tenant's home workspace), while `OPTIMAL_ANALYTICS_PATH` is set | rebuilds the Engine-wide metrics file (`Export.run_engine/1`) and removes the analytics of workspaces that are no longer active (`Analytics.prune_removed/0`) |
 
   `schedule/1` enqueues each day's analyses once (an idempotency key per
   kind, workspace, and day); the worker (`Analyses.Worker`) drains them.
@@ -39,7 +40,7 @@ defmodule OptimalEngine.Analyses do
   alias OptimalEngine.Workspace
 
   @kinds ~w(promises workspace_population meeting_archive file_audit storage_usage retention_sweep
-            analytics_export)
+            analytics_export analytics_engine_export)
   @tenant_kinds ~w(file_audit storage_usage retention_sweep)
   @meeting_connectors ~w(zoom teams fathom)
 
@@ -306,6 +307,17 @@ defmodule OptimalEngine.Analyses do
     end
   end
 
+  defp analyze("analytics_engine_export", _tenant_id, _workspace_id, _payload) do
+    with {:ok, result} <- AnalyticsExport.run_engine(),
+         {:ok, %{removed: removed}} <- OptimalEngine.Analytics.prune_removed() do
+      rows = Enum.map_join(result.datasets, ", ", fn {name, %{rows: n}} -> "#{name} #{n}" end)
+
+      {:ok,
+       "Engine analytics exported at #{result.exported_at}: #{rows} rows; #{removed} removed workspace(s) pruned.",
+       json_safe(result |> Map.delete(:path) |> Map.put(:pruned, removed))}
+    end
+  end
+
   defp analyze(kind, _tenant_id, _workspace_id, _payload), do: {:error, {:unknown_analysis, kind}}
 
   # Placement by meaning compares document vectors, so documents still
@@ -339,7 +351,18 @@ defmodule OptimalEngine.Analyses do
 
     analytics = if DuckDB.configured?(), do: Enum.map(ids, &{&1, "analytics_export"}), else: []
 
-    Enum.map(ids, &{&1, "promises"}) ++ population ++ meetings ++ tenant_pairs ++ analytics
+    # The Engine-wide export runs once, not once per tenant: on the default
+    # tenant's home workspace.
+    engine =
+      with true <- DuckDB.configured?() and tenant_id == Tenant.default_id(),
+           home when is_binary(home) <- home_workspace(tenant_id, ids) do
+        [{home, "analytics_engine_export"}]
+      else
+        _ -> []
+      end
+
+    Enum.map(ids, &{&1, "promises"}) ++
+      population ++ meetings ++ tenant_pairs ++ analytics ++ engine
   end
 
   # Tenant-wide analyses run on the tenant's default workspace, or its first.
