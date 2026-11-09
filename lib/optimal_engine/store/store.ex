@@ -66,6 +66,14 @@ defmodule OptimalEngine.Store do
 
   def insert_context(context), do: adapter().insert_context(context)
 
+  @doc """
+  `insert_context/1` with options: `fence:` checks a connector's workspace and
+  the connector itself in the write's transaction
+  (`OptimalEngine.Connectors.IngestFence`).
+  """
+  def insert_context(context, []), do: insert_context(context)
+  def insert_context(context, opts), do: adapter().insert_context(context, opts)
+
   def insert_contexts(contexts), do: adapter().insert_contexts(contexts)
 
   def insert_signal(signal), do: adapter().insert_signal(signal)

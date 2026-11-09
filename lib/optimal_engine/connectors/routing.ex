@@ -57,6 +57,7 @@ defmodule OptimalEngine.Connectors.Routing do
 
   require Logger
 
+  alias OptimalEngine.Connectors.IngestFence
   alias OptimalEngine.Connectors.Rows
   alias OptimalEngine.Operating.Loops
   alias OptimalEngine.Pipeline.Intake
@@ -195,7 +196,10 @@ defmodule OptimalEngine.Connectors.Routing do
         write_files: value(config, "write_files") == true,
         source_id: signal.id,
         source_uri: source_uri(signal.path),
-        occurred_at: signal.created_at
+        occurred_at: signal.created_at,
+        # A queued Signal is checked again where it is written: its workspace
+        # and its connector, under their row locks.
+        fence: IngestFence.from_scope(tenant_id, placed.workspace_id, scope)
       ]
       |> Keyword.reject(fn {_key, value} -> is_nil(value) end)
 

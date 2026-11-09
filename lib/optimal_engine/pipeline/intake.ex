@@ -296,7 +296,7 @@ defmodule OptimalEngine.Pipeline.Intake do
 
     # Source-first: the Source Package is committed BEFORE any interpretation,
     # so reject/quarantine/failure paths can never lose the source evidence.
-    with :ok <- persist_source_package(source_package),
+    with :ok <- persist_source_package(source_package, Keyword.get(opts, :fence)),
          # Every detection while classifying shares one budget, so a crafted
          # document holds the intake process (and everyone queued behind it)
          # a bounded time. The source package written before it does not
@@ -398,10 +398,14 @@ defmodule OptimalEngine.Pipeline.Intake do
 
   # Source-first commit. Refuses to derive anything when the evidence cannot
   # be persisted — derived objects without source lineage are forbidden.
-  defp persist_source_package(%SourcePackage{} = source_package) do
-    case MemoryCoreStore.insert_source_package(source_package) do
+  defp persist_source_package(%SourcePackage{} = source_package, fence) do
+    case MemoryCoreStore.insert_source_package(source_package, fence: fence) do
       :ok ->
         :ok
+
+      # The connector's workspace or the connector went before the write.
+      {:error, {:fenced, _}} = fenced ->
+        fenced
 
       {:error, reason} ->
         Logger.error("[Intake] Source Package persist failed — refusing intake: #{inspect(reason)}")
@@ -748,13 +752,20 @@ defmodule OptimalEngine.Pipeline.Intake do
         )
     }
 
-    case Store.insert_context(context) do
+    case Store.insert_context(context, fence_opts(opts)) do
       :ok ->
         if primary_path, do: index_cross_refs(signal, cross_paths, scope, context.metadata)
         {:ok, context}
 
       {:error, _} = err ->
         err
+    end
+  end
+
+  defp fence_opts(opts) do
+    case Keyword.get(opts, :fence) do
+      nil -> []
+      fence -> [fence: fence]
     end
   end
 

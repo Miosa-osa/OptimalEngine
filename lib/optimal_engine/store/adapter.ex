@@ -55,6 +55,12 @@ defmodule OptimalEngine.Store.Adapter do
   @doc "Inserts one context."
   @callback insert_context(Context.t()) :: :ok | {:error, term()}
 
+  @doc """
+  Inserts one context; `fence:` (`OptimalEngine.Connectors.IngestFence`)
+  checks the workspace and the connector in the same transaction first.
+  """
+  @callback insert_context(Context.t(), keyword()) :: :ok | {:error, term()}
+
   @doc "Inserts contexts in one transaction; returns how many were written."
   @callback insert_contexts([Context.t()]) :: {:ok, non_neg_integer()} | {:error, term()}
 

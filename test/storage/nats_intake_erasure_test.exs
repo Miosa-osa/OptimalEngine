@@ -335,6 +335,203 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
     end
   end
 
+  describe "review 2: the write itself is fenced" do
+    defp race_message(ctx, workspace, tag) do
+      %{
+        subject: "optimal.intake.#{ctx.tenant}.#{ctx.connectors[workspace]}",
+        payload:
+          Jason.encode!(%{
+            "tenant_id" => ctx.tenant,
+            "connector_id" => ctx.connectors[workspace],
+            "workspace_id" => workspace,
+            "signal" => IntakeQueue.encode_signal(long_signal(ctx, tag))
+          }),
+        headers: %{},
+        reply: nil,
+        stream: "OPTIMAL_INTAKE",
+        consumer: nil,
+        delivered: 1,
+        stream_seq: 1,
+        consumer_seq: 1,
+        pending: 0
+      }
+    end
+
+    defp long_signal(ctx, tag) do
+      %{
+        signal(ctx, tag, 1)
+        | content:
+            "zqintake#{tag}#{ctx.n}xv " <>
+              String.duplicate("A meeting note about the quarterly plan and its owners. ", 6)
+      }
+    end
+
+    defp written(workspace) do
+      {:ok, [[contexts]]} =
+        Store.raw_query("SELECT count(*) FROM contexts WHERE workspace_id = ?1", [workspace])
+
+      {:ok, [[packages]]} =
+        Store.raw_query("SELECT count(*) FROM source_packages WHERE workspace_id = ?1", [
+          workspace
+        ])
+
+      contexts + packages
+    end
+
+    test "a queued Signal is ingested when nothing changed", ctx do
+      assert :ack = IntakeQueue.handle_message(race_message(ctx, ctx.other, "fenced-ok"), %{})
+      assert written(ctx.other) > 0
+    end
+
+    test "an archive that commits between the check and the write wins", ctx do
+      archive_first = fn signal, scope ->
+        :ok = Workspace.archive(ctx.ws)
+        PullScheduler.ingest_signal(signal, scope)
+      end
+
+      assert :term =
+               IntakeQueue.handle_message(race_message(ctx, ctx.ws, "fenced-archive"), %{
+                 ingest: archive_first
+               })
+
+      assert written(ctx.ws) == 0
+    end
+
+    test "a connector delete that commits between the check and the write wins", ctx do
+      delete_first = fn signal, scope ->
+        {:ok, _} =
+          Store.raw_query("DELETE FROM connectors WHERE id = ?1", [ctx.connectors[ctx.ws]])
+
+        PullScheduler.ingest_signal(signal, scope)
+      end
+
+      assert :term =
+               IntakeQueue.handle_message(race_message(ctx, ctx.ws, "fenced-delete"), %{
+                 ingest: delete_first
+               })
+
+      assert written(ctx.ws) == 0
+    end
+
+    test "a connector row without a workspace ingests into the payload's, or the default one" do
+      assert IntakeQueue.target_workspace(%{workspace_id: nil}, %{"workspace_id" => "t:ws"}) ==
+               "t:ws"
+
+      assert IntakeQueue.target_workspace(%{workspace_id: nil}, %{}) == Workspace.default_id()
+
+      assert IntakeQueue.target_workspace(%{workspace_id: "t:own"}, %{"workspace_id" => "t:ws"}) ==
+               "t:own"
+    end
+
+    test "an untenanted offer is published under the default tenant, where its removal looks",
+         ctx do
+      {:ok, default_ws} = Workspace.create(%{slug: "ie-offer-#{ctx.n}", name: "IE offer"})
+      q = queue(ctx)
+      IntakeQueue.drain_now(q)
+
+      scope = %{
+        workspace_id: default_ws.id,
+        tenant_id: nil,
+        connector_id: "untenanted-offer-#{ctx.n}"
+      }
+
+      assert {[_], []} = IntakeQueue.offer(q, [signal(ctx, "offered", 1)], scope)
+
+      [message] =
+        for m <- NATSStub.messages(ctx.stub, "OPTIMAL_INTAKE"),
+            String.contains?(m.data, "zqintakeoffered#{ctx.n}xv"),
+            do: m
+
+      assert message.subject == "optimal.intake.default.untenanted-offer-#{ctx.n}"
+
+      assert {:ok, %{queued_purged: 1}} =
+               IntakeQueue.forget_workspace("default", default_ws.id, "archived",
+                 connection: ctx.conn,
+                 namespace: "optimal"
+               )
+
+      assert held(ctx, "offered") == []
+    end
+
+    test "requests of another namespace never crowd out this one's", ctx do
+      fill(ctx)
+
+      for i <- 1..501 do
+        {:ok, _} =
+          Store.raw_query(
+            "INSERT INTO events (tenant_id, principal, kind, target_uri, metadata) VALUES (?1, 'system:nats', 'nats_intake_purge_requested', ?2, ?3)",
+            [
+              ctx.tenant,
+              "other-ns-#{ctx.n}-#{i}",
+              Jason.encode!(%{"namespace" => "elsewhere#{ctx.n}", "tenant_id" => ctx.tenant})
+            ]
+          )
+      end
+
+      down = :"nats_ie_down3_#{ctx.n}"
+      start_supervised!({Connection, name: down, url: nil}, id: down)
+
+      assert {:ok, %{pending: true}} =
+               IntakeQueue.forget_workspace(ctx.tenant, ctx.ws, "archived",
+                 connection: down,
+                 namespace: "optimal"
+               )
+
+      assert {:ok, done} = IntakeQueue.process_requests(ctx.conn, "optimal")
+      assert map_size(done) >= 1
+      assert held(ctx, "gone") == []
+    end
+  end
+
+  describe "review 2: the periodic run" do
+    defmodule SlowPeriodic do
+      @moduledoc false
+      @behaviour OptimalEngine.Storage.NATS.WorkQueue
+      def flow, do: "slowperiodic"
+      def stream_suffix, do: "SLOWPERIODIC"
+      def subject_root, do: "slowperiodic"
+      def consumer, do: %{}
+      def stream_options, do: %{}
+      def handle_message(_message, _context), do: :ack
+      def periodic_ms(_context), do: 10
+
+      def periodic(_server, %{probe: probe}) do
+        :ets.update_counter(probe, :running, 1)
+        [{:running, now}] = :ets.lookup(probe, :running)
+        :ets.update_counter(probe, :runs, 1)
+        if now > :ets.lookup_element(probe, :max, 2), do: :ets.insert(probe, {:max, now})
+        Process.sleep(80)
+        :ets.update_counter(probe, :running, -1)
+        if :ets.lookup_element(probe, :runs, 2) == 2, do: raise("periodic exploded")
+        :ok
+      end
+    end
+
+    test "never overlaps itself, and a run that crashes does not stop the next", ctx do
+      probe = :ets.new(:periodic_probe, [:public, :set])
+      :ets.insert(probe, [{:running, 0}, {:max, 0}, {:runs, 0}])
+      name = :"nats_slow_periodic_#{ctx.n}"
+
+      pid =
+        start_supervised!(
+          {OptimalEngine.Storage.NATS.WorkQueue,
+           {SlowPeriodic,
+            name: name,
+            connection: ctx.conn,
+            namespace: "optimal",
+            enabled: true,
+            interval_ms: 0,
+            probe: probe}},
+          id: name
+        )
+
+      Process.sleep(600)
+      assert Process.alive?(pid)
+      assert :ets.lookup_element(probe, :max, 2) == 1
+      assert :ets.lookup_element(probe, :runs, 2) >= 3
+    end
+  end
+
   describe "the dead-letter age limit" do
     defp dead_letter_config(ctx),
       do: NATSStub.streams(ctx.stub)["OPTIMAL_DEAD_LETTERS"].config

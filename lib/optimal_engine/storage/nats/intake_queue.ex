@@ -85,10 +85,12 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   defp do_offer(_server, [], _scope, queued), do: {Enum.reverse(queued), [], nil}
 
   defp do_offer(server, [signal | more] = signals, scope, queued) do
-    tenant = Map.get(scope, :tenant_id)
+    # A scope without a tenant is the default tenant's, on the subject and in
+    # the payload, where a removal for the default tenant looks (`purge/3`).
+    tenant = Map.get(scope, :tenant_id) || Tenant.default_id()
     connector = Map.get(scope, :connector_id)
 
-    token = "#{Protocol.token(tenant || "")}.#{Protocol.token(connector || "")}"
+    token = "#{Protocol.token(tenant)}.#{Protocol.token(connector || "")}"
 
     # A Signal that cannot be put on the wire (content that is not UTF-8) is
     # left to the in-process path with the rest, in order.
@@ -179,7 +181,9 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
     if Connection.connected?(conn) do
       case purge(conn, namespace, request) do
         {:ok, counts} ->
-          done(id, namespace, request, counts)
+          # Purged either way; a request whose completion was not written is
+          # purged again by the next run, which finds nothing more.
+          _ = done(id, namespace, request, counts)
           {:ok, counts}
 
         {:error, reason} ->
@@ -208,6 +212,7 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
         """
         SELECT r.id, r.metadata FROM events r
         WHERE r.kind = ?1
+          AND (CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.namespace') END) = ?2
           AND NOT EXISTS (
             SELECT 1 FROM events d
             WHERE d.kind = 'nats_purge' AND d.target_uri = 'nats-intake-purge-request:' || CAST(r.id AS TEXT)
@@ -215,16 +220,17 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
         ORDER BY r.id
         LIMIT 500
         """,
-        [@request_kind]
+        [@request_kind, namespace]
       )
 
+    # Another namespace's requests are another Engine's: they are not read
+    # here, so they never fill this one's page.
     done =
       for [id, meta] <- rows,
           request = Jason.decode!(meta),
-          request["namespace"] == namespace,
           {:ok, counts} <- [purge(conn, namespace, request)],
+          :ok <- [done(id, namespace, request, counts)],
           into: %{} do
-        done(id, namespace, request, counts)
         {id, counts}
       end
 
@@ -285,7 +291,7 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   end
 
   defp done(id, namespace, request, counts) do
-    {:ok, _} =
+    result =
       Store.raw_query(
         "INSERT INTO events (tenant_id, principal, kind, target_uri, metadata) VALUES (?1, 'system:nats', 'nats_purge', ?2, ?3)",
         [
@@ -303,7 +309,24 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
         ]
       )
 
-    :ok
+    case result do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} = error ->
+        Logger.warning(
+          "[NATS] intake removal #{id} done, but its completion was not recorded: #{inspect(reason)}"
+        )
+
+        error
+    end
+  rescue
+    error ->
+      Logger.warning(
+        "[NATS] intake removal #{id} done, but its completion was not recorded: #{Exception.message(error)}"
+      )
+
+      {:error, error}
   end
 
   defp namespace(opts) do
@@ -387,12 +410,30 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
 
     case {Rows.get(tenant, connector), workspace_state(tenant, decoded["workspace_id"])} do
       # Archived, moved or gone since it was queued (or since this consumer
-      # fetched it): what was taken in for it is never ingested now.
-      {{:ok, row}, :active} when is_binary(row.workspace_id) ->
-        case workspace_state(tenant, row.workspace_id) do
-          :active -> ingest_queued(row, tenant, connector, decoded, encoded, ingest, context)
-          :unknown -> {:retry, Map.get(context, :retry_ms, 2_000)}
-          :gone -> dropped(connector, row.workspace_id)
+      # fetched it): what was taken in for it is never ingested now. The
+      # write itself checks again, under the workspace's and the connector's
+      # row locks (`OptimalEngine.Connectors.IngestFence`), so a removal that
+      # commits after this check still wins.
+      {{:ok, row}, :active} ->
+        target = target_workspace(row, decoded)
+
+        case workspace_state(tenant, target) do
+          :active ->
+            ingest_queued(
+              %{row | workspace_id: target},
+              tenant,
+              connector,
+              decoded,
+              encoded,
+              ingest,
+              context
+            )
+
+          :unknown ->
+            {:retry, Map.get(context, :retry_ms, 2_000)}
+
+          :gone ->
+            dropped(connector, target)
         end
 
       {{:ok, _row}, :unknown} ->
@@ -410,17 +451,35 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
     end
   end
 
+  @doc false
+  # The workspace a queued Signal is ingested into: its connector's, or, for a
+  # connector row that names none, the one the payload names, else the
+  # default workspace.
+  def target_workspace(%{workspace_id: workspace}, _decoded)
+      when is_binary(workspace) and workspace != "",
+      do: workspace
+
+  def target_workspace(_row, %{"workspace_id" => workspace})
+      when is_binary(workspace) and workspace != "",
+      do: workspace
+
+  def target_workspace(_row, _decoded), do: OptimalEngine.Workspace.default_id()
+
   defp ingest_queued(row, tenant, connector, decoded, encoded, ingest, context) do
     scope = %{
       workspace_id: row.workspace_id,
       tenant_id: tenant,
       connector_id: connector,
       kind: row.kind,
-      config: row.config || %{}
+      config: row.config || %{},
+      # The writes check the workspace and the connector again, under their
+      # row locks: a removal that committed since the check above wins.
+      fence: true
     }
 
     case ingest.(decode_signal(encoded), scope) do
       :ok -> :ack
+      {:fenced, reason} -> dropped(connector, "#{row.workspace_id} (#{reason})")
       :refused -> refused(decoded["run_id"], connector, context)
     end
   end

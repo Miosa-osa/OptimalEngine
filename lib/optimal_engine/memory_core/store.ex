@@ -24,8 +24,34 @@ defmodule OptimalEngine.MemoryCore.Store do
     SourcePackage
   }
 
-  @spec insert_source_package(SourcePackage.t()) :: :ok | {:error, term()}
-  def insert_source_package(%SourcePackage{} = source_package) do
+  @doc """
+  Writes the source package. With `fence:` (`OptimalEngine.Connectors.IngestFence`)
+  the workspace and the connector are checked again in the same transaction,
+  and the package is not written once either is gone.
+  """
+  @spec insert_source_package(SourcePackage.t(), keyword()) :: :ok | {:error, term()}
+  def insert_source_package(%SourcePackage{} = source_package, opts \\ []) do
+    {sql, params} = source_package_insert(source_package)
+
+    case Keyword.get(opts, :fence) do
+      nil ->
+        Store.raw_execute(sql, params)
+
+      fence ->
+        Store.transaction(fn txn ->
+          with :ok <- OptimalEngine.Connectors.IngestFence.check_in(txn, fence),
+               {:ok, _} <- Store.txn_execute(txn, sql, params) do
+            {:ok, :written}
+          end
+        end)
+        |> case do
+          {:ok, _} -> :ok
+          {:error, _} = error -> error
+        end
+    end
+  end
+
+  defp source_package_insert(%SourcePackage{} = source_package) do
     sql = """
     INSERT OR IGNORE INTO source_packages (
       id, tenant_id, workspace_id, source_type, source_class, source_system,
@@ -42,30 +68,31 @@ defmodule OptimalEngine.MemoryCore.Store do
     )
     """
 
-    Store.raw_execute(sql, [
-      source_package.id,
-      source_package.tenant_id,
-      source_package.workspace_id,
-      source_package.source_type,
-      source_package.source_class,
-      source_package.source_system,
-      source_package.source_uri,
-      source_package.source_time,
-      source_package.received_at,
-      source_package.content_hash,
-      source_package.raw_text,
-      source_package.verbatim_archive_uri,
-      source_package.trust_label,
-      source_package.retention_class,
-      source_package.access_policy_id,
-      JSON.list(source_package.security_labels),
-      JSON.list(source_package.partition_ids),
-      source_package.quarantine_state,
-      JSON.map(source_package.metadata),
-      source_package.created_by,
-      source_package.created_at,
-      source_package.updated_at
-    ])
+    {sql,
+     [
+       source_package.id,
+       source_package.tenant_id,
+       source_package.workspace_id,
+       source_package.source_type,
+       source_package.source_class,
+       source_package.source_system,
+       source_package.source_uri,
+       source_package.source_time,
+       source_package.received_at,
+       source_package.content_hash,
+       source_package.raw_text,
+       source_package.verbatim_archive_uri,
+       source_package.trust_label,
+       source_package.retention_class,
+       source_package.access_policy_id,
+       JSON.list(source_package.security_labels),
+       JSON.list(source_package.partition_ids),
+       source_package.quarantine_state,
+       JSON.map(source_package.metadata),
+       source_package.created_by,
+       source_package.created_at,
+       source_package.updated_at
+     ]}
   end
 
   @spec insert_derivation_entry(DerivationLedgerEntry.t()) :: :ok | {:error, term()}

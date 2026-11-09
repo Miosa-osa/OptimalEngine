@@ -61,6 +61,7 @@ defmodule OptimalEngine.Store.Postgres do
   use GenServer
 
   alias OptimalEngine.{Context, Graph, Signal, Store}
+  alias OptimalEngine.Connectors.IngestFence
   alias OptimalEngine.Store.ContextTenant
   alias OptimalEngine.Store.Postgres.{Connection, FullText, Schema}
   alias OptimalEngine.Store.SQLite
@@ -223,8 +224,21 @@ defmodule OptimalEngine.Store.Postgres do
   @doc "Writes one context, its entities and its edges."
   @spec insert_context(Context.t()) :: :ok | {:error, term()}
   @impl OptimalEngine.Store.Adapter
-  def insert_context(%Context{} = context) do
-    result = Connection.transaction(@pool, &write_context(&1, context), 10_000)
+  def insert_context(%Context{} = context), do: insert_context(context, [])
+
+  @impl OptimalEngine.Store.Adapter
+  def insert_context(%Context{} = context, opts) do
+    fence = Keyword.get(opts, :fence)
+
+    result =
+      Connection.transaction(
+        @pool,
+        fn txn ->
+          with :ok <- IngestFence.check(&fence_query(txn, &1, &2), fence, :postgres),
+               do: write_context(txn, context)
+        end,
+        10_000
+      )
 
     :telemetry.execute(
       [:optimal_engine, :store, :insert],
@@ -270,6 +284,10 @@ defmodule OptimalEngine.Store.Postgres do
   # Delete then insert, as SQLite's INSERT OR REPLACE does: the old row's
   # entities go with it through their ON DELETE CASCADE key. Entities and
   # edges are best effort on SQLite, so a failed one does not fail the write.
+  defp fence_query(txn, sql, params) do
+    with {:ok, %{rows: rows}} <- txn_native(txn, sql, params), do: {:ok, rows}
+  end
+
   defp write_context(txn, %Context{} = context) do
     with {:ok, tenant_id, previous} <- context_tenant(txn, context),
          :ok <- relabel_children(txn, context.id, tenant_id, previous) do

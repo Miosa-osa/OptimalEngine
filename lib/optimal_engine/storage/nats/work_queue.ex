@@ -150,6 +150,7 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
           true -> "starting"
         end,
       consumer_pid: nil,
+      periodic_task: nil,
       # Background publishes that did not get through, oldest first.
       unsent: :queue.new(),
       unsent_count: 0,
@@ -178,6 +179,19 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   end
 
   defp schedule_periodic(_state), do: nil
+
+  @task_supervisor OptimalEngine.Storage.NATS.TaskSupervisor
+
+  # The task's monitor reference. Under the NATS task supervisor when it runs;
+  # a queue started on its own (tests) monitors a process of its own instead.
+  defp start_periodic(fun) do
+    if Process.whereis(@task_supervisor) do
+      Task.Supervisor.async_nolink(@task_supervisor, fun).ref
+    else
+      {_pid, ref} = spawn_monitor(fun)
+      ref
+    end
+  end
 
   @impl GenServer
   def handle_call(:status, _from, state) do
@@ -244,11 +258,29 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
 
   def handle_info(:restart_consumer, state), do: {:noreply, maybe_start_consumer(state)}
 
-  def handle_info(:periodic, state) do
-    {callback, name, context} = {state.callback, self_name(state), state.context}
-    spawn(fn -> callback.periodic(name, context) end)
+  # One run at a time: a tick while the last run is still going is skipped. The
+  # run is a task of the NATS task supervisor, not linked to this process, so
+  # a run that crashes is logged and the next tick runs again.
+  def handle_info(:periodic, %{periodic_task: ref} = state) when is_reference(ref) do
     schedule_periodic(state)
     {:noreply, state}
+  end
+
+  def handle_info(:periodic, state) do
+    {callback, name, context} = {state.callback, self_name(state), state.context}
+    task = start_periodic(fn -> callback.periodic(name, context) end)
+    schedule_periodic(state)
+    {:noreply, %{state | periodic_task: task}}
+  end
+
+  def handle_info({ref, _result}, %{periodic_task: ref} = state) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, %{state | periodic_task: nil}}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{periodic_task: ref} = state) do
+    Logger.warning("[NATS] #{state.callback.flow()} periodic run failed: #{inspect(reason)}")
+    {:noreply, %{state | periodic_task: nil}}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
