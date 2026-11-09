@@ -24,11 +24,13 @@ It reads the same settings as the `optimal` client, without flags:
 | `OPTIMAL_ENGINE_URL` | Engine URL (then `OE_API`, `OPTIMAL_ENGINE_API_URL`) |
 | `OPTIMAL_ENGINE_API_KEY` | bearer key (then `OPTIMAL_ENGINE_API_KEY_FILE`, `OPTIMAL_API_KEY`) |
 | `OPTIMAL_WORKSPACE` | default workspace |
+| `OPTIMAL_WAKE_TIMEOUT` | seconds to wait in all for a waking or busy Engine (default 90, `0` never waits) |
 
 A profile key is only sent to its own URL.
 A profile may name its key file with `key_file=`.
 The server reads its settings, and that file, once when it starts: restart it after the key rotates.
 The key is sent as a bearer token and never logged; one line on stderr names the URL and where the key came from.
+A paused managed Engine is woken by the first request: the server waits for it as the client does (see [the client guide](../../docs/guides/cli.md#a-paused-engine-that-is-waking)) and logs one line on stderr while it waits.
 Give the server a key with only the scopes its agent needs, for example `["read", "write"]` for one workspace.
 
 ## Register with a harness

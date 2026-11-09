@@ -50,6 +50,10 @@ export function describeEngineError(err: EngineError): string {
       }`;
     case 426:
       return `${err.message} (HTTP 426${code})`;
+    case 503:
+      // Still waking after the wait: the message says how long and what to change.
+      if (err.code === ENGINE_WAKING) return err.message;
+      return `Engine error 503${code || `: ${err.message}`}`;
     case 400:
       if (err.code === "workspace_required") {
         return "Engine needs a workspace (HTTP 400: workspace_required); pass workspace or set OPTIMAL_WORKSPACE";
@@ -110,47 +114,139 @@ function warnOutdated(header: string): void {
   console.error(`[optimal-engine-mcp] warning: ${redact(detail)}`);
 }
 
+/** The error code MIOSA's proxy answers with while a paused Engine boots. */
+export const ENGINE_WAKING = "ENGINE_WAKING";
+// The wait for a waking Engine whose answer names no Retry-After.
+const DEFAULT_WAKE_DELAY_SECONDS = 5;
+const MAX_RETRY_AFTER_SECONDS = 86_400;
+
+interface ErrorBody {
+  message: string;
+  code: string | null;
+  engineVersion: string | null;
+}
+
+/**
+ * The code and message of an error answer: `{"error": "code"}` from the Engine,
+ * or `{"error": {"code": ..., "message": ...}}` from MIOSA's proxy.
+ */
+async function readErrorBody(response: Response): Promise<ErrorBody> {
+  const out: ErrorBody = { message: response.statusText, code: null, engineVersion: null };
+  try {
+    const err = (await response.json()) as {
+      error?: unknown;
+      message?: unknown;
+      engine?: unknown;
+    };
+    if (typeof err.engine === "string") out.engineVersion = err.engine;
+    if (typeof err.error === "string") {
+      out.code = err.error;
+      out.message = err.error;
+    } else if (err.error && typeof err.error === "object") {
+      const inner = err.error as { code?: unknown; message?: unknown };
+      if (typeof inner.code === "string") out.code = inner.code;
+      const text = inner.message ?? inner.code;
+      if (typeof text === "string") out.message = text;
+    } else if (typeof err.message === "string") {
+      out.message = err.message;
+    }
+  } catch {
+    // Non-JSON error body; keep the status text.
+  }
+  return out;
+}
+
+/** Retry-After in whole seconds, or null when absent or an HTTP date. */
+function retryAfterSeconds(response: Response): number | null {
+  const value = response.headers.get("retry-after")?.trim();
+  if (!value || !/^[0-9]+$/.test(value)) return null;
+  return Math.min(Number(value), MAX_RETRY_AFTER_SECONDS);
+}
+
+/**
+ * How long to wait before sending a request again, or null when it must not be.
+ * ENGINE_WAKING means the request never reached the Engine, so any method is
+ * sent again; any other 503, or a 429, only with Retry-After and only for GET.
+ */
+function retryDelay(
+  method: HttpMethod,
+  status: number,
+  retryAfter: number | null,
+  code: string | null,
+): number | null {
+  if (status === 503 && code === ENGINE_WAKING) {
+    return Math.max(1, retryAfter ?? DEFAULT_WAKE_DELAY_SECONDS);
+  }
+  if ((status === 503 || status === 429) && retryAfter !== null && method === "GET") {
+    return Math.max(1, retryAfter);
+  }
+  return null;
+}
+
+const sleep = (seconds: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000));
+
 async function request<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
   const { method = "GET", params, body } = options;
   const url = buildUrl(path, params);
+  // Serialized once, so every attempt sends the same bytes.
+  const payload = body !== undefined ? JSON.stringify(body) : undefined;
 
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method,
-      headers: buildHeaders(),
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
-    throw new EngineError(
-      0,
-      `cannot reach the Engine at ${maskUrl(config.engineUrl)}: ${reason}`,
-    );
-  }
-
-  const outdated = response.headers.get("x-optimal-client-outdated");
-  if (outdated) warnOutdated(outdated);
-
-  if (!response.ok) {
-    let message: string = response.statusText;
-    let code: string | null = null;
-    let engineVersion: string | null = null;
+  let waited = 0;
+  let noted = false;
+  for (;;) {
+    let response: Response;
     try {
-      const err = (await response.json()) as {
-        error?: unknown;
-        message?: unknown;
-        engine?: unknown;
-      };
-      if (typeof err.error === "string") code = err.error;
-      if (typeof err.engine === "string") engineVersion = err.engine;
-      const text = err.error ?? err.message;
-      if (typeof text === "string") message = text;
-    } catch {
-      // Non-JSON error body; keep the status text.
+      response = await fetch(url, { method, headers: buildHeaders(), body: payload });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new EngineError(
+        0,
+        `cannot reach the Engine at ${maskUrl(config.engineUrl)}: ${reason}`,
+      );
+    }
+
+    const outdated = response.headers.get("x-optimal-client-outdated");
+    if (outdated) warnOutdated(outdated);
+
+    if (response.ok) {
+      if (response.status === 204) {
+        return undefined as T;
+      }
+      return (await response.json()) as T;
+    }
+
+    const { message: errMessage, code, engineVersion } = await readErrorBody(response);
+    let message = errMessage;
+    const waking = response.status === 503 && code === ENGINE_WAKING;
+    const delay = retryDelay(method, response.status, retryAfterSeconds(response), code);
+    const remaining = config.wakeTimeoutSeconds - waited;
+    if (delay !== null && remaining > 0) {
+      const wait = Math.min(delay, remaining);
+      if (!noted) {
+        noted = true;
+        console.error(
+          `[optimal-engine-mcp] ${
+            waking
+              ? `waking the Engine at ${maskUrl(config.engineUrl)}`
+              : `the Engine is busy (HTTP ${response.status})`
+          }; retrying for up to ${config.wakeTimeoutSeconds}s...`,
+        );
+      }
+      await sleep(wait);
+      waited += wait;
+      continue;
+    }
+
+    if (waking) {
+      throw new EngineError(
+        503,
+        `the Engine at ${maskUrl(config.engineUrl)} is still waking after ${waited}s (HTTP 503: ${ENGINE_WAKING}); try again shortly, or wait longer with OPTIMAL_WAKE_TIMEOUT`,
+        code,
+      );
     }
     if (response.status === 426) {
       // Another major release: every tool fails the same way until the server
@@ -159,12 +255,6 @@ async function request<T>(
     }
     throw new EngineError(response.status, message, code);
   }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return (await response.json()) as T;
 }
 
 // ---------------------------------------------------------------------------

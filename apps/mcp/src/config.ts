@@ -25,6 +25,24 @@ export interface EngineConfig {
   keySource: string | null;
   /** Workspace used when a tool call names none. */
   defaultWorkspace: string;
+  /**
+   * The longest, in seconds, a request waits in all for an Engine that is waking
+   * (503 ENGINE_WAKING) or busy (503 or 429 with Retry-After); 0 never waits.
+   * From OPTIMAL_WAKE_TIMEOUT, default 90.
+   */
+  wakeTimeoutSeconds: number;
+}
+
+export const DEFAULT_WAKE_TIMEOUT_SECONDS = 90;
+
+function parseWakeTimeout(value: string | undefined): number {
+  if (value === undefined || value === "") return DEFAULT_WAKE_TIMEOUT_SECONDS;
+  if (!/^[0-9]{1,6}$/.test(value)) {
+    throw new Error(
+      `OPTIMAL_WAKE_TIMEOUT must be a whole number of seconds up to 999999, not '${value}'`,
+    );
+  }
+  return Number(value);
 }
 
 interface Profile {
@@ -143,7 +161,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): EngineConfig {
     fallback?.workspace ??
     "default";
 
-  return { engineUrl, urlSource, apiKey, keySource, defaultWorkspace };
+  const wakeTimeoutSeconds = parseWakeTimeout(env["OPTIMAL_WAKE_TIMEOUT"]);
+
+  return { engineUrl, urlSource, apiKey, keySource, defaultWorkspace, wakeTimeoutSeconds };
 }
 
 export const config: EngineConfig = loadConfig();

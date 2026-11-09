@@ -504,6 +504,12 @@ resolve_config() {
   fi
 
   TIMEOUT=${O_timeout:-${OPTIMAL_TIMEOUT:-120}}
+  # The longest the client waits, in all, for an Engine that is waking or busy.
+  WAKE_TIMEOUT=${OPTIMAL_WAKE_TIMEOUT:-90}
+  case $WAKE_TIMEOUT in
+    '' | *[!0-9]* | ???????*) die "$EX_CONFIG" "OPTIMAL_WAKE_TIMEOUT must be a whole number of seconds up to 999999, not '$WAKE_TIMEOUT'" ;;
+  esac
+  while :; do case $WAKE_TIMEOUT in 0?*) WAKE_TIMEOUT=${WAKE_TIMEOUT#0} ;; *) break ;; esac; done
   verbose "* engine $(mask_url "$CFG_URL") (from $CFG_URL_SRC)"
   verbose "* key ${CFG_KEY_SRC:+from $CFG_KEY_SRC}${CFG_KEY_SRC:-not configured}"
   verbose "* workspace ${CFG_WS:-<none>}${CFG_WS_SRC:+ (from $CFG_WS_SRC)}"
@@ -618,9 +624,39 @@ warn_outdated() {
   fi
 }
 
+# retry_wait METHOD: whether the answer just received may be sent again, and after
+# how long (_rd seconds). A managed Engine that is paused is woken by MIOSA's proxy,
+# which answers 503 ENGINE_WAKING with Retry-After while it boots; the request never
+# reached the Engine, so any method is sent again. Any other 503 or a 429 is sent
+# again only when it carries Retry-After and the method is GET or HEAD.
+# Sets R_WAKING when the Engine is waking.
+retry_wait() {
+  R_WAKING=
+  case $R_CODE in 503 | 429) ;; *) return 1 ;; esac
+  # Retry-After in seconds; an HTTP date or anything else counts as absent.
+  _ra=$(LC_ALL=C awk -F: 'tolower($1) == "retry-after" {
+    v = substr($0, index($0, ":") + 1); gsub(/^[ \t]+|[ \t\r]+$/, "", v)
+    if (v ~ /^[0-9]+$/) { v = v + 0; if (v > 86400) v = 86400; printf "%d", v }
+    exit }' "$_thdr" 2>/dev/null)
+  if [ "$R_CODE" = 503 ] && [ "$(field_text "$R_BODY" error.code 2>/dev/null)" = ENGINE_WAKING ]; then
+    R_WAKING=1
+    _rd=${_ra:-5}
+  else
+    [ -n "$_ra" ] || return 1
+    case $1 in GET | HEAD) ;; *) return 1 ;; esac
+    _rd=$_ra
+  fi
+  [ "$_rd" -ge 1 ] || _rd=1
+  return 0
+}
+
 # transport METHOD PATH BODY [name value]...
 # Name/value pairs become URL query parameters (empty values are skipped).
-# Sets R_CODE (000 when no response), R_RC (curl exit), R_BODY, R_ERR, R_URL. Never exits.
+# A waking or busy Engine is asked again, honoring Retry-After, for at most
+# WAKE_TIMEOUT seconds of waiting in all (see retry_wait); the body is a file, so
+# every attempt sends the same bytes.
+# Sets R_CODE (000 when no response), R_RC (curl exit), R_BODY, R_ERR, R_URL,
+# R_WAKING (the last answer was ENGINE_WAKING) and R_WAITED (seconds waited). Never exits.
 transport() {
   check_curl
   _tm=$1 _tp=$2 _tb=$3
@@ -647,23 +683,42 @@ transport() {
     fi
   fi
   _turl=$CFG_URL$_tp
-  if [ -n "$CFG_KEY" ]; then
-    verbose "> $_tm $(mask_url "$_turl")" "(Authorization: Bearer [redacted])"
-    _tw=$(printf 'Authorization: Bearer %s\n' "$CFG_KEY" | eval "curl $_targs -H @- $(q "$_turl")" 2>"$_terr")
-  else
-    verbose "> $_tm $(mask_url "$_turl")" "(no key)"
-    _tw=$(eval "curl $_targs $(q "$_turl")" 2>"$_terr")
-  fi
-  R_RC=$?
-  R_CODE=${_tw%% *}
-  R_URL=${_tw#* }
-  case $R_CODE in [0-9][0-9][0-9]) ;; *) R_CODE=000 ;; esac
-  R_BODY=$(cat "$_tout" 2>/dev/null)
-  R_ERR=$(cat "$_terr" 2>/dev/null)
-  verbose "< HTTP $R_CODE $(mask_url "$R_URL")"
-  _tod=$(LC_ALL=C awk -F: 'tolower($1) == "x-optimal-client-outdated" {
-    v = substr($0, index($0, ":") + 1); gsub(/^[ \t]+|[ \t\r]+$/, "", v); print v; exit }' "$_thdr" 2>/dev/null)
-  [ -z "$_tod" ] || warn_outdated "$_tod"
+  R_WAITED=0
+  _tnoted=
+  while :; do
+    if [ -n "$CFG_KEY" ]; then
+      verbose "> $_tm $(mask_url "$_turl")" "(Authorization: Bearer [redacted])"
+      _tw=$(printf 'Authorization: Bearer %s\n' "$CFG_KEY" | eval "curl $_targs -H @- $(q "$_turl")" 2>"$_terr")
+    else
+      verbose "> $_tm $(mask_url "$_turl")" "(no key)"
+      _tw=$(eval "curl $_targs $(q "$_turl")" 2>"$_terr")
+    fi
+    R_RC=$?
+    R_CODE=${_tw%% *}
+    R_URL=${_tw#* }
+    case $R_CODE in [0-9][0-9][0-9]) ;; *) R_CODE=000 ;; esac
+    R_BODY=$(cat "$_tout" 2>/dev/null)
+    R_ERR=$(cat "$_terr" 2>/dev/null)
+    verbose "< HTTP $R_CODE $(mask_url "$R_URL")"
+    _tod=$(LC_ALL=C awk -F: 'tolower($1) == "x-optimal-client-outdated" {
+      v = substr($0, index($0, ":") + 1); gsub(/^[ \t]+|[ \t\r]+$/, "", v); print v; exit }' "$_thdr" 2>/dev/null)
+    [ -z "$_tod" ] || warn_outdated "$_tod"
+    retry_wait "$_tm" || break
+    _trem=$((WAKE_TIMEOUT - R_WAITED))
+    [ "$_trem" -gt 0 ] || break
+    [ "$_rd" -le "$_trem" ] || _rd=$_trem
+    if [ -z "$_tnoted" ]; then
+      _tnoted=1
+      if [ -n "$R_WAKING" ]; then
+        err "waking the Engine at $(mask_url "$CFG_URL"); retrying for up to ${WAKE_TIMEOUT}s..."
+      else
+        err "the Engine is busy (HTTP $R_CODE); retrying for up to ${WAKE_TIMEOUT}s..."
+      fi
+    fi
+    verbose "* HTTP $R_CODE; asking again in ${_rd}s"
+    sleep "$_rd"
+    R_WAITED=$((R_WAITED + _rd))
+  done
   return 0
 }
 
@@ -680,7 +735,13 @@ call() {
   [ "$R_RC" = 0 ] || die "$EX_UNAVAILABLE" "incomplete response from $_cm $_cp: ${R_ERR:-curl exit $R_RC}"
   case $R_CODE in 2??) return 0 ;; esac
   # The error code is the Engine's text, printed in every message below: no control characters.
-  _ce=$(field_text "$R_BODY" error 2>/dev/null | mark_controls | LC_ALL=C tr '\011\012' '??') || _ce=
+  _ce=$(field_text "$R_BODY" error 2>/dev/null) || _ce=
+  # {"error": {"code": ...}} (MIOSA's proxy) names its code inside the object.
+  case $_ce in '{'*) _ce=$(field_text "$R_BODY" error.code 2>/dev/null) || _ce= ;; esac
+  _ce=$(printf '%s' "$_ce" | mark_controls | LC_ALL=C tr '\011\012' '??')
+  if [ -n "${R_WAKING:-}" ]; then
+    die "$EX_UNAVAILABLE" "the Engine at $(mask_url "$CFG_URL") is still waking after ${R_WAITED}s (HTTP 503: ENGINE_WAKING); try again shortly, or wait longer with OPTIMAL_WAKE_TIMEOUT"
+  fi
   case $R_CODE in
     401)
       if [ -z "$CFG_KEY" ]; then
@@ -1159,6 +1220,8 @@ Options
   --field <a.b>        print one field of the JSON response (strings print as text)
   --pretty | --raw     force or disable pretty JSON (default: pretty on a terminal)
   --timeout <s>        request timeout in seconds (default 120)
+                       a waking or busy Engine (503 ENGINE_WAKING, Retry-After) is asked again
+                       for up to OPTIMAL_WAKE_TIMEOUT seconds in all (default 90; 0 never waits)
   -v, --verbose        show requests and configuration sources on stderr (never the key)
   --version            print the client version
 
