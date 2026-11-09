@@ -192,6 +192,7 @@ Replication works on a PostgreSQL store with the ledger a SQLite Engine keeps, s
 - The gate reads JSON as SQLite's JSON functions do, through `oe_json_valid`, `oe_json_type`, `oe_json_extract`, `oe_json_each` and `oe_json_raw` on PostgreSQL's `json` type, which keeps a key that appears twice (`OptimalEngine.Store.Postgres.SqliteJson`).
 - The gate cache's stamp is the largest key a committed row of `sync_capture`, `sync_local_stamp` and `sync_mutations` holds; PostgreSQL's sequences move before a writer commits, so they cannot be the stamp. The local stamp triggers of the tables the gate scans have SQLite's conditions, translated by the dialect.
 - `test/sync/cross_store_apply_test.exs` applies a page a SQLite Engine served and a page a PostgreSQL Engine served, recorded on each build, and checks the rows that result; CI runs it on both builds.
+- The NATS ledger flow (`OPTIMAL_NATS_FLOWS=ledger`, `OptimalEngine.Storage.NATS.LedgerPublisher`) reads this ledger, so a PostgreSQL Engine publishes its changes, purges what it forgets and records each purge as a SQLite Engine does (`docs/guides/storage-providers.md#the-change-ledger-stream`); `test/storage/nats_ledger_test.exs` and `test/storage/nats_erasure_test.exs` run on both builds.
 - `scripts/proof-postgres-replication.sh` starts two Engines over HTTP, each on a PostgreSQL schema of its own, pairs them as each other's peer, and checks that a memory written on either reaches the other in one sync cycle, with healthy peers and no conflicts after.
 
 ### Full-Text Search

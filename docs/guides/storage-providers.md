@@ -367,7 +367,7 @@ Setting `OPTIMAL_NATS_URL` alone checks and proves the server; nothing the Engin
 
 | Flow | What runs through JetStream | Without NATS, or while it is down |
 | --- | --- | --- |
-| `ledger` | The change ledger of every workspace enabled for replication, as stream `<NAMESPACE>_LEDGER` | The ledger stays in SQLite (`sync_mutations`), as it always does; the backlog goes out when NATS is back |
+| `ledger` | The change ledger of every workspace enabled for replication, as stream `<NAMESPACE>_LEDGER` | The ledger stays in the Engine's store (`sync_mutations`, on SQLite or PostgreSQL), as it always does; the backlog goes out when NATS is back |
 | `jobs` | The dispatch of background jobs: every queued job announced on `<NAMESPACE>_JOBS`, its worker woken when it is due | Workers poll the `jobs` table as they always have; jobs queued meanwhile are announced when NATS is back |
 | `intake` | Connector pulls: each pulled Signal queued on `<NAMESPACE>_INTAKE` and ingested by the queue's consumer | The pull ingests its Signals in process, as it always has |
 
@@ -381,6 +381,7 @@ The provider's `serves` names the flows that are on (`change_ledger_stream`, `ba
 With `ledger` on, `OptimalEngine.Storage.NATS.LedgerPublisher` publishes, every second, what `GET /api/sync/changes` would serve a peer that pulls: the changes of the workspaces enabled for replication, only the tables that replicate, and never a row the data-class gate keeps home (`config :optimal_engine, :sync_serve_max_class`, default `confidential`).
 A workspace that is not enabled for replication has no ledger, and nothing of it is published.
 Storage mutation entries (`POST /api/storage/workspaces/:id/mutations`) are not changes and are not published either.
+It reads the ledger the Engine's own store keeps, so an Engine on SQLite and one on PostgreSQL (`OPTIMAL_STORE=postgres`, whose capture triggers write the same `sync_mutations`) publish the same stream, purges and tombstones included.
 
 * Stream `<NAMESPACE>_LEDGER`, file storage, limits retention, kept `OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS` (default 168, `0` keeps it forever).
 * Subject `<namespace>.ledger.<tenant>.<workspace>.<table>.<row>`, one per row, each id made a subject token: bytes other than letters, digits, `_` and `-` are percent-encoded (`default:notes` is `default%3Anotes`).
@@ -830,7 +831,7 @@ The scripts need a standalone Valkey (or Redis 7 or later); Valkey Cluster is no
 
 ## What Is Not Implemented
 
-The Engine has no adapter for Fractal, and the provider inventory says so; NATS JetStream, Qdrant and OpenBao are reached and proved, but no Engine feature is served from them yet; DuckDB serves the workspace analytics export and query, and nothing else.
+The Engine has no adapter for Fractal, and the provider inventory says so; Qdrant is reached and proved, but no Engine feature is served from it yet; NATS JetStream carries the flows named in `OPTIMAL_NATS_FLOWS` (the change ledger, background jobs, connector intake) on either canonical store; OpenBao serves secret references and backup key wrapping; DuckDB serves the workspace analytics export and query, and nothing else.
 Valkey carries the rate limits and caches listed under [Valkey](#valkey) and nothing durable.
 PostgreSQL holds the canonical relational store with every feature of the SQLite store, and an existing Engine's data moves to it with `mix optimal.postgres.migrate` (stage 4 of [PostgreSQL Provider](postgres-provider.md)).
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.

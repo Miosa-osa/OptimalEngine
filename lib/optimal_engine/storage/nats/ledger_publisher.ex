@@ -11,7 +11,9 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   the tables that replicate, and never a row the data-class gate keeps home
   (`config :optimal_engine, :sync_serve_max_class`, default `confidential`).
   A workspace that is not enabled for replication has no ledger, and nothing
-  of it is published.
+  of it is published. The ledger is the one the Engine's store keeps, SQLite
+  or PostgreSQL (`OptimalEngine.Sync.Postgres` captures the same changes), so
+  both publish the same stream.
 
   ## Where it goes
 
@@ -230,8 +232,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   def handle_call({:forget_workspace, tenant, ws, reason}, _from, state) do
     id = request_purge(state.namespace, tenant, ws, reason)
 
-    with :ok <- sqlite(),
-         {:ok, state} <- provision(state) do
+    with {:ok, state} <- provision(state) do
       {done, state} = process_requests(state)
 
       case Map.fetch(done, id) do
@@ -255,8 +256,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
        subjects: if(state.enabled, do: "#{state.namespace}.ledger.>"),
        published: state.published,
        messages_purged: state.purged,
-       purges_pending:
-         if(state.enabled and sqlite() == :ok, do: length(pending_requests(state)), else: 0),
+       purges_pending: if(state.enabled, do: length(pending_requests(state)), else: 0),
        last_published_at: state.last_published_at,
        last_error: state.last_error,
        workspaces: if(state.enabled, do: backlogs(state), else: [])
@@ -281,8 +281,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   # ---------------------------------------------------------------------------
 
   defp pass(state, only) do
-    with :ok <- sqlite(),
-         {:ok, state} <- provision(state) do
+    with {:ok, state} <- provision(state) do
       {done, state} = process_requests(state)
       requested = done |> Map.values() |> Enum.sum()
 
@@ -328,10 +327,6 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   end
 
   defp add(a, b), do: Map.merge(a, b, fn _key, x, y -> x + y end)
-
-  defp sqlite do
-    if Store.selected?(OptimalEngine.Store.SQLite), do: :ok, else: {:error, :unsupported_store}
-  end
 
   # The stream is made sure of once per connection; a new connection may be to
   # a server that lost it, so where each workspace stands is read again.
@@ -658,22 +653,18 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
 
   # Sealed first, so a write the triggers captured counts before a pass ran.
   defp backlogs(state) do
-    if sqlite() == :ok do
-      {:ok, _} = OptimalEngine.Sync.Capture.seal()
+    {:ok, _} = OptimalEngine.Sync.Capture.seal()
 
-      for {tenant, ws} = workspace <- workspaces(state, nil) do
-        through = Map.get(state.cursors, workspace)
+    for {tenant, ws} = workspace <- workspaces(state, nil) do
+      through = Map.get(state.cursors, workspace)
 
-        {:ok, [[backlog]]} =
-          Store.raw_query(
-            "SELECT COUNT(*) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3",
-            [tenant, ws, through || 0]
-          )
+      {:ok, [[backlog]]} =
+        Store.raw_query(
+          "SELECT COUNT(*) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3",
+          [tenant, ws, through || 0]
+        )
 
-        %{tenant_id: tenant, workspace_id: ws, published_through: through, backlog: backlog}
-      end
-    else
-      []
+      %{tenant_id: tenant, workspace_id: ws, published_through: through, backlog: backlog}
     end
   end
 

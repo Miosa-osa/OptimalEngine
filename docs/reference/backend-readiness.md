@@ -33,7 +33,6 @@ It is not yet complete for:
 
 ```text
 full enterprise deployment
-full Postgres runtime (the Postgres build refuses replication)
 rich human review UI
 full FTS/vector/graph/temporal retrieval planner
 real provider-specific connector downloads for every adapter

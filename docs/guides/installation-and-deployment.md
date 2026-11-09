@@ -28,8 +28,8 @@ Providers are things a deployment grows onto, not the default shape:
 | Provider | Status | Use |
 | --- | --- | --- |
 | S3-compatible storage (Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Assets and offsite backups |
-| PostgreSQL | Wired but partial: an `OPTIMAL_STORE=postgres` Engine that refuses replication | The canonical relational store for engines that share one database |
-| NATS JetStream | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS`, each sent after the Engine stored it in SQLite; nothing without them |
+| PostgreSQL | Wired: an `OPTIMAL_STORE=postgres` Engine, replication and the NATS flows included | The canonical relational store for engines that share one database |
+| NATS JetStream | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS`, each sent after the Engine stored it in its store (SQLite or PostgreSQL); nothing without them |
 | Valkey | Adapter, health-checked and proved, in the data path | Shared rate limits, the verified API key cache and the sync gate cache, with ETS as the fallback ([Valkey](storage-providers.md#valkey)) |
 | Qdrant | Adapter, health-checked and proved | Nothing yet: no Engine feature reads or writes it |
 | DuckDB and Parquet | Wired | Each workspace's metrics, sync runs, ledger and usage as Parquet under `OPTIMAL_ANALYTICS_PATH`, and the read-only analytics query |
