@@ -144,8 +144,8 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
           true -> "starting"
         end,
       consumer_pid: nil,
-      # Background publishes that did not get through, newest first.
-      unsent: [],
+      # Background publishes that did not get through, oldest first.
+      unsent: :queue.new(),
       unsent_count: 0,
       counts: %{
         published: 0,
@@ -195,8 +195,20 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
 
   def handle_cast({:publish, token, payload, msg_id}, state) do
     case handle_publish(token, payload, msg_id, state) do
-      {{:ok, _ack}, state} -> {:noreply, state}
-      {{:error, _reason}, state} -> {:noreply, keep_unsent(state, {token, payload, msg_id})}
+      {{:ok, _ack}, state} ->
+        {:noreply, state}
+
+      {{:error, reason}, state} ->
+        if permanent?(reason) do
+          # Sending it again on every reconnect would fail the same way.
+          Logger.warning(
+            "[NATS] #{state.callback.flow()} message #{msg_id} dropped, the server refuses it: #{inspect(reason)}"
+          )
+
+          {:noreply, bump(state, :failed, 1)}
+        else
+          {:noreply, keep_unsent(state, {token, payload, msg_id})}
+        end
     end
   end
 
@@ -224,8 +236,14 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
            ) do
       {{:ok, ack}, bump(state, :published, if(ack.duplicate, do: 0, else: 1))}
     else
-      {:error, reason, state} -> {{:error, reason}, state}
-      {:error, reason} -> {{:error, reason}, unavailable(state, reason)}
+      {:error, reason, state} ->
+        {{:error, reason}, state}
+
+      # One message the server refuses says nothing about the queue.
+      {:error, reason} ->
+        if permanent?(reason),
+          do: {{:error, reason}, state},
+          else: {{:error, reason}, unavailable(state, reason)}
     end
   end
 
@@ -298,14 +316,28 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
     :ok
   end
 
-  defp keep_unsent(%{unsent_count: count} = state, message) when count >= @max_unsent,
-    do: %{state | unsent: [message | Enum.take(state.unsent, @max_unsent - 1)]}
+  @doc false
+  # At the cap the oldest goes: the reconnect sweep, oldest first, is the more
+  # likely to reach it. A queue, so a failed publish at the cap costs O(1).
+  def keep_unsent(%{unsent_count: count} = state, message) when count >= @max_unsent do
+    {_oldest, rest} = :queue.out(state.unsent)
+    %{state | unsent: :queue.in(message, rest)}
+  end
 
-  defp keep_unsent(state, message),
-    do: %{state | unsent: [message | state.unsent], unsent_count: state.unsent_count + 1}
+  def keep_unsent(state, message),
+    do: %{state | unsent: :queue.in(message, state.unsent), unsent_count: state.unsent_count + 1}
 
   defp take_unsent(state),
-    do: {Enum.reverse(state.unsent), %{state | unsent: [], unsent_count: 0}}
+    do: {:queue.to_list(state.unsent), %{state | unsent: :queue.new(), unsent_count: 0}}
+
+  @doc false
+  # A failure that sending the same message again cannot fix: the message is
+  # larger than the server takes, or the stream refused the message itself
+  # (a JetStream 400). Not connected, a timeout, no responders (the stream
+  # missing, made again on the next provision) and the rest are kept.
+  def permanent?({:payload_too_large, _size, _max}), do: true
+  def permanent?({:jetstream, %{code: 400}}), do: true
+  def permanent?(_reason), do: false
 
   defp setup(state) do
     %{

@@ -65,7 +65,7 @@ defmodule OptimalEngine.Storage.NATS.Connection do
   The connection's state for an operator: `state` (`connected`,
   `connecting`, `disconnected`, `not_configured`, or `down` when the process
   is not running), `reconnects` (connections lost since start),
-  `last_error`, `connected_since`, `server` (`version`, `jetstream`) and
+  `last_error`, `connected_since`, `server` (`version`, `jetstream`, `max_payload`) and
   `pending` (requests waiting on an answer).
   """
   @spec status(server()) :: map()
@@ -116,6 +116,21 @@ defmodule OptimalEngine.Storage.NATS.Connection do
   def pull(server, subject, body, batch, timeout) do
     call(server, {:pull, subject, body, batch, timeout}, timeout)
   end
+
+  # The server closes a connection that sends more than its max_payload
+  # (headers and payload together), which would drop every request on it and
+  # meet the same message after the reconnect: such a message is refused here.
+  defp fits(%{server: %{max_payload: max}}, payload, headers) when is_integer(max) do
+    size =
+      IO.iodata_length(payload) +
+        Enum.reduce(headers, 12, fn {k, v}, acc ->
+          acc + byte_size(to_string(k)) + byte_size(to_string(v)) + 4
+        end)
+
+    if size > max, do: {:error, {:payload_too_large, size, max}}, else: :ok
+  end
+
+  defp fits(_state, _payload, _headers), do: :ok
 
   defp call(server, message, timeout) do
     GenServer.call(server, message, timeout + 1_000)
@@ -206,10 +221,13 @@ defmodule OptimalEngine.Storage.NATS.Connection do
   def handle_call({:request, subject, payload, headers, timeout}, from, state) do
     reply = state.inbox <> "." <> random()
 
-    case write(state, Protocol.pub(subject, reply, payload, headers)) do
-      :ok ->
-        timer = Process.send_after(self(), {:request_timeout, reply}, timeout)
-        {:noreply, put_in(state, [:requests, reply], {from, timer})}
+    with :ok <- fits(state, payload, headers),
+         :ok <- write(state, Protocol.pub(subject, reply, payload, headers)) do
+      timer = Process.send_after(self(), {:request_timeout, reply}, timeout)
+      {:noreply, put_in(state, [:requests, reply], {from, timer})}
+    else
+      {:error, {:payload_too_large, _size, _max} = reason} ->
+        {:reply, {:error, reason}, state}
 
       {:error, reason} ->
         {:reply, {:error, :not_connected}, lost(state, reason)}
@@ -380,7 +398,11 @@ defmodule OptimalEngine.Storage.NATS.Connection do
             inbox: "_INBOX." <> random(),
             connected_since:
               DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
-            server: %{version: info["version"], jetstream: info["jetstream"] == true},
+            server: %{
+              version: info["version"],
+              jetstream: info["jetstream"] == true,
+              max_payload: info["max_payload"]
+            },
             pings_out: 0
         }
 

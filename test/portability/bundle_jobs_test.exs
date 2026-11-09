@@ -63,7 +63,14 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
         [tenant, Jason.encode!(BundleJobs.kinds())]
       )
 
-    for [id] <- rows, do: {:ok, _view, :cancelled} = BundleJobs.cancel(tenant, id)
+    # A job claimed in between is cancelled when it reaches its next check
+    # (`:requested`), or is finished already.
+    for [id] <- rows do
+      case BundleJobs.cancel(tenant, id) do
+        {:ok, _view, state} when state in [:cancelled, :requested] -> :ok
+        {:error, :job_finished, _view} -> :ok
+      end
+    end
   end
 
   defp context(tenant, workspace, id) do

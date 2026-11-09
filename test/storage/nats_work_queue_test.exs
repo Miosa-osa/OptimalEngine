@@ -16,7 +16,7 @@ defmodule OptimalEngine.Storage.NATSWorkQueueTest do
 
   alias OptimalEngine.{Jobs, Signal, Store, Workspace}
   alias OptimalEngine.Connectors.PullScheduler
-  alias OptimalEngine.Storage.NATS.{Connection, IntakeQueue, JobQueue}
+  alias OptimalEngine.Storage.NATS.{Connection, IntakeQueue, JobQueue, WorkQueue}
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.TestSupport.NATSStub
 
@@ -272,6 +272,9 @@ defmodule OptimalEngine.Storage.NATSWorkQueueTest do
           older.id
         ])
 
+      # Dated 2000, it would head every later sweep of the shared database.
+      on_exit(fn -> Store.raw_query("DELETE FROM jobs WHERE id = ?1", [older.id]) end)
+
       port = ctx.stub.port
       NATSStub.stop(ctx.stub)
       assert wait_for(fn -> not Connection.connected?(ctx.conn) end)
@@ -294,6 +297,41 @@ defmodule OptimalEngine.Storage.NATSWorkQueueTest do
 
       assert [first | _] = NATSStub.messages(back, "OPTIMAL_JOBS")
       assert first.headers["Nats-Msg-Id"] == job.id
+    end
+
+    test "a message the server refuses for its size is dropped with a log line, not kept for the next connection",
+         ctx do
+      kind = "natsbig.#{ctx.n}"
+      queue = job_queue(ctx, %{})
+      assert {:ok, _} = JobQueue.drain_now(queue)
+
+      # Past the stub's max_payload (1 MiB): the connection refuses it before
+      # it reaches the server, which would close the connection over it.
+      big = String.duplicate("x", 1_100_000)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          :ok = WorkQueue.publish_async(queue, kind, big, "big-#{ctx.n}")
+          assert wait_for(fn -> JobQueue.status(queue).failed == 1 end)
+        end)
+
+      assert log =~ "big-#{ctx.n} dropped"
+      assert Connection.connected?(ctx.conn)
+      assert :sys.get_state(queue).unsent_count == 0
+    end
+
+    test "the background publishes kept while NATS is down are capped, oldest dropped first" do
+      state = %{unsent: :queue.new(), unsent_count: 0}
+
+      state =
+        Enum.reduce(1..10_005, state, fn i, state ->
+          WorkQueue.keep_unsent(state, {"t", "p", "id-#{i}"})
+        end)
+
+      ids = state.unsent |> :queue.to_list() |> Enum.map(&elem(&1, 2))
+      assert length(ids) == 10_000
+      assert hd(ids) == "id-6"
+      assert List.last(ids) == "id-10005"
     end
 
     test "Jobs.enqueue announces to the Engine's queue, and an enqueue with the flow off still works",
