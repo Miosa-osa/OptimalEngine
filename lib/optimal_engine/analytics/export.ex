@@ -9,7 +9,8 @@ defmodule OptimalEngine.Analytics.Export do
   DuckDB (`COPY ... TO ... (FORMAT PARQUET)`), locked to that staging
   directory. Only when every dataset converted are the files moved into place,
   each by a rename, and the manifest rewritten; a failed export leaves the
-  previous files as they were and removes its staging directory.
+  previous files as they were and removes its staging directory. DuckDB spills
+  what does not fit in its memory limit into the staging directory too.
 
   The export always starts again from the store, so it is safe to run at any
   time and twice in a row. It runs as the `analytics_export` analysis
@@ -25,6 +26,9 @@ defmodule OptimalEngine.Analytics.Export do
 
   @page 5_000
   @convert_timeout 120_000
+  # An export queues for a duckdb slot (OptimalEngine.Analytics.Slots) rather
+  # than failing while a query or another export holds it.
+  @slot_wait 300_000
 
   # What each dataset's NDJSON holds, as DuckDB reads it, and how the rows
   # become the Parquet file.
@@ -114,13 +118,15 @@ defmodule OptimalEngine.Analytics.Export do
     with :ok <- write_rows(dataset, tenant_id, workspace_id, local, ndjson),
          {:ok, _} <-
            Analytics.run_locked(config, staging, convert(dataset, ndjson, parquet),
-             timeout: @convert_timeout
+             timeout: @convert_timeout,
+             wait: @slot_wait
            ),
          {:ok, [%{"n" => rows}]} <-
            Analytics.run_locked(
              config,
              staging,
-             "SELECT count(*) AS n FROM read_parquet(#{Analytics.literal(parquet)})"
+             "SELECT count(*) AS n FROM read_parquet(#{Analytics.literal(parquet)})",
+             wait: @slot_wait
            ) do
       {:ok, rows}
     else

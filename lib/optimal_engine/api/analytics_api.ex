@@ -14,28 +14,43 @@ defmodule OptimalEngine.API.AnalyticsAPI do
 
   | Status | Body |
   | --- | --- |
-  | 400 | `{"error": "invalid_parameter", "parameter", "expected"}` |
+  | 400 | `{"error": "invalid_parameter", "parameter", "expected"}`, also for a `workspace` given as a list or map |
   | 404 | `{"error": "not_exported"}`: no export has written the dataset yet |
-  | 503 | `{"error": "analytics_not_configured"}` without `OPTIMAL_ANALYTICS_PATH`; `{"error": "analytics_unavailable"}` without the `duckdb` executable or when it failed |
+  | 503 | `{"error": "analytics_not_configured"}` without `OPTIMAL_ANALYTICS_PATH`; `{"error": "analytics_unavailable"}` without the `duckdb` executable or when it failed; `{"error": "analytics_busy"}` with `Retry-After: 5` when `OPTIMAL_ANALYTICS_MAX_PROCESSES` duckdb processes are already running |
   """
 
   import Plug.Conn
 
   require Logger
 
+  @retry_after "5"
+
   alias OptimalEngine.Analytics
 
   @doc "`GET /api/analytics`: what the workspace's analytics hold."
   def status(conn) do
     conn = fetch_query_params(conn)
-    json(conn, 200, Map.put(Analytics.status(workspace(conn)), :workspace, workspace(conn)))
+
+    case workspace(conn) do
+      {:ok, workspace} ->
+        json(conn, 200, Map.put(Analytics.status(workspace), :workspace, workspace))
+
+      :invalid ->
+        invalid_workspace(conn)
+    end
   end
 
   @doc "`GET /api/analytics/query`: one dataset's question, answered."
   def query(conn) do
     conn = fetch_query_params(conn)
-    workspace = workspace(conn)
 
+    case workspace(conn) do
+      {:ok, workspace} -> answer(conn, workspace)
+      :invalid -> invalid_workspace(conn)
+    end
+  end
+
+  defp answer(conn, workspace) do
     case Analytics.query(workspace, conn.query_params) do
       {:ok, answer} ->
         json(conn, 200, Map.put(answer, :workspace, workspace))
@@ -52,6 +67,15 @@ defmodule OptimalEngine.API.AnalyticsAPI do
       {:error, :not_configured} ->
         json(conn, 503, %{error: "analytics_not_configured"})
 
+      {:error, :busy} ->
+        conn
+        |> put_resp_header("retry-after", @retry_after)
+        |> json(503, %{
+          error: "analytics_busy",
+          hint:
+            "every duckdb process allowed (OPTIMAL_ANALYTICS_MAX_PROCESSES) is running; retry shortly"
+        })
+
       {:error, :not_installed} ->
         json(conn, 503, %{error: "analytics_unavailable", reason: "duckdb is not installed"})
 
@@ -62,8 +86,23 @@ defmodule OptimalEngine.API.AnalyticsAPI do
     end
   end
 
-  defp workspace(conn),
-    do: conn.query_params["workspace"] || conn.assigns[:workspace_id] || "default"
+  # One workspace id. `workspace[]=` or `workspace[k]=` arrive as a list or a
+  # map, which no check upstream reads as a workspace, so they are refused here.
+  defp workspace(conn) do
+    case conn.query_params["workspace"] do
+      nil -> {:ok, conn.assigns[:workspace_id] || "default"}
+      id when is_binary(id) -> if Analytics.workspace_id?(id), do: {:ok, id}, else: :invalid
+      _list_or_map -> :invalid
+    end
+  end
+
+  defp invalid_workspace(conn) do
+    json(conn, 400, %{
+      error: "invalid_parameter",
+      parameter: "workspace",
+      expected: "one workspace id"
+    })
+  end
 
   defp json(conn, status, data) do
     conn

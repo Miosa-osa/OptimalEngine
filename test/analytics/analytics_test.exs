@@ -15,9 +15,9 @@ defmodule OptimalEngine.AnalyticsTest do
   import Plug.Test
   import Plug.Conn
 
-  alias OptimalEngine.{Analyses, Analytics, Jobs, Store}
-  alias OptimalEngine.Analytics.Export
-  alias OptimalEngine.API.Router
+  alias OptimalEngine.{Analyses, Analytics, Jobs, Store, Workspace}
+  alias OptimalEngine.Analytics.{Export, Slots}
+  alias OptimalEngine.API.{AnalyticsAPI, Router}
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.Storage.DuckDB
   alias OptimalEngine.Tenancy.Tenant
@@ -236,6 +236,32 @@ defmodule OptimalEngine.AnalyticsTest do
       assert sql =~ "LIMIT 10"
     end
 
+    test "every statement spills to a temp directory inside the directory it is locked to",
+         ctx do
+      {:ok, _} = Analytics.query(ctx.workspace, %{"dataset" => "usage"})
+      dir = Analytics.workspace_dir(ctx.root, ctx.workspace)
+      [sql] = lines(ctx.log)
+
+      assert [_, temp] = Regex.run(~r/SET temp_directory = '([^']+)'/, sql)
+      assert String.starts_with?(temp, dir <> "/~duckdb-tmp-")
+
+      # Set while external access is still on, so DuckDB takes it, and locked with the rest.
+      [before_lock, _] = String.split(sql, "SET enable_external_access = false", parts: 2)
+      assert before_lock =~ "SET temp_directory"
+
+      # The spill directory goes with the statement.
+      refute dir |> File.ls!() |> Enum.any?(&String.starts_with?(&1, "~duckdb-tmp-"))
+
+      # An export spills inside its staging directory, which it removes.
+      File.write!(ctx.log, "")
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+
+      for sql <- lines(ctx.log) do
+        assert [_, temp] = Regex.run(~r/SET temp_directory = '([^']+)'/, sql)
+        assert temp =~ ~r{^#{Regex.escape(dir)}/\.staging-[0-9a-f]+/~duckdb-tmp-}
+      end
+    end
+
     test "every dataset has its question", ctx do
       for dataset <- Analytics.datasets() do
         assert {:ok, %{rows: []}} = Analytics.query(ctx.workspace, %{"dataset" => dataset}),
@@ -389,6 +415,72 @@ defmodule OptimalEngine.AnalyticsTest do
       end)
     end
 
+    test "a workspace given as a list or a map is a 400, not a crash", ctx do
+      paths = [
+        "/api/analytics/query?workspace[]=#{ctx.workspace}&dataset=usage",
+        "/api/analytics/query?workspace[]=#{ctx.workspace}&workspace[]=#{ctx.other}&dataset=usage",
+        "/api/analytics?workspace[]=#{ctx.workspace}",
+        "/api/analytics/query?workspace[a]=#{ctx.workspace}&dataset=usage"
+      ]
+
+      for path <- paths, key <- [nil, ctx.admin] do
+        assert {400, body} = call(:get, path, key), path
+        assert body["error"] in ["invalid workspace", "invalid_parameter"], path
+      end
+
+      with_auth_required(fn ->
+        for path <- paths, key <- [ctx.reader, ctx.admin] do
+          assert {status, _} = call(:get, path, key), path
+          assert status in [400, 403], path
+        end
+      end)
+
+      # The handler refuses one too, whatever runs before it.
+      for {route, params} <- [
+            {&AnalyticsAPI.query/1, %{"workspace" => [ctx.workspace], "dataset" => "usage"}},
+            {&AnalyticsAPI.status/1, %{"workspace" => %{"a" => ctx.workspace}}}
+          ] do
+        conn = %{conn(:get, "/api/analytics") | query_params: params} |> route.()
+
+        assert {400, %{"error" => "invalid_parameter", "parameter" => "workspace"}} =
+                 {conn.status, Jason.decode!(conn.resp_body)}
+      end
+
+      assert {400, %{"error" => "invalid_parameter", "parameter" => "limit"}} =
+               call(
+                 :get,
+                 "/api/analytics/query?workspace=#{ctx.workspace}&dataset=usage&limit[]=5",
+                 ctx.admin
+               )
+    end
+
+    test "a query past the cap on DuckDB processes is a 503 with Retry-After", ctx do
+      System.put_env("OPTIMAL_ANALYTICS_MAX_PROCESSES", "1")
+      holder = hold_slot()
+
+      try do
+        conn =
+          conn(:get, "/api/analytics/query?workspace=#{ctx.workspace}&dataset=usage")
+          |> put_req_header("authorization", "Bearer " <> ctx.admin)
+          |> Router.call(Router.init([]))
+
+        assert conn.status == 503
+        assert %{"error" => "analytics_busy"} = Jason.decode!(conn.resp_body)
+        assert [retry] = get_resp_header(conn, "retry-after")
+        assert String.to_integer(retry) > 0
+      after
+        release_slot(holder)
+        System.delete_env("OPTIMAL_ANALYTICS_MAX_PROCESSES")
+      end
+
+      assert {200, _} =
+               call(
+                 :get,
+                 "/api/analytics/query?workspace=#{ctx.workspace}&dataset=usage",
+                 ctx.admin
+               )
+    end
+
     test "GET /api/analytics reports the datasets and when they were exported", ctx do
       with_auth_required(fn ->
         assert {200, body} = call(:get, "/api/analytics?workspace=#{ctx.workspace}", ctx.reader)
@@ -420,6 +512,129 @@ defmodule OptimalEngine.AnalyticsTest do
         assert report["status"] == "ok"
         assert report["report"]["datasets"]["metrics"]["rows"] == 1
       end)
+    end
+  end
+
+  describe "the provider inventory" do
+    test "says DuckDB serves the workspace analytics while the path is set", _ctx do
+      assert {:ok, duckdb} = OptimalEngine.Storage.Providers.get("duckdb")
+      assert duckdb.serves == ["workspace_analytics"]
+      assert duckdb.data_path == "serving"
+
+      System.delete_env(DuckDB.env_name())
+      assert {:ok, %{data_path: "standby"}} = OptimalEngine.Storage.Providers.get("duckdb")
+    end
+  end
+
+  describe "the cap on DuckDB processes" do
+    setup do
+      on_exit(fn -> System.delete_env("OPTIMAL_ANALYTICS_MAX_PROCESSES") end)
+      :ok
+    end
+
+    test "defaults to one process, for a 1 GiB guest, and reads OPTIMAL_ANALYTICS_MAX_PROCESSES" do
+      System.delete_env("OPTIMAL_ANALYTICS_MAX_PROCESSES")
+      assert Slots.limit() == 1
+      System.put_env("OPTIMAL_ANALYTICS_MAX_PROCESSES", "3")
+      assert Slots.limit() == 3
+
+      for bad <- ["0", "-1", "many", ""] do
+        System.put_env("OPTIMAL_ANALYTICS_MAX_PROCESSES", bad)
+        assert Slots.limit() == 1, bad
+      end
+    end
+
+    test "a query beyond the cap is refused at once, and never starts duckdb", ctx do
+      seed(ctx, ctx.workspace, "mine")
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+      File.write!(ctx.log, "")
+      System.put_env("OPTIMAL_ANALYTICS_MAX_PROCESSES", "1")
+      holder = hold_slot()
+
+      assert {:error, :busy} = Analytics.query(ctx.workspace, %{"dataset" => "usage"})
+      assert lines(ctx.log) == []
+
+      release_slot(holder)
+      assert {:ok, _} = Analytics.query(ctx.workspace, %{"dataset" => "usage"})
+    end
+
+    test "a slot whose holder died is free again", ctx do
+      seed(ctx, ctx.workspace, "mine")
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+      System.put_env("OPTIMAL_ANALYTICS_MAX_PROCESSES", "1")
+      holder = hold_slot()
+      ref = Process.monitor(holder)
+      Process.exit(holder, :kill)
+      assert_receive {:DOWN, ^ref, :process, _, _}
+
+      assert eventually(fn ->
+               match?({:ok, _}, Analytics.query(ctx.workspace, %{"dataset" => "usage"}))
+             end)
+    end
+
+    test "an export waits for a slot instead of failing", ctx do
+      seed(ctx, ctx.workspace, "mine")
+      System.put_env("OPTIMAL_ANALYTICS_MAX_PROCESSES", "1")
+      holder = hold_slot()
+      export = Task.async(fn -> Export.run(ctx.tenant, ctx.workspace) end)
+      refute Task.yield(export, 300)
+      release_slot(holder)
+      assert {:ok, %{datasets: %{"metrics" => %{rows: 1}}}} = Task.await(export, 10_000)
+    end
+  end
+
+  describe "archiving a workspace" do
+    test "removes its analytics directory, and no other workspace's", ctx do
+      seed(ctx, ctx.workspace, "mine")
+      seed(ctx, ctx.other, "theirs")
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+      {:ok, _} = Export.run(ctx.tenant, ctx.other)
+      dir = Analytics.workspace_dir(ctx.root, ctx.workspace)
+      other_dir = Analytics.workspace_dir(ctx.root, ctx.other)
+      assert File.dir?(dir)
+
+      assert :ok = Workspace.archive(ctx.workspace)
+
+      refute File.exists?(dir)
+      assert File.exists?(Path.join(other_dir, "metrics.parquet"))
+    end
+
+    test "is not held up by analytics that are not configured", ctx do
+      System.delete_env(DuckDB.env_name())
+      assert :ok = Workspace.archive(ctx.workspace)
+    end
+  end
+
+  # A process that holds one DuckDB slot until told to let it go.
+  defp hold_slot do
+    test = self()
+
+    pid =
+      spawn(fn ->
+        :ok = Slots.acquire(0)
+        send(test, {:holding, self()})
+
+        receive do
+          :release -> Slots.release()
+        end
+
+        send(test, {:released, self()})
+      end)
+
+    assert_receive {:holding, ^pid}, 1_000
+    pid
+  end
+
+  defp release_slot(pid) do
+    send(pid, :release)
+    assert_receive {:released, ^pid}, 1_000
+  end
+
+  defp eventually(fun, tries \\ 50) do
+    cond do
+      fun.() -> true
+      tries == 0 -> false
+      true -> Process.sleep(20) && eventually(fun, tries - 1)
     end
   end
 

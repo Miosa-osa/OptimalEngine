@@ -151,12 +151,28 @@ defmodule OptimalEngine.AnalyticsDuckDBTest do
           "SELECT * FROM read_text('/etc/passwd')",
           "COPY (SELECT 1) TO #{Analytics.literal(Path.join(ctx.root, "written.csv"))}",
           "SET enable_external_access = true",
-          "INSTALL httpfs"
+          "SET temp_directory = '/tmp'",
+          "INSTALL httpfs",
+          "LOAD httpfs",
+          "SELECT * FROM read_csv('https://example.com/x.csv')"
         ] do
       assert {:error, {:exit, _, _}} = Analytics.run_locked(config, dir, sql), sql
     end
 
     refute File.exists?(Path.join(ctx.root, "written.csv"))
+
+    # A spill goes to a directory inside the one the statement is locked to,
+    # under the memory limit, and the directory goes with the statement.
+    assert {:ok, [%{"temp" => temp, "memory" => memory}]} =
+             Analytics.run_locked(
+               config,
+               dir,
+               "SELECT current_setting('temp_directory') AS temp, current_setting('memory_limit') AS memory"
+             )
+
+    assert String.starts_with?(temp, dir <> "/~duckdb-tmp-")
+    assert memory =~ ~r/^(488\.2 MiB|512\.0 MB|512MB)$/
+    refute File.exists?(temp)
 
     # Inside it the workspace's own files are read.
     assert {:ok, [%{"n" => 3}]} =

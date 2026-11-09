@@ -19,11 +19,15 @@ defmodule OptimalEngine.Analytics do
 
   `query/2` answers one fixed question per dataset, parameterized and
   validated (`questions/0`); callers never send SQL. DuckDB runs every
-  statement locked (`lockdown/1`): external access off, the only readable
+  statement locked (`lockdown/2`): external access off, the only readable
   directory the workspace's own, extension loading off, the configuration
-  locked so the statement cannot undo it, memory and threads bounded.
+  locked so the statement cannot undo it, memory and threads bounded, and a
+  spill directory inside the workspace's own. At most
+  `OPTIMAL_ANALYTICS_MAX_PROCESSES` duckdb processes run at once
+  (`OptimalEngine.Analytics.Slots`).
   """
 
+  alias OptimalEngine.Analytics.Slots
   alias OptimalEngine.Storage.DuckDB
 
   @datasets ~w(metrics sync_runs ledger usage)
@@ -32,6 +36,7 @@ defmodule OptimalEngine.Analytics do
   @max_limit 1_000
   @query_timeout 15_000
   @manifest "manifest.json"
+  @memory_limit "512MB"
 
   # The column each dataset's question buckets by.
   @time_column %{
@@ -96,8 +101,7 @@ defmodule OptimalEngine.Analytics do
   """
   @spec workspace_dir(Path.t(), String.t()) :: Path.t()
   def workspace_dir(root, workspace_id) do
-    unless is_binary(workspace_id) and Regex.match?(@workspace_id, workspace_id) and
-             not String.contains?(workspace_id, "..") do
+    unless workspace_id?(workspace_id) do
       raise ArgumentError, "not a workspace id: #{inspect(workspace_id)}"
     end
 
@@ -142,7 +146,8 @@ defmodule OptimalEngine.Analytics do
   #{@max_limit}) and the dataset's filters.
 
   Errors: `{:invalid_parameter, name, why}`, `:not_configured`,
-  `:not_installed`, `:not_exported` (no export has written the file yet), or
+  `:not_installed`, `:not_exported` (no export has written the file yet),
+  `:busy` (every duckdb slot is taken, `OptimalEngine.Analytics.Slots`), or
   what DuckDB reported.
   """
   @spec query(String.t(), map()) :: {:ok, map()} | {:error, term()}
@@ -170,18 +175,21 @@ defmodule OptimalEngine.Analytics do
   The statements that lock a DuckDB process to `dir` before a statement of
   ours runs. External access off with `dir` the only allowed directory, so no
   other file is read or written; autoloading and installing extensions off;
-  memory and threads bounded; and the configuration locked, so nothing after
-  it can turn any of this back on.
+  memory and threads bounded, with what does not fit in memory spilled to
+  `temp` (a directory inside `dir`, set while external access is still on,
+  as DuckDB requires); and the configuration locked, so nothing after it can
+  turn any of this back on.
   """
-  @spec lockdown(Path.t()) :: String.t()
-  def lockdown(dir) do
+  @spec lockdown(Path.t(), Path.t()) :: String.t()
+  def lockdown(dir, temp) do
     Enum.map_join(
       [
         "SET autoinstall_known_extensions = false",
         "SET autoload_known_extensions = false",
         "SET allowed_directories = [#{literal(Path.expand(dir) <> "/")}]",
+        "SET temp_directory = #{literal(temp)}",
         "SET enable_external_access = false",
-        "SET memory_limit = '512MB'",
+        "SET memory_limit = '#{@memory_limit}'",
         "SET threads = 2",
         "SET lock_configuration = true"
       ],
@@ -191,12 +199,57 @@ defmodule OptimalEngine.Analytics do
   end
 
   @doc false
-  # One statement of ours, run after the lockdown on `dir`.
+  # One statement of ours, run after the lockdown on `dir`, holding one of the
+  # capped duckdb slots (`OptimalEngine.Analytics.Slots`): `:wait` is how long
+  # to queue for one (0, the default, refuses at once with `:busy`). The
+  # statement spills into a fresh directory inside `dir`, removed after it.
+  # Its name starts with `~` so it sorts after every file DuckDB is asked
+  # for: DuckDB 1.3 checks a path only against the allowed directory sorted
+  # just before it, so a spill directory such as `dir/duckdb-tmp` would hide
+  # `dir/metrics.parquet` and refuse it.
   @spec run_locked(map(), Path.t(), String.t(), keyword()) :: {:ok, list()} | {:error, term()}
   def run_locked(config, dir, sql, opts \\ []) do
-    if config.executable == nil,
-      do: {:error, :not_installed},
-      else: DuckDB.query(config, lockdown(dir) <> sql, opts)
+    if config.executable == nil do
+      {:error, :not_installed}
+    else
+      Slots.run(Keyword.get(opts, :wait, 0), fn ->
+        temp =
+          Path.join(
+            Path.expand(dir),
+            "~duckdb-tmp-" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
+          )
+
+        try do
+          DuckDB.query(config, lockdown(dir, temp) <> sql, Keyword.delete(opts, :wait))
+        after
+          File.rm_rf(temp)
+        end
+      end)
+    end
+  end
+
+  @doc """
+  Removes a workspace's analytics files, for a workspace that is archived or
+  whose rows moved to another id. Nothing configured, or an id that is not a
+  workspace identifier, has nothing to remove.
+  """
+  @spec purge_workspace(String.t()) :: :ok | {:error, term()}
+  def purge_workspace(workspace_id) do
+    with {:ok, config} <- DuckDB.config(),
+         true <- workspace_id?(workspace_id) do
+      case File.rm_rf(workspace_dir(config.path, workspace_id)) do
+        {:ok, _} -> :ok
+        {:error, reason, _file} -> {:error, {:analytics_purge_failed, reason}}
+      end
+    else
+      _nothing -> :ok
+    end
+  end
+
+  @doc "True when `value` is a plain workspace identifier (`workspace_dir/2` takes it)."
+  @spec workspace_id?(term()) :: boolean()
+  def workspace_id?(value) do
+    is_binary(value) and Regex.match?(@workspace_id, value) and not String.contains?(value, "..")
   end
 
   @doc "A SQL string literal: a quote is doubled, so the text cannot end the literal."
@@ -297,12 +350,15 @@ defmodule OptimalEngine.Analytics do
 
   defp limit(value) when value in [nil, ""], do: {:ok, @default_limit}
 
-  defp limit(value) do
-    case Integer.parse(to_string(value)) do
+  defp limit(value) when is_binary(value) do
+    case Integer.parse(value) do
       {n, ""} when n > 0 -> {:ok, min(n, @max_limit)}
       _ -> {:error, {:invalid_parameter, "limit", "a whole number above 0"}}
     end
   end
+
+  defp limit(value) when is_integer(value) and value > 0, do: {:ok, min(value, @max_limit)}
+  defp limit(_value), do: {:error, {:invalid_parameter, "limit", "a whole number above 0"}}
 
   defp filters(dataset, params) do
     Enum.reduce_while(@filters[dataset], {:ok, []}, fn {name, column, re}, {:ok, acc} ->

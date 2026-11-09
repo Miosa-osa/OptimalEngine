@@ -171,6 +171,9 @@ defmodule OptimalEngine.Application do
       # ── Read-only data-quality drift snapshots ───────────────────────────
       OptimalEngine.DataQualityScheduler,
 
+      # ── Analytics: the cap on duckdb processes running at once ───────────
+      OptimalEngine.Analytics.Slots,
+
       # ── Durable metric history (Telemetry snapshots into metric_samples) ─
       OptimalEngine.Telemetry.HistorySampler,
 

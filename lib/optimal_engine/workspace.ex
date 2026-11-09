@@ -777,7 +777,10 @@ defmodule OptimalEngine.Workspace do
   (`OptimalEngine.Store.FileCache`). If that purge fails, the workspace is
   archived all the same and the answer is `{:error, {:cache_purge_failed,
   reason}}`: the cache may still hold its text. Archiving again retries the
-  purge, and the age sweep removes what is left in the end.
+  purge, and the age sweep removes what is left in the end. Its analytics
+  files (`OptimalEngine.Analytics`, under `OPTIMAL_ANALYTICS_PATH`) are removed
+  too; a failure there is `{:error, {:analytics_purge_failed, reason}}`, and
+  archiving again retries it.
   """
   @spec archive(String.t()) :: :ok | {:error, term()}
   def archive(id) when is_binary(id) do
@@ -788,10 +791,15 @@ defmodule OptimalEngine.Workspace do
       {:ok, _} ->
         forget_in_nats(id)
 
-        case Cache.purge_workspace(id, :archive) do
-          {:ok, _purged} -> :ok
-          {:error, cause} -> {:error, {:cache_purge_failed, Cache.reason(cause)}}
-        end
+        cache =
+          case Cache.purge_workspace(id, :archive) do
+            {:ok, _purged} -> :ok
+            {:error, cause} -> {:error, {:cache_purge_failed, Cache.reason(cause)}}
+          end
+
+        # Its analytics Parquet files are a projection of rows it no longer serves.
+        analytics = OptimalEngine.Analytics.purge_workspace(id)
+        if cache == :ok, do: analytics, else: cache
 
       other ->
         other

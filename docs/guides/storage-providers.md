@@ -643,6 +643,7 @@ The `analytics_export` analysis (`OptimalEngine.Analytics.Export`) writes one di
 No payload, entity id, run message, principal or target leaves the store: the ledger and usage files hold counts.
 Every export starts again from the store, a page at a time, into a staging directory beside the files; the files are moved into place only when every dataset converted, so a failed export leaves the previous files as they were.
 Deleting the directory loses nothing; the next export writes it again.
+Archiving a workspace removes its directory, and so does a data steward rename for the id the rows moved away from.
 
 The export runs once a day for every active workspace while `OPTIMAL_ANALYTICS_PATH` is set, through the analyses worker (`OPTIMAL_ANALYSES_INTERVAL_MS`, see [Operating layer](operating-layer.md)), and on demand:
 
@@ -668,6 +669,7 @@ Every question takes `bucket` (`hour`, `day`, `week` or `month`; default `day`),
 Rows come newest bucket first, each `bucket` an ISO-8601 UTC time.
 A parameter that is not valid is `400 {"error": "invalid_parameter", "parameter", "expected"}`, and a filter of another dataset is refused, not ignored.
 A workspace no export has written is `404 {"error": "not_exported"}`; without `OPTIMAL_ANALYTICS_PATH` the route is `503 {"error": "analytics_not_configured"}`, and without the executable `503 {"error": "analytics_unavailable"}`.
+A `workspace` given as a list or a map (`workspace[]=`) is a 400.
 `GET /api/analytics` reports whether analytics is configured, when the workspace's files were exported, each file's rows and the questions; it never names the server's path.
 
 ```bash
@@ -676,7 +678,8 @@ curl -s "$URL/api/analytics/query?workspace=acme:ops&dataset=usage&bucket=day&fr
 optimal analytics query usage acme:ops --bucket day --from 2026-11-01
 ```
 
-DuckDB reads any path it is given, so every statement the Engine runs is locked first: the workspace's own directory (the staging directory, for an export) is the only allowed directory, external access is off, installing and autoloading extensions is off, memory is 512 MB and threads 2, and the configuration is locked, so the statement cannot turn any of it back on.
+DuckDB reads any path it is given, so every statement the Engine runs is locked first: the workspace's own directory (the staging directory, for an export) is the only allowed directory, external access is off, installing and autoloading extensions is off, memory is 512 MB and threads 2, what does not fit in memory spills to a fresh directory inside the allowed one (removed after the statement), and the configuration is locked, so the statement cannot turn any of it back on.
+At most `OPTIMAL_ANALYTICS_MAX_PROCESSES` `duckdb` processes run at once (default 1, for a 1 GiB guest): a query past the cap is `503 {"error": "analytics_busy"}` with `Retry-After: 5`, and an export waits its turn.
 The values a caller sends are checked against a fixed shape (a dataset and a bucket from a list, a date, a name pattern) before the Engine writes them into the statement as quoted literals.
 
 ## Use Cases And Plans
