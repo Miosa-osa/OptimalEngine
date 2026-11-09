@@ -2,7 +2,7 @@
 # Stage 3 acceptance for the PostgreSQL provider, with whole engines
 # (docs/guides/postgres-provider.md).
 #
-# Builds the engine with the PostgreSQL store (OPTIMAL_STORE=postgres), boots
+# Runs the engine with the PostgreSQL store (OPTIMAL_STORE=postgres), boots
 # two engine processes against one database, and has each write one
 # workspace through OptimalEngine.Store at the same time for 50 rounds
 # (test/support/postgres_writer.ex), while both publish policy packs for one
@@ -83,7 +83,7 @@ drop_schema() {
 }
 trap drop_schema EXIT
 
-echo "== build with the PostgreSQL store"
+echo "== build the engine (it runs the PostgreSQL store: OPTIMAL_STORE=postgres)"
 mix compile >"$DATA/compile.log" 2>&1 || fail "compile"
 
 echo "== setup: schema $OPTIMAL_POSTGRES_SCHEMA, workspace $OPTIMAL_PROOF_WORKSPACE"

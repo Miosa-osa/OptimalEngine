@@ -7,8 +7,10 @@ defmodule OptimalEngine.Store do
   The default is `OptimalEngine.Store.SQLite`, the embedded store; a deployment
   that moves its canonical store to PostgreSQL selects another implementation
   with `config :optimal_engine, :store_adapter, <module>`.
-  The choice is resolved at compile time, so a release ships one implementation
-  and never dispatches per call.
+  The choice is read when the Engine boots (`OPTIMAL_STORE`, `sqlite` or
+  `postgres`, through `config/runtime.exs`), so one release runs either store;
+  each call looks the implementation up in a `:persistent_term`, which costs
+  no more than a function call.
 
   The contract, the transaction rules, and the timestamp rules live in
   `OptimalEngine.Store.Adapter`.
@@ -18,15 +20,34 @@ defmodule OptimalEngine.Store do
 
   @behaviour OptimalEngine.Store.Adapter
 
-  @adapter Application.compile_env(:optimal_engine, :store_adapter, OptimalEngine.Store.SQLite)
+  @implementations [OptimalEngine.Store.SQLite, OptimalEngine.Store.Postgres]
+  @key {__MODULE__, :adapter}
 
-  @doc "The store implementation this build was compiled with."
+  @doc """
+  The store implementation this Engine runs: `config :optimal_engine,
+  :store_adapter`, read once and kept for the life of the node.
+  """
   @spec adapter() :: module()
-  def adapter, do: @adapter
+  def adapter do
+    case :persistent_term.get(@key, nil) do
+      nil -> resolve()
+      adapter -> adapter
+    end
+  end
 
-  @doc "True when this build's store is `implementation`."
+  defp resolve do
+    adapter = Application.get_env(:optimal_engine, :store_adapter, OptimalEngine.Store.SQLite)
+
+    unless adapter in @implementations,
+      do: raise(ArgumentError, "unknown store implementation #{inspect(adapter)}")
+
+    :persistent_term.put(@key, adapter)
+    adapter
+  end
+
+  @doc "True when this Engine's store is `implementation`."
   @spec selected?(module()) :: boolean()
-  def selected?(implementation) when is_atom(implementation), do: implementation == @adapter
+  def selected?(implementation) when is_atom(implementation), do: implementation == adapter()
 
   @doc false
   # The supervisor starts `OptimalEngine.Store`; the child spec stays here so
@@ -41,31 +62,31 @@ defmodule OptimalEngine.Store do
     }
   end
 
-  defdelegate start_link(opts \\ []), to: @adapter
+  def start_link(opts \\ []), do: adapter().start_link(opts)
 
-  defdelegate insert_context(context), to: @adapter
+  def insert_context(context), do: adapter().insert_context(context)
 
-  defdelegate insert_contexts(contexts), to: @adapter
+  def insert_contexts(contexts), do: adapter().insert_contexts(contexts)
 
-  defdelegate insert_signal(signal), to: @adapter
+  def insert_signal(signal), do: adapter().insert_signal(signal)
 
-  defdelegate insert_signals(signals), to: @adapter
+  def insert_signals(signals), do: adapter().insert_signals(signals)
 
-  defdelegate get_context(id), to: @adapter
+  def get_context(id), do: adapter().get_context(id)
 
-  defdelegate get_signal(id), to: @adapter
+  def get_signal(id), do: adapter().get_signal(id)
 
-  defdelegate get_by_node(node, opts \\ []), to: @adapter
+  def get_by_node(node, opts \\ []), do: adapter().get_by_node(node, opts)
 
-  defdelegate stats(), to: @adapter
+  def stats(), do: adapter().stats()
 
-  defdelegate delete_context(id), to: @adapter
+  def delete_context(id), do: adapter().delete_context(id)
 
-  defdelegate delete_signal(id), to: @adapter
+  def delete_signal(id), do: adapter().delete_signal(id)
 
-  defdelegate evict_cached(ids), to: @adapter
+  def evict_cached(ids), do: adapter().evict_cached(ids)
 
-  defdelegate raw_query(sql, params \\ []), to: @adapter
+  def raw_query(sql, params \\ []), do: adapter().raw_query(sql, params)
 
   @doc """
   How long a raw query or statement waits for the Store, in milliseconds
@@ -75,23 +96,24 @@ defmodule OptimalEngine.Store do
   @spec call_timeout() :: pos_integer()
   def call_timeout, do: Application.get_env(:optimal_engine, :store_call_timeout_ms, 15_000)
 
-  defdelegate raw_execute(sql, params \\ []), to: @adapter
+  def raw_execute(sql, params \\ []), do: adapter().raw_execute(sql, params)
 
-  defdelegate transaction(fun, timeout \\ 30_000), to: @adapter
+  def transaction(fun, timeout \\ 30_000), do: adapter().transaction(fun, timeout)
 
-  defdelegate txn_query(txn, sql, params \\ [], opts \\ []), to: @adapter
+  def txn_query(txn, sql, params \\ [], opts \\ []), do: adapter().txn_query(txn, sql, params, opts)
 
-  defdelegate txn_execute(txn, sql, params \\ [], opts \\ []), to: @adapter
+  def txn_execute(txn, sql, params \\ [], opts \\ []),
+    do: adapter().txn_execute(txn, sql, params, opts)
 
-  defdelegate insert_chunks(chunks), to: @adapter
+  def insert_chunks(chunks), do: adapter().insert_chunks(chunks)
 
-  defdelegate insert_classifications(rows), to: @adapter
+  def insert_classifications(rows), do: adapter().insert_classifications(rows)
 
-  defdelegate insert_intents(rows), to: @adapter
+  def insert_intents(rows), do: adapter().insert_intents(rows)
 
-  defdelegate insert_embeddings(rows), to: @adapter
+  def insert_embeddings(rows), do: adapter().insert_embeddings(rows)
 
-  defdelegate insert_clusters(rows), to: @adapter
+  def insert_clusters(rows), do: adapter().insert_clusters(rows)
 
-  defdelegate insert_cluster_members(rows), to: @adapter
+  def insert_cluster_members(rows), do: adapter().insert_cluster_members(rows)
 end

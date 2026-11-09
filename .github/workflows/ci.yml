@@ -139,7 +139,7 @@ jobs:
         if: always()
         run: cat /tmp/sql-census.txt || true
 
-  # The same engine built with the PostgreSQL store (OPTIMAL_STORE=postgres):
+  # The same engine started with the PostgreSQL store (OPTIMAL_STORE=postgres):
   # the test files listed in test/support/postgres_store_suite.txt run with
   # the whole Engine on PostgreSQL, so code paths that only a PostgreSQL build
   # compiles (full-text search on posting lists, app data DDL, ...) are tested.
@@ -201,11 +201,10 @@ jobs:
       - name: Install deps
         run: mix deps.get
 
-      # The store is chosen at compile time and the restored _build chose
-      # SQLite. Mix recompiles by content, not by the environment, so the
-      # project is compiled again in full (the dependencies are not).
-      - name: Compile with the PostgreSQL store
-        run: mix compile --force --warnings-as-errors
+      # The store is chosen when the Engine boots, so the SQLite job's _build
+      # runs here unchanged.
+      - name: Compile
+        run: mix compile --warnings-as-errors
 
       - name: Run the PostgreSQL store suite
         run: mix test --warnings-as-errors $(grep -v '^#' test/support/postgres_store_suite.txt)

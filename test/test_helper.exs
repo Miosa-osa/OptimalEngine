@@ -21,7 +21,7 @@ exclude =
     do: [:valkey | exclude],
     else: exclude
 
-# A PostgreSQL build (OPTIMAL_STORE=postgres) runs the Engine on PostgreSQL;
+# With OPTIMAL_STORE=postgres the Engine runs on PostgreSQL;
 # tests that need the embedded SQLite store as the Engine's store, or start a
 # PostgreSQL store of their own beside it, are tagged :sqlite_store.
 exclude =

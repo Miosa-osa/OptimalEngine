@@ -61,7 +61,17 @@ config :optimal_engine,
   topology_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY", topology_path),
   topology_full_path: System.get_env("OPTIMAL_ENGINE_TOPOLOGY_FULL", topology_full_path)
 
-# The PostgreSQL store of an OPTIMAL_STORE=postgres build keeps its tables in
+# The canonical store, chosen when the Engine boots: OPTIMAL_STORE=sqlite (the
+# default) or postgres. Unset, the value config.exs read is kept.
+case System.get_env("OPTIMAL_STORE") do
+  nil -> :ok
+  "" -> :ok
+  "sqlite" -> config :optimal_engine, :store_adapter, OptimalEngine.Store.SQLite
+  "postgres" -> config :optimal_engine, :store_adapter, OptimalEngine.Store.Postgres
+  other -> raise "OPTIMAL_STORE must be sqlite or postgres, got #{inspect(other)}"
+end
+
+# The PostgreSQL store of an OPTIMAL_STORE=postgres Engine keeps its tables in
 # the schema OPTIMAL_POSTGRES_SCHEMA names (default public); the connection is
 # OPTIMAL_POSTGRES_URL, read when the store starts.
 postgres_store_config = Application.get_env(:optimal_engine, :postgres_store, [])

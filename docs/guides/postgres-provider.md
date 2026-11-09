@@ -267,7 +267,7 @@ Twenty queries scoped to the workspace (counts, ordering and pagination, groupin
 OPTIMAL_POSTGRES_URL=postgres://user:secret@host:5432/database scripts/proof-postgres-two-engines.sh
 ```
 
-It builds the engine with `OPTIMAL_STORE=postgres`, boots two engine processes with their full supervision tree against one fresh PostgreSQL schema, has each write the workspace through `OptimalEngine.Store`, and then runs the same checks and the same 20 queries against an embedded SQLite copy in a third process.
+It boots two engine processes with `OPTIMAL_STORE=postgres`, each with its full supervision tree, against one fresh PostgreSQL schema, has each write the workspace through `OptimalEngine.Store`, and then runs the same checks and the same 20 queries against an embedded SQLite copy in a third process.
 While they write, both engines publish ten policy packs each for one scope; the 20 packs must take versions 1 to 20 with exactly one active, because each publish reads the active pack and the next version inside its own transaction.
 Each engine also searches the workspace through the full-text index and must find the contexts it wrote, and enables replication for the workspace.
 The schema is dropped at the end.
@@ -320,16 +320,20 @@ They are listed for review, a new one fails the check, and giving each an `ORDER
 
 ### Selecting PostgreSQL
 
-The store is chosen when the engine is compiled, so a release ships one implementation and never dispatches per call:
+The store is chosen when the Engine boots, by `OPTIMAL_STORE` (`sqlite`, the default, or `postgres`), so one release runs either store and no rebuild is needed to move one:
 
 ```bash
-OPTIMAL_STORE=postgres MIX_ENV=prod mix release optimal
-OPTIMAL_POSTGRES_URL=postgres://user:secret@host:5432/database?sslmode=require _build/prod/rel/optimal/bin/optimal start
+MIX_ENV=prod mix release optimal
+OPTIMAL_STORE=postgres \
+OPTIMAL_POSTGRES_URL=postgres://user:secret@host:5432/database?sslmode=require \
+_build/prod/rel/optimal/bin/optimal start
 ```
 
-`GET /api/storage/providers` reports `selected: true` for the store the build runs and `selected: false` for the other, and `mix optimal.postgres.check` prints the same.
+`config/runtime.exs` reads the variable and any other value stops the boot. `OptimalEngine.Store` keeps the implementation in a `:persistent_term` the first time it is asked, so a call costs one lookup and the choice cannot change while the node runs. An Engine started from a build made with the old `OPTIMAL_STORE=postgres` at boot behaves the same: the variable set at build time is still the default.
 
-An engine built this way boots its whole supervision tree on PostgreSQL, and the two-engine proof runs on it.
+`GET /api/storage/providers` reports `selected: true` for the store the Engine runs and `selected: false` for the other, and `mix optimal.postgres.check` prints the same.
+
+An Engine started this way boots its whole supervision tree on PostgreSQL, and the two-engine proof runs on it.
 The features listed under What Does Not Work On PostgreSQL are refused by name, so a PostgreSQL build is the canonical relational store for engines that share one database, not yet a replacement for every feature of an embedded engine.
 Replication works on a PostgreSQL build (see Replication below).
 

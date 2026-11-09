@@ -28,7 +28,7 @@ Providers are things a deployment grows onto, not the default shape:
 | Provider | Status | Use |
 | --- | --- | --- |
 | S3-compatible storage (Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Assets and offsite backups |
-| PostgreSQL | Wired but partial: a compile-time `OPTIMAL_STORE=postgres` build that refuses replication | The canonical relational store for engines that share one database |
+| PostgreSQL | Wired but partial: an `OPTIMAL_STORE=postgres` Engine that refuses replication | The canonical relational store for engines that share one database |
 | NATS JetStream | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS`, each sent after the Engine stored it in SQLite; nothing without them |
 | Valkey | Adapter, health-checked and proved, in the data path | Shared rate limits, the verified API key cache and the sync gate cache, with ETS as the fallback ([Valkey](storage-providers.md#valkey)) |
 | Qdrant, DuckDB and Parquet, OpenBao | Adapter, health-checked and proved | Nothing yet: no Engine feature reads or writes them |
@@ -261,17 +261,18 @@ Backup, restore, upgrade, and verification are as in mode 1, with the asset byte
 
 ### The Postgres build
 
-PostgreSQL replaces the canonical relational store of one Engine, and the choice is made when the Engine is compiled, not by configuration:
+PostgreSQL replaces the canonical relational store of one Engine, chosen when the Engine boots by `OPTIMAL_STORE`:
 
 ```bash
-OPTIMAL_STORE=postgres MIX_ENV=prod mix release optimal
+MIX_ENV=prod mix release optimal
+OPTIMAL_STORE=postgres \
 OPTIMAL_POSTGRES_URL='postgres://user:secret@host:5432/db?sslmode=require' \
 OPTIMAL_POSTGRES_SCHEMA=engine_a \
 _build/prod/rel/optimal/bin/optimal start
 ```
 
-The stock `deploy/Dockerfile.engine` does not pass `OPTIMAL_STORE` to the build, so a Postgres container image needs `OPTIMAL_STORE=postgres` exported in the build stage; a build argument is not wired yet.
-Setting `OPTIMAL_POSTGRES_URL` on the stock image changes nothing: the provider reports `selected: false` and the data stays in SQLite.
+The stock image runs PostgreSQL the same way: set `OPTIMAL_STORE=postgres` with `OPTIMAL_POSTGRES_URL` in its environment.
+Setting `OPTIMAL_POSTGRES_URL` alone changes nothing: the provider reports `selected: false` and the data stays in SQLite.
 
 Use one schema per Engine (`OPTIMAL_POSTGRES_SCHEMA`) so that Engines that must not see each other's data do not share tables.
 

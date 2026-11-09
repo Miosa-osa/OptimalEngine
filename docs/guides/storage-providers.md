@@ -50,8 +50,8 @@ Today `s3` and `postgres` are the service providers with an adapter.
 `valkey` and `nats_jetstream` have adapters and report `not_configured`, `available` or `unavailable` like `s3`; `qdrant`, `openbao` and `duckdb` have one too; `fractal` is declared and reports `adapter_missing` until an adapter ships.
 
 `sqlite` and `postgres` are canonical stores, and an engine runs exactly one of them.
-The choice is made when the engine is compiled, so both report `selected`: `true` for the store this build runs and `false` for the other.
-A healthy `postgres` provider in a build that selected SQLite holds none of the engine's data.
+The choice is made when the Engine boots (`OPTIMAL_STORE`), so both report `selected`: `true` for the store this Engine runs and `false` for the other.
+A healthy `postgres` provider in an Engine that selected SQLite holds none of the engine's data.
 See [PostgreSQL Provider](postgres-provider.md) for what is and is not on PostgreSQL.
 
 ## S3-Compatible Object Storage

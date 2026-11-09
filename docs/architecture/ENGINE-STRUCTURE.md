@@ -161,7 +161,7 @@ Other layers read through interfaces or projections.
 | Store | Use |
 | --- | --- |
 | SQLite | Local default canonical runtime store. |
-| Postgres | Optional provider for scale, wired but partial (compile-time `OPTIMAL_STORE=postgres`). |
+| Postgres | Optional provider for scale, wired but partial (`OPTIMAL_STORE=postgres` at boot). |
 | Raw artifact storage | Preserved files, uploads, attachments, media, and raw source evidence. |
 
 ### Specific Stores And Projections
