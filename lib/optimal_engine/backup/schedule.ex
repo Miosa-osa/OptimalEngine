@@ -261,7 +261,8 @@ defmodule OptimalEngine.Backup.Schedule do
 
   defp take_backup(job) do
     stamp = DateTime.utc_now() |> Calendar.strftime("%Y%m%dT%H%M%SZ")
-    suffix = job.id |> String.replace_prefix("job_", "") |> String.slice(0, 8)
+    # The id's random end: its start is the time it was made (`Store.Catalog.ordered_id/1`).
+    suffix = String.slice(job.id, -8, 8)
 
     metadata = %{
       "scheduled" => true,

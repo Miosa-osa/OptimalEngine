@@ -403,7 +403,7 @@ defmodule OptimalEngine.Analyses do
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         """,
         [
-          "anr_" <> (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower)),
+          OptimalEngine.Store.Catalog.ordered_id("anr_"),
           job.tenant_id,
           job.workspace_id,
           kind,

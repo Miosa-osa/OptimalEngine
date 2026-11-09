@@ -327,12 +327,33 @@ defmodule OptimalEngine.Store.Catalog do
   end
 
   @doc """
-  The tie-break that keeps rows written in the same second in a stable order:
-  SQLite's `rowid`, the order they were written in; PostgreSQL has no such
-  order, so there it is `key`, a unique column of the table.
+  The tie-break that keeps rows written in the same second in the order they
+  were written: SQLite's `rowid`; PostgreSQL has none, so there it is `key`, a
+  unique column of the table. For that to be the order the rows were written
+  in, the table's ids are made with `ordered_id/1`: a random id would let
+  "the newest" be any row of that second.
   """
   @spec insertion_order(String.t()) :: String.t()
   def insertion_order(key), do: if(postgres?(), do: key, else: "rowid")
+
+  @doc """
+  An id that sorts in the order ids were made: `prefix`, the time in
+  microseconds as 14 hex digits, a counter that keeps ids made in the same
+  microsecond apart, and random hex. Ids made on one Engine sort in the order
+  they were made; on two Engines, in the order of their clocks.
+  """
+  @spec ordered_id(String.t()) :: String.t()
+  def ordered_id(prefix) do
+    micros = System.os_time(:microsecond) |> Integer.to_string(16) |> String.pad_leading(14, "0")
+
+    counter =
+      rem(:erlang.unique_integer([:positive, :monotonic]), 0x10000)
+      |> Integer.to_string(16)
+      |> String.pad_leading(4, "0")
+
+    random = :crypto.strong_rand_bytes(5) |> Base.encode16(case: :lower)
+    prefix <> String.downcase(micros <> counter) <> random
+  end
 
   defp query(nil, sql, params), do: store().raw_query(sql, params)
   defp query(txn, sql, params), do: store().txn_query(txn, sql, params)

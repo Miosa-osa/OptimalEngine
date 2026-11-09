@@ -987,7 +987,9 @@ defmodule OptimalEngine.Jobs do
 
   defp default_owner, do: "#{node()}:#{inspect(self())}"
 
-  defp new_id(prefix), do: prefix <> (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower))
+  # In creation order, so jobs (and dead letters) of the same second sort as
+  # they were made on PostgreSQL too (`Store.Catalog.ordered_id/1`).
+  defp new_id(prefix), do: OptimalEngine.Store.Catalog.ordered_id(prefix)
 
   defp job_from_row([
          id,
