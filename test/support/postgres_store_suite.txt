@@ -74,3 +74,6 @@ test/retrieval/memory_ranking_test.exs
 test/topology/workspace_surface_spine_test.exs
 test/auth/api_key_test.exs
 test/app_data
+test/ops/backup_test.exs
+test/storage/backup_offsite_test.exs
+test/storage/backup_postgres_test.exs

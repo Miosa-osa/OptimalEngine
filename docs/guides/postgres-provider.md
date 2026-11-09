@@ -326,6 +326,21 @@ An engine built this way boots its whole supervision tree on PostgreSQL, and the
 The features listed under What Does Not Work On PostgreSQL are refused by name, so a PostgreSQL build is the canonical relational store for engines that share one database, not yet a replacement for every feature of an embedded engine.
 Replication change capture is switched off on a PostgreSQL store and says so once at boot.
 
+## Backups And Restore
+
+Every backup feature works on a PostgreSQL store, through the same API routes, mix tasks and schedule as on SQLite (`OptimalEngine.Backup`, `OptimalEngine.Backup.Postgres`).
+
+- A backup is a SQLite database file. The engine's migrations create its schema, and every table of the store is copied into it from one snapshot taken `SERIALIZABLE, READ ONLY, DEFERRABLE`, so the copy is consistent, never aborted, and never blocks a writer. The file's FTS5 tables are filled by its own triggers, so it is a complete engine database that a SQLite engine can open too.
+- From there a backup is the SQLite one: its SHA-256 and `PRAGMA integrity_check`, its catalog row (in the PostgreSQL store's `backup_records`), sealing with `OPTIMAL_BACKUP_KEY`, the offsite copy to S3, the schedule, pruning, and an offsite restore to a file.
+- `mix optimal.restore <file>` on a PostgreSQL build restores into the configured schema, `--schema <name>` into another one (an empty or new schema is created in the build's shape). The file's checksum must match the catalog or `--checksum` and its integrity check must pass, and its migration versions must be the build's, before anything changes.
+- The restore is one transaction. It locks every table of the store and the full-text index tables `ACCESS EXCLUSIVE`, so any other engine's reads and writes wait for it to commit or roll back and no write lands in the middle. It empties the tables, inserts the file's rows, moves each identity sequence past its largest id, empties the full-text indexes (every restored row is queued for them by their triggers), and compares every table's row count and digest with the file's; a difference rolls it back.
+- Before it replaces anything, the schema's current contents are saved as a backup file in `OPTIMAL_BACKUP_DIR` (`pre-restore-<schema>-<time>.db`), the rollback of the restore.
+- Restoring into the configured schema is refused while this engine runs, as replacing the live SQLite file is.
+
+The operator flow for a live store: stop every engine that uses the schema, run `mix optimal.restore <file>` (it starts no engine, only a connection), and start the engines again. A restore into another schema (a drill) needs nothing stopped.
+
+The backup is not made with `pg_dump`. `pg_dump` needs a client of the server's major version beside the engine, which the release image does not ship, and writes a format only `pg_restore` reads into a schema of the dump's own name; the copy here needs only the engine's connection, restores into any schema, and is held to the same checksum and integrity check as every other backup.
+
 ## Stage 4: Moving An Existing Engine
 
 Moving is a one-way switch with a frozen window, not dual writing.

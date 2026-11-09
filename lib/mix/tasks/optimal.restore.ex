@@ -19,6 +19,12 @@ defmodule Mix.Tasks.Optimal.Restore do
   ## Options
 
     --target        Destination database path (default: the configured engine database).
+    --schema        On a PostgreSQL store: the schema to restore into (default: the
+                    configured OPTIMAL_POSTGRES_SCHEMA). Without --target a backup
+                    is restored into the store, in one transaction that locks
+                    every table and checks every table's rows against the file;
+                    the schema's previous contents are first saved as a backup
+                    file beside the others (the "previous archive").
     --data-dir      Destination directory, restored to `<data-dir>/index.db`.
     --checksum      Expected SHA-256 when the backup is not in the catalog.
     --from-offsite  Restore a cataloged backup from its offsite object copy
@@ -52,6 +58,7 @@ defmodule Mix.Tasks.Optimal.Restore do
       OptionParser.parse(args,
         strict: [
           target: :string,
+          schema: :string,
           data_dir: :string,
           checksum: :string,
           from_offsite: :string,
@@ -78,7 +85,7 @@ defmodule Mix.Tasks.Optimal.Restore do
 
   defp restore_local(source, parsed) do
     opts =
-      [target: parsed[:target], checksum_sha256: parsed[:checksum]]
+      [target: parsed[:target], schema: parsed[:schema], checksum_sha256: parsed[:checksum]]
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
     case Backup.restore(source, opts) do
@@ -95,7 +102,7 @@ defmodule Mix.Tasks.Optimal.Restore do
 
   defp restore_offsite(backup_id, parsed) do
     opts =
-      [target: parsed[:target], data_dir: parsed[:data_dir]]
+      [target: parsed[:target], schema: parsed[:schema], data_dir: parsed[:data_dir]]
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
     case Backup.restore_offsite(backup_id, opts) do
@@ -115,7 +122,7 @@ defmodule Mix.Tasks.Optimal.Restore do
 
   defp restore_offsite_object(object_key, parsed) do
     opts =
-      [target: parsed[:target], data_dir: parsed[:data_dir]]
+      [target: parsed[:target], schema: parsed[:schema], data_dir: parsed[:data_dir]]
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
     case Backup.restore_offsite_object(object_key, opts) do

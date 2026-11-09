@@ -240,7 +240,7 @@ defmodule OptimalEngine.Backup.Schedule do
            """
            SELECT id, storage_uri, offsite, integrity_status FROM backup_records
            WHERE status = 'completed' AND json_extract(metadata, '$.schedule_job_id') = ?1
-           ORDER BY created_at DESC, rowid DESC LIMIT 1
+           ORDER BY created_at DESC, #{Backup.newest_first()} LIMIT 1
            """,
            [job.id]
          ) do
@@ -286,7 +286,7 @@ defmodule OptimalEngine.Backup.Schedule do
            """
            SELECT id, storage_uri, offsite, metadata FROM backup_records
            WHERE status = 'completed' AND json_extract(metadata, '$.scheduled') = 1
-           ORDER BY created_at DESC, rowid DESC
+           ORDER BY created_at DESC, #{Backup.newest_first()}
            """,
            []
          ) do
@@ -386,7 +386,7 @@ defmodule OptimalEngine.Backup.Schedule do
            """
            SELECT id, status, attempts, max_attempts, last_error, run_at, completed_at, updated_at
            FROM jobs WHERE kind = ?1
-           ORDER BY inserted_at DESC, rowid DESC LIMIT 1
+           ORDER BY inserted_at DESC, #{Backup.newest_first()} LIMIT 1
            """,
            [@kind]
          ) do
@@ -413,7 +413,7 @@ defmodule OptimalEngine.Backup.Schedule do
            SELECT id, created_at, metadata FROM backup_records
            WHERE json_extract(metadata, '$.scheduled') = 1
              AND json_extract(metadata, '$.offsite_shipped_at') IS NOT NULL
-           ORDER BY created_at DESC, rowid DESC LIMIT 1
+           ORDER BY created_at DESC, #{Backup.newest_first()} LIMIT 1
            """,
            []
          ) do
@@ -441,7 +441,7 @@ defmodule OptimalEngine.Backup.Schedule do
                    WHERE kind = ?1 AND replayed_at IS NULL)
            FROM dead_letter_jobs
            WHERE kind = ?1 AND replayed_at IS NULL
-           ORDER BY failed_at DESC, rowid DESC LIMIT 1
+           ORDER BY failed_at DESC, #{Backup.newest_first()} LIMIT 1
            """,
            [@kind]
          ) do

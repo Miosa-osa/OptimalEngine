@@ -162,6 +162,7 @@ Both are read from a count cached for a minute, so a scrape does not scan the as
 ## Offsite Backups
 
 `Backup.create/2` runs an online SQLite backup with `VACUUM INTO`, catalogs it in `backup_records`, and verifies `PRAGMA integrity_check` before returning.
+On a PostgreSQL store the backup is the same kind of file: a SQLite database holding one consistent snapshot of every table (see [PostgreSQL Provider](postgres-provider.md#backups-and-restore)), so the checksum, integrity check, sealing and offsite copy below are unchanged.
 Adding `offsite: true` then encrypts the verified file, copies the ciphertext to the object store under `backups/<tenant>/<file name>.enc`, and marks the catalog row offsite and encrypted.
 
 ```bash
@@ -512,7 +513,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | SQLite, FTS5, embedded vectors, filesystem, ETS | Wired, the default | Everything the Engine stores | |
 | RocksDB | Wired, opt in | A persistent triple-store mirror of `graph_edges` (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`) | Falls back to ETS when the native library is missing |
 | `s3` (S3-compatible: Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Asset bytes, offsite backups, the probe and the placement reconciler | |
-| `postgres` | Wired, partial | The canonical relational store of a compile-time `OPTIMAL_STORE=postgres` build | Replication and the engine's backup routes; moving an existing Engine to it |
+| `postgres` | Wired, partial | The canonical relational store of a compile-time `OPTIMAL_STORE=postgres` build | Replication; moving an existing Engine to it |
 | `nats_jetstream` | Wired | The probe and the proof, a supervised JetStream client that reconnects with backoff, and with `OPTIMAL_NATS_FLOWS` the change ledger published as a stream per workspace subject, background jobs dispatched through a work queue, and connector intake queued | Replication between Engines does not use it (see "Replication over NATS: not implemented") |
 | `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
