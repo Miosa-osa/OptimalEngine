@@ -48,6 +48,11 @@ Requests without a key share their IP address's bucket, and so does a request wi
 Over the limit the answer is 429 `{"error": "rate_limited", "retry_after_ms": N}` with a `Retry-After` header.
 `/api/health`, `/api/status` and `/api/metrics/prometheus` are never limited.
 
+A bucket lives on the node that answered the request unless `OPTIMAL_VALKEY_URL` is set.
+Behind a load balancer with several Engine processes and no Valkey, each process keeps its own buckets, so a key can spend its allowance once per process.
+With Valkey every process draws on one bucket per key, stepped atomically on the Valkey server's clock, and the same holds for the connector rate limits, the cache of verified API keys and the sync gate cache ([Valkey](storage-providers.md#valkey)).
+If Valkey stops answering, each process goes back to its own buckets until it reconnects; no request fails because Valkey is down.
+
 ## Usage gauges
 
 `GET /api/storage` returns the active profile, one gauge per measure, the worst one, the recommendation, and how long the last boot took (`boot_ms`).

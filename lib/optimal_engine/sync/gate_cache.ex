@@ -41,11 +41,23 @@ defmodule OptimalEngine.Sync.GateCache do
   expired ones are dropped first, then all of them). A value is copied out of
   the table on every lookup. Without the process (the application not started,
   or between a crash and its restart) every lookup builds.
+
+  With `OPTIMAL_VALKEY_URL` set the entries live in Valkey instead
+  (`OptimalEngine.Storage.Shared`), signed, under a key that also carries this
+  Engine's replica id: the stamp is a set of SQLite sequences, which only
+  mean something for the store they were read from, so two Engines with
+  stores of their own never share an entry, while the processes on one store
+  do. Without a replica id nothing is cached on Valkey. `clear/0` reaches
+  Valkey too (deferred while it is unreachable), and a lookup Valkey cannot
+  answer falls back to this table.
   """
 
   use GenServer
 
   require Logger
+
+  alias OptimalEngine.Storage.Shared
+  alias OptimalEngine.Storage.Shared.Local
 
   @table :optimal_sync_gate_cache
   @default_ttl_ms 30_000
@@ -55,7 +67,7 @@ defmodule OptimalEngine.Sync.GateCache do
 
   @impl true
   def init(_opts) do
-    :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
+    Local.new_table(@table)
     {:ok, %{}}
   end
 
@@ -67,57 +79,47 @@ defmodule OptimalEngine.Sync.GateCache do
   def fetch(_key, :uncached, build), do: build.()
 
   def fetch(key, stamp, build) do
-    now = System.monotonic_time(:millisecond)
+    ttl = ttl_ms()
 
-    case lookup(key) do
-      {^stamp, expires, value} when expires > now ->
-        value
+    case ttl > 0 && scoped(key) do
+      false ->
+        build.()
 
-      _stale_or_none ->
-        value = build.()
-        store(key, stamp, now, value)
-        value
+      nil ->
+        build.()
+
+      scoped ->
+        case Shared.get(@table, scoped) do
+          {:ok, {^stamp, value}} ->
+            value
+
+          _stale_or_none ->
+            value = build.()
+            Shared.put(@table, scoped, {stamp, value}, ttl, max_entries: @max_entries)
+            value
+        end
     end
   end
 
   @doc "Drops every entry (tests, and after anything the stamp cannot see)."
   @spec clear() :: :ok
-  def clear do
-    :ets.delete_all_objects(@table)
-    :ok
-  rescue
-    ArgumentError -> :ok
+  def clear, do: Shared.clear(@table)
+
+  # Locally the key is the key; on Valkey it is scoped to this store.
+  defp scoped(key) do
+    case Shared.backend() do
+      :local -> key
+      :valkey -> with id when is_binary(id) <- replica_id(), do: {id, key}
+    end
   end
 
-  defp lookup(key) do
-    if ttl_ms() > 0 do
-      case :ets.lookup(@table, key) do
-        [{^key, stamp, expires, value}] -> {stamp, expires, value}
-        [] -> nil
-      end
+  defp replica_id do
+    case OptimalEngine.Store.raw_query("SELECT replica_id FROM sync_identity WHERE id = 1", []) do
+      {:ok, [[id]]} when is_binary(id) -> id
+      _ -> nil
     end
   rescue
-    # The owner died between the check and the read: build.
-    ArgumentError -> nil
-  end
-
-  defp store(key, stamp, now, value) do
-    ttl = ttl_ms()
-
-    if ttl > 0 do
-      if :ets.info(@table, :size) >= @max_entries, do: make_room(now)
-      :ets.insert(@table, {key, stamp, now + ttl, value})
-    end
-
-    :ok
-  rescue
-    ArgumentError -> :ok
-  end
-
-  # The expired entries first; all of them when the live ones fill the table.
-  defp make_room(now) do
-    :ets.select_delete(@table, [{{:_, :_, :"$1", :_}, [{:<, :"$1", now}], [true]}])
-    if :ets.info(@table, :size) >= @max_entries, do: :ets.delete_all_objects(@table)
+    _ -> nil
   end
 
   defp ttl_ms do

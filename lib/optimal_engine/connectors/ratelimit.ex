@@ -2,9 +2,13 @@ defmodule OptimalEngine.Connectors.RateLimit do
   @moduledoc """
   Token-bucket rate limiter for outbound connector requests.
 
-  Each `(bucket_key, rate, burst)` triple holds its own bucket state
-  in a single ETS table, so multiple connectors (or the same connector
-  across tenants) can share a limiter without per-process GenServers.
+  Each `(bucket_key, rate, burst)` triple holds its own bucket state, so
+  multiple connectors (or the same connector across tenants) can share a
+  limiter without per-process GenServers. With `OPTIMAL_VALKEY_URL` set the
+  buckets live in Valkey and every node draws on the same one, which is what
+  keeps a provider's quota from being multiplied by the number of nodes;
+  otherwise, or while Valkey is unreachable, they live in one ETS table on
+  this node (`OptimalEngine.Storage.Shared`).
 
   Two public calls — `check/4` and `wait/4` — cover the usual patterns:
 
@@ -20,58 +24,43 @@ defmodule OptimalEngine.Connectors.RateLimit do
   `rate` is tokens-per-second, `burst` is the bucket's max capacity.
   """
 
+  alias OptimalEngine.Storage.Shared
+  alias OptimalEngine.Storage.Shared.Local
+
   @table :optimal_connector_ratelimit
+  @idle_ttl_ms 60 * 60 * 1_000
 
   @doc false
   # Called by the supervision tree. Idempotent — safe to invoke at
   # boot and in tests that start a fresh session.
   @spec ensure_table() :: :ok
-  def ensure_table do
-    case :ets.whereis(@table) do
-      :undefined ->
-        :ets.new(@table, [
-          :named_table,
-          :public,
-          :set,
-          read_concurrency: true,
-          write_concurrency: true
-        ])
-
-        :ok
-
-      _ ->
-        :ok
-    end
-  end
+  def ensure_table, do: Local.new_table(@table)
 
   @doc """
   Non-blocking check. Returns `:ok` if a token was available,
-  `{:error, :rate_limited, retry_after_ms}` otherwise.
+  `{:error, :rate_limited, retry_after_ms}` otherwise. A denied check moves
+  the bucket's refill stamp to now.
   """
   @spec check(term(), pos_integer(), pos_integer()) ::
           :ok | {:error, :rate_limited, non_neg_integer()}
   def check(bucket_key, rate, burst) when is_integer(rate) and is_integer(burst) do
-    ensure_table()
-    now = System.monotonic_time(:millisecond)
     refill_rate = rate / 1000.0
 
-    case :ets.lookup(@table, bucket_key) do
-      [] ->
-        :ets.insert(@table, {bucket_key, burst - 1, now})
+    case Shared.take_token(
+           @table,
+           bucket_key,
+           burst,
+           refill_rate,
+           :advance,
+           ttl(burst, refill_rate)
+         ) do
+      :ok ->
         :ok
 
-      [{^bucket_key, tokens, last_ts}] ->
-        refilled = min(burst * 1.0, tokens + (now - last_ts) * refill_rate)
-
-        if refilled >= 1.0 do
-          :ets.insert(@table, {bucket_key, refilled - 1, now})
-          :ok
-        else
-          :ets.insert(@table, {bucket_key, refilled, now})
-          needed = 1.0 - refilled
-          retry_after = ceil(needed / refill_rate)
-          {:error, :rate_limited, retry_after}
-        end
+      {:limited, refilled, _elapsed_ms} ->
+        needed = 1.0 - refilled
+        retry_after = ceil(needed / refill_rate)
+        {:error, :rate_limited, retry_after}
     end
   end
 
@@ -89,9 +78,11 @@ defmodule OptimalEngine.Connectors.RateLimit do
   @spec reset() :: :ok
   def reset do
     ensure_table()
-    :ets.delete_all_objects(@table)
-    :ok
+    Shared.clear(@table)
   end
+
+  # Idle buckets are dropped once they would be full again.
+  defp ttl(burst, refill_rate), do: max(@idle_ttl_ms, ceil(max(burst, 1) / refill_rate) + 1_000)
 
   # ─── private ─────────────────────────────────────────────────────────────
 

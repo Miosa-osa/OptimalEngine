@@ -14,6 +14,13 @@ exclude =
     [:postgres | exclude]
   end
 
+# The Valkey integration test runs against OPTIMAL_TEST_VALKEY_URL and is
+# skipped without it (test/storage/valkey_integration_test.exs).
+exclude =
+  if System.get_env("OPTIMAL_TEST_VALKEY_URL") in [nil, ""],
+    do: [:valkey | exclude],
+    else: exclude
+
 # The 100 MB Notion import timing runs only when asked for (--only notion_scale).
 ExUnit.configure(exclude: [:notion_scale | exclude])
 
