@@ -415,5 +415,32 @@ defmodule OptimalEngine.Storage.SharedTest do
       :ok = GateCache.clear()
       assert %{built: 3} = GateCache.fetch(key, [["sync_capture", 2]], build)
     end
+
+    test "without a replica id the gate cache keeps its entries in local ETS", %{stub: stub} do
+      previous = Application.fetch_env(:optimal_engine, :sync_gate_cache_replica_id)
+      Application.put_env(:optimal_engine, :sync_gate_cache_replica_id, nil)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:optimal_engine, :sync_gate_cache_replica_id, value)
+          :error -> Application.delete_env(:optimal_engine, :sync_gate_cache_replica_id)
+        end
+      end)
+
+      key = {:index, "tenant", "ws-no-replica", :peer, 1}
+      counter = :counters.new(1, [])
+      build = fn -> :counters.add(counter, 1, 1) && %{built: :counters.get(counter, 1)} end
+
+      assert %{built: 1} = GateCache.fetch(key, [["sync_capture", 1]], build)
+      assert %{built: 1} = GateCache.fetch(key, [["sync_capture", 1]], build)
+      assert %{built: 2} = GateCache.fetch(key, [["sync_capture", 2]], build)
+
+      # Nothing went to Valkey: the stamp means nothing without the store's id.
+      refute Enum.any?(shared_keys(stub), &String.contains?(&1, "optimal_sync_gate_cache:0:"))
+      assert {:ok, {[["sync_capture", 2]], %{built: 2}}} = Local.get(:optimal_sync_gate_cache, key)
+
+      :ok = GateCache.clear()
+      assert %{built: 3} = GateCache.fetch(key, [["sync_capture", 2]], build)
+    end
   end
 end
