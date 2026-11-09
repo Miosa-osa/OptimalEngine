@@ -297,25 +297,28 @@ defmodule OptimalEngine.Memory.Versioned do
   def forget(id, opts \\ []) when is_binary(id) do
     reason = Keyword.get(opts, :reason)
     forget_after = Keyword.get(opts, :forget_after)
-    memory = held(id)
 
-    case VStore.mark_forgotten(id, reason, forget_after) do
-      {:ok, _} ->
-        # The cache entry is found from the text, so it goes before the text does.
-        forget_cached_embedding(memory)
-        erase_text(memory)
+    case held(id) do
+      # No such memory: the flag is all there is to write.
+      nil ->
+        with {:ok, _} <- VStore.mark_forgotten(id, reason, forget_after), do: :ok
 
-      other ->
-        other
-    end
-  end
+      memory ->
+        # The flag and the erasure commit together, or not at all.
+        case Erasure.forget(memory, reason, forget_after) do
+          {:ok, _removed} ->
+            # Found from the text, which the row no longer holds: the entry
+            # is removed from the copy read before the forget.
+            forget_cached_embedding(memory)
+            :ok
 
-  defp erase_text(nil), do: :ok
+          {:error, {:memory_erasure_failed, :fts_refresh, _}} = error ->
+            forget_cached_embedding(memory)
+            error
 
-  defp erase_text(memory) do
-    case Erasure.erase(memory) do
-      {:ok, _removed} -> :ok
-      {:error, _reason} = error -> error
+          {:error, _reason} = error ->
+            error
+        end
     end
   end
 

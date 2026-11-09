@@ -4,7 +4,9 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
 
   A forgotten memory keeps its row, flagged `is_forgotten` with its reason and
   `forget_after`, so the forget is on record. Its text goes from everywhere
-  the Engine put it or derived it, in one transaction:
+  the Engine put it or derived it, in the same transaction as the flag
+  (`forget/3`), so a forget that cannot erase is not done at all and is not
+  left flagged with its text in place:
 
     * the row's `content` (emptied) and its full-text entry (`memories_fts`;
       on PostgreSQL the posting lists are refreshed after the commit);
@@ -16,10 +18,19 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
       claims, and the package's episodes and decomposition runs.
 
   A package another live memory or a context of the workspace still holds the
-  same text in is shared, and stays: that text is theirs. Replication ledgers
-  (`sync_mutations`) are append-only and are not rewritten, as for every
-  erasure (`OptimalEngine.Compliance.DerivedData`); the emptied row is what
-  replicates.
+  same text in is shared, and stays: that text is theirs.
+
+  The replication ledger still holds the text: `sync_mutations` keeps every
+  change's whole row, the memory's create and the flagging update included,
+  and a peer pulling the workspace is served those rows. Redacting the ledger
+  for every erasure path is a change of its own (pending, in the ledger
+  redaction PR); `test/memory/memory_forget_erasure_test.exs` asserts it under
+  the `:ledger_redaction` tag, excluded until then.
+
+  On PostgreSQL the posting lists are refreshed after the commit; a refresh
+  that fails is the forget's error (`{:memory_erasure_failed, :fts_refresh,
+  reason}`), never silence, though the rows are already erased and the next
+  refresh, which runs before any search reads the index, catches up.
   """
 
   alias OptimalEngine.MemoryCore.ID
@@ -29,32 +40,51 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   @timeout 60_000
 
   @doc """
-  Erases the text of `memory` (a `OptimalEngine.Memory.Versioned` struct read
-  before the forget). Returns how many rows each step changed.
+  Flags `memory` (a `OptimalEngine.Memory.Versioned` struct read before the
+  forget) forgotten with `reason` and `forget_after`, and erases its text, in
+  one transaction: either both happen or neither does. What to remove is
+  looked up inside the transaction too, so a package or claim written
+  meanwhile is either seen or serializes after the forget. Returns how many
+  rows each step changed.
   """
-  @spec erase(map()) :: {:ok, %{atom() => non_neg_integer()}} | {:error, term()}
-  def erase(%{id: id, content: content} = memory) when is_binary(id) and is_binary(content) do
-    # What to remove is found first, outside the transaction, so the
-    # transaction itself only deletes by key: on PostgreSQL its scans would
-    # otherwise conflict with every concurrent write to these tables. A
-    # package or claim made in between is the next forget's to find; the
-    # memory is already marked, and nothing stages its text again.
+  @spec forget(map(), String.t() | nil, String.t() | nil) ::
+          {:ok, %{atom() => non_neg_integer()}} | {:error, term()}
+  def forget(%{id: id, content: content} = memory, reason, forget_after)
+      when is_binary(id) and is_binary(content) do
     result =
-      with {:ok, packages} <- packages(:store, memory),
-           {:ok, claims} <- claims(:store, packages, memory),
-           {:ok, facts} <- facts(claims),
-           {:ok, episodes} <- episodes(packages) do
-        found = %{packages: packages, claims: claims, facts: facts, episodes: episodes}
-        Store.transaction(&run(&1, steps(memory, found), %{}), @timeout)
-      end
+      Store.transaction(
+        fn txn ->
+          with {:ok, _} <-
+                 Store.txn_execute(
+                   txn,
+                   """
+                   UPDATE memories
+                   SET is_forgotten = 1, forget_reason = ?2, forget_after = ?3,
+                       updated_at = datetime('now')
+                   WHERE id = ?1
+                   """,
+                   [id, reason, forget_after]
+                 ),
+               {:ok, packages} <- packages(txn, memory),
+               {:ok, claims} <- claims(txn, packages, memory),
+               {:ok, facts} <- facts(txn, claims),
+               {:ok, episodes} <- episodes(txn, packages) do
+            found = %{packages: packages, claims: claims, facts: facts, episodes: episodes}
+            run(txn, steps(memory, found), %{})
+          end
+        end,
+        @timeout
+      )
 
     with {:ok, removed} <- result do
-      _ = FullText.refresh(["memories_fts"])
-      {:ok, removed}
+      refresh = Application.get_env(:optimal_engine, :memory_erasure_refresh, &FullText.refresh/1)
+
+      case refresh.(["memories_fts"]) do
+        :ok -> {:ok, removed}
+        {:error, reason} -> {:error, {:memory_erasure_failed, :fts_refresh, reason}}
+      end
     end
   end
-
-  def erase(_memory), do: {:ok, %{}}
 
   # The packages that hold this memory's text and nothing that stays.
   defp packages(txn, memory) do
@@ -121,11 +151,12 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   end
 
   # The facts that accepted one of the claims.
-  defp facts([]), do: {:ok, []}
+  defp facts(_txn, []), do: {:ok, []}
 
-  defp facts(claims) do
+  defp facts(txn, claims) do
     with {:ok, rows} <-
-           Store.raw_query(
+           query(
+             txn,
              """
              SELECT f.id FROM facts f
               WHERE EXISTS (
@@ -140,11 +171,12 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   end
 
   # The episodes recorded from one of the packages.
-  defp episodes([]), do: {:ok, []}
+  defp episodes(_txn, []), do: {:ok, []}
 
-  defp episodes(packages) do
+  defp episodes(txn, packages) do
     with {:ok, rows} <-
-           Store.raw_query(
+           query(
+             txn,
              """
              SELECT id FROM episodes
               WHERE (CASE WHEN json_valid(provenance) THEN json_extract(provenance, '$.source_package_id') END)
@@ -187,7 +219,6 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
       ]
   end
 
-  defp query(:store, sql, params), do: Store.raw_query(sql, params)
   defp query(txn, sql, params), do: Store.txn_query(txn, sql, params)
 
   defp run(_txn, [], removed), do: {:ok, removed}

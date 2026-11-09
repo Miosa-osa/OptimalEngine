@@ -21,6 +21,12 @@ exclude =
     do: [:valkey | exclude],
     else: exclude
 
+# A forgotten memory's text is still in the replication ledger until the
+# ledger redaction lands; the assertion that it is not is tagged
+# :ledger_redaction (test/memory/memory_forget_erasure_test.exs) and enabled
+# with it.
+exclude = [:ledger_redaction | exclude]
+
 # With OPTIMAL_STORE=postgres the Engine runs on PostgreSQL;
 # tests that need the embedded SQLite store as the Engine's store, or start a
 # PostgreSQL store of their own beside it, are tagged :sqlite_store.
