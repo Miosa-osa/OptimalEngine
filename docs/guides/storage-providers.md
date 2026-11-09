@@ -469,8 +469,9 @@ The row is written when the pull ends, so a refusal that comes while the pull st
 The Signal's content is in the stream until it is ingested, so the NATS account holds connector content in the meantime.
 
 What was taken in and not ingested goes when its workspace or connector does: archiving a workspace or finishing its move removes the tenant's queued Signals and intake dead letters queued for that workspace or by one of its connectors, and deleting a connector removes the ones it queued (`IntakeQueue.forget_workspace/4`, `forget_connector/3`).
-The request is written first as an `events` row (`kind = 'nats_intake_purge_requested'`), done at once when NATS is reachable and otherwise when the intake queue is next provisioned, and each one done is a `nats_purge` event (`target_uri` `nats-intake-purge-request:<id>`, with `queued_purged` and `dead_letters_removed`).
+The request is written first as an `events` row (`kind = 'nats_intake_purge_requested'`); one that cannot be written is the caller's error, since nothing would retry it. It is done at once when NATS is reachable, and otherwise retried every minute and whenever the intake queue is provisioned; each one done is a `nats_purge` event (`target_uri` `nats-intake-purge-request:<id>`, with `queued_purged` and `dead_letters_removed`).
 A rename keeps them: its connectors move with the rows, and the queued Signals are ingested into the new id.
+A Signal a consumer had already fetched when the removal ran, or one a connector run still publishing queues afterwards, is not ingested either: before it ingests, the consumer checks that the Signal's workspace and its connector's workspace are active and the connector exists, and drops (terminates) it otherwise; a store that does not answer brings the message back later. A payload without a tenant is the default tenant's.
 
 ### Dead letters
 

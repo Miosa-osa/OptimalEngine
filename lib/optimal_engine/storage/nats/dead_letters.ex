@@ -26,6 +26,8 @@ defmodule OptimalEngine.Storage.NATS.DeadLetters do
   `mix optimal.nats` call these for the Engine operator.
   """
 
+  require Logger
+
   alias OptimalEngine.Storage.NATS
   alias OptimalEngine.Storage.NATS.{Connection, JetStream}
 
@@ -47,9 +49,22 @@ defmodule OptimalEngine.Storage.NATS.DeadLetters do
   """
   @spec max_age_ms() :: non_neg_integer()
   def max_age_ms do
-    case Integer.parse(System.get_env(@max_age_env) || "") do
-      {hours, ""} when hours >= 0 -> hours * 3_600_000
-      _unset_or_invalid -> @default_max_age_hours * 3_600_000
+    case System.get_env(@max_age_env) do
+      nil ->
+        @default_max_age_hours * 3_600_000
+
+      value ->
+        case Integer.parse(String.trim(value)) do
+          {hours, ""} when hours >= 0 ->
+            hours * 3_600_000
+
+          _invalid ->
+            Logger.warning(
+              "#{@max_age_env}=#{inspect(value)} is not a whole number of hours; dead letters are kept #{@default_max_age_hours} hours"
+            )
+
+            @default_max_age_hours * 3_600_000
+        end
     end
   end
 

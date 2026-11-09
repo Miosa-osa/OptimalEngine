@@ -51,6 +51,7 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   alias OptimalEngine.{Signal, Store}
   alias OptimalEngine.Storage.NATS
   alias OptimalEngine.Storage.NATS.{Connection, DeadLetters, Protocol, WorkQueue}
+  alias OptimalEngine.Tenancy.Tenant
 
   @request_kind "nats_intake_purge_requested"
 
@@ -163,27 +164,34 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
     with {:ok, namespace} <- namespace(opts),
          true <- Keyword.has_key?(opts, :connection) or NATS.flow?("intake") do
       conn = Keyword.get(opts, :connection, default_conn())
-      id = record_request(namespace, request, target)
 
-      if Connection.connected?(conn) do
-        case purge(conn, namespace, request) do
-          {:ok, counts} ->
-            done(id, namespace, request, counts)
-            {:ok, counts}
-
-          {:error, reason} ->
-            Logger.warning("[NATS] intake removal #{id} not done yet: #{inspect(reason)}")
-            {:ok, %{pending: true}}
-        end
-      else
-        {:ok, %{pending: true}}
+      case record_request(namespace, request, target) do
+        {:ok, id} -> forget_now(conn, id, namespace, request)
+        {:error, reason} -> {:error, {:request_not_recorded, reason}}
       end
     else
       _off -> {:ok, %{state: "off"}}
     end
+  end
+
+  # Recorded: a failure from here on is retried (`periodic/2`, `on_provisioned/2`).
+  defp forget_now(conn, id, namespace, request) do
+    if Connection.connected?(conn) do
+      case purge(conn, namespace, request) do
+        {:ok, counts} ->
+          done(id, namespace, request, counts)
+          {:ok, counts}
+
+        {:error, reason} ->
+          Logger.warning("[NATS] intake removal #{id} not done yet: #{inspect(reason)}")
+          {:ok, %{pending: true}}
+      end
+    else
+      {:ok, %{pending: true}}
+    end
   rescue
     error ->
-      Logger.warning("[NATS] intake removal failed: #{Exception.message(error)}")
+      Logger.warning("[NATS] intake removal #{id} not done yet: #{Exception.message(error)}")
       {:ok, %{pending: true}}
   catch
     :exit, _ -> {:ok, %{pending: true}}
@@ -225,12 +233,13 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
 
   # The tenant's queued Signals and the intake dead letters this request names.
   defp purge(conn, namespace, request) do
-    tenant = request["tenant_id"]
+    # A payload without a tenant is the default tenant's, and no other's.
+    tenant = request["tenant_id"] || Tenant.default_id()
     connectors = request["connector_ids"] || []
     workspace = request["workspace_id"]
 
     match? = fn payload ->
-      payload["tenant_id"] == tenant and
+      (payload["tenant_id"] || Tenant.default_id()) == tenant and
         ((is_binary(workspace) and payload["workspace_id"] == workspace) or
            payload["connector_id"] in connectors)
     end
@@ -244,7 +253,20 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
     end
   end
 
+  # `{:ok, id}`, or why the request could not be written: then nothing would
+  # retry it, so the caller is told.
   defp record_request(namespace, request, target) do
+    case Application.get_env(:optimal_engine, :intake_purge_record) do
+      nil -> {:ok, insert_request(namespace, request, target)}
+      record -> {:ok, record.(namespace, request, target)}
+    end
+  rescue
+    error -> {:error, Exception.message(error)}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  defp insert_request(namespace, request, target) do
     {:ok, [[id]]} =
       Store.raw_query(
         """
@@ -317,7 +339,14 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   @impl WorkQueue
   def stream_options, do: %{}
 
-  # Removals asked for while NATS was down are done once the queue is up.
+  # Removals asked for while NATS was down, or that failed while it was up,
+  # are retried every minute (`:purge_retry_ms`) and when the queue is up.
+  @impl WorkQueue
+  def periodic(server, context), do: on_provisioned(server, context)
+
+  @impl WorkQueue
+  def periodic_ms(context), do: Map.get(context, :purge_retry_ms, 60_000)
+
   @impl WorkQueue
   def on_provisioned(_server, context) do
     with {:ok, namespace} <- namespace(Map.to_list(Map.take(context, [:namespace]))) do
@@ -356,31 +385,69 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
 
     ingest = Map.get(context, :ingest, &PullScheduler.ingest_signal/2)
 
-    case Rows.get(tenant, connector) do
-      {:ok, row} ->
-        scope = %{
-          workspace_id: row.workspace_id,
-          tenant_id: tenant,
-          connector_id: connector,
-          kind: row.kind,
-          config: row.config || %{}
-        }
-
-        case ingest.(decode_signal(encoded), scope) do
-          :ok ->
-            :ack
-
-          :refused ->
-            refused(decoded["run_id"], connector, context)
+    case {Rows.get(tenant, connector), workspace_state(tenant, decoded["workspace_id"])} do
+      # Archived, moved or gone since it was queued (or since this consumer
+      # fetched it): what was taken in for it is never ingested now.
+      {{:ok, row}, :active} when is_binary(row.workspace_id) ->
+        case workspace_state(tenant, row.workspace_id) do
+          :active -> ingest_queued(row, tenant, connector, decoded, encoded, ingest, context)
+          :unknown -> {:retry, Map.get(context, :retry_ms, 2_000)}
+          :gone -> dropped(connector, row.workspace_id)
         end
 
-      {:error, :not_found} ->
+      {{:ok, _row}, :unknown} ->
+        {:retry, Map.get(context, :retry_ms, 2_000)}
+
+      {{:ok, _row}, :gone} ->
+        dropped(connector, decoded["workspace_id"])
+
+      {{:error, :not_found}, _} ->
         Logger.warning(
           "[NATS] queued Signal dropped: connector #{inspect(connector)} no longer exists"
         )
 
         :term
     end
+  end
+
+  defp ingest_queued(row, tenant, connector, decoded, encoded, ingest, context) do
+    scope = %{
+      workspace_id: row.workspace_id,
+      tenant_id: tenant,
+      connector_id: connector,
+      kind: row.kind,
+      config: row.config || %{}
+    }
+
+    case ingest.(decode_signal(encoded), scope) do
+      :ok -> :ack
+      :refused -> refused(decoded["run_id"], connector, context)
+    end
+  end
+
+  defp dropped(connector, workspace_id) do
+    Logger.warning(
+      "[NATS] queued Signal of connector #{inspect(connector)} dropped: workspace #{inspect(workspace_id)} is archived or gone"
+    )
+
+    :term
+  end
+
+  # `:active`, `:gone` (absent or not active), or `:unknown` when the store did
+  # not answer: then the message comes back rather than being ingested or lost.
+  # A payload that names no workspace is decided by its connector's.
+  defp workspace_state(_tenant, nil), do: :active
+
+  defp workspace_state(tenant, workspace_id) do
+    case Store.raw_query("SELECT tenant_id, status FROM workspaces WHERE id = ?1", [workspace_id]) do
+      {:ok, [[owner, "active"]]} -> if owner == tenant, do: :active, else: :gone
+      {:ok, _absent_or_inactive} -> :gone
+      {:error, _reason} -> :unknown
+    end
+  rescue
+    _ -> :unknown
+  catch
+    :exit, _ -> :unknown
   end
 
   # A refusal is counted in the run row of the pull that queued it. That row is

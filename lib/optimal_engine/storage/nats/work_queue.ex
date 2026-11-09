@@ -45,8 +45,14 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   @callback on_provisioned(GenServer.server(), map()) :: :ok
   @callback dead_letter_after(map()) :: pos_integer() | nil
   @callback on_dead_letter(JetStream.message(), String.t(), map()) :: :ok
+  @callback periodic(GenServer.server(), map()) :: :ok
+  @callback periodic_ms(map()) :: pos_integer()
 
-  @optional_callbacks on_provisioned: 2, dead_letter_after: 1, on_dead_letter: 3
+  @optional_callbacks on_provisioned: 2,
+                      dead_letter_after: 1,
+                      on_dead_letter: 3,
+                      periodic: 2,
+                      periodic_ms: 1
 
   @batch 10
   @no_counts %{acked: 0, retried: 0, terminated: 0, failed: 0, dead_lettered: 0}
@@ -160,8 +166,18 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
       last_error: nil
     }
 
+    schedule_periodic(state)
     {:ok, maybe_start_consumer(state)}
   end
+
+  # A callback with periodic work (the intake queue's pending removals) gets
+  # it run off this process every `periodic_ms/1`, while the queue is on.
+  defp schedule_periodic(%{enabled: true, callback: callback, context: context}) do
+    if function_exported?(callback, :periodic, 2),
+      do: Process.send_after(self(), :periodic, callback.periodic_ms(context))
+  end
+
+  defp schedule_periodic(_state), do: nil
 
   @impl GenServer
   def handle_call(:status, _from, state) do
@@ -227,6 +243,14 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   end
 
   def handle_info(:restart_consumer, state), do: {:noreply, maybe_start_consumer(state)}
+
+  def handle_info(:periodic, state) do
+    {callback, name, context} = {state.callback, self_name(state), state.context}
+    spawn(fn -> callback.periodic(name, context) end)
+    schedule_periodic(state)
+    {:noreply, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   defp handle_publish(token, payload, msg_id, state) do

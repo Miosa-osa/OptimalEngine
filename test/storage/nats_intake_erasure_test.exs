@@ -225,6 +225,116 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
     assert {:ok, %{}} = IntakeQueue.process_requests(ctx.conn, "optimal")
   end
 
+  describe "review: nothing erased is ingested afterwards" do
+    defp in_flight(ctx, workspace, tag) do
+      %{
+        subject: "optimal.intake.#{ctx.tenant}.#{ctx.connectors[workspace]}",
+        payload:
+          Jason.encode!(%{
+            "tenant_id" => ctx.tenant,
+            "connector_id" => ctx.connectors[workspace],
+            "workspace_id" => workspace,
+            "signal" => IntakeQueue.encode_signal(signal(ctx, tag, 1))
+          }),
+        headers: %{},
+        reply: nil,
+        stream: "OPTIMAL_INTAKE",
+        consumer: nil,
+        delivered: 1,
+        stream_seq: 1,
+        consumer_seq: 1,
+        pending: 0
+      }
+    end
+
+    test "a Signal a consumer already holds when its workspace is archived is dropped", ctx do
+      test = self()
+      ingest = fn _signal, _scope -> send(test, :ingested) && :ok end
+      message = in_flight(ctx, ctx.ws, "held")
+
+      assert :ok = Workspace.archive(ctx.ws)
+
+      assert :term = IntakeQueue.handle_message(message, %{ingest: ingest})
+      refute_received :ingested
+
+      # The other workspace's still goes in.
+      assert :ack = IntakeQueue.handle_message(in_flight(ctx, ctx.other, "live"), %{ingest: ingest})
+      assert_received :ingested
+    end
+
+    test "a removal whose request cannot be recorded is an error, not pending", ctx do
+      Application.put_env(:optimal_engine, :intake_purge_record, fn _ns, _req, _target ->
+        raise "events table unavailable"
+      end)
+
+      on_exit(fn -> Application.delete_env(:optimal_engine, :intake_purge_record) end)
+
+      assert {:error, {:request_not_recorded, _}} =
+               IntakeQueue.forget_workspace(ctx.tenant, ctx.ws, "archived",
+                 connection: ctx.conn,
+                 namespace: "optimal"
+               )
+    end
+
+    test "a recorded removal is retried on a timer, not only on reprovision", ctx do
+      fill(ctx)
+      down = :"nats_ie_down2_#{ctx.n}"
+      start_supervised!({Connection, name: down, url: nil}, id: down)
+
+      assert {:ok, %{pending: true}} =
+               IntakeQueue.forget_workspace(ctx.tenant, ctx.ws, "archived",
+                 connection: down,
+                 namespace: "optimal"
+               )
+
+      # A queue already provisioned: only its timer can pick the request up.
+      _q = queue(ctx, purge_retry_ms: 50)
+      assert wait_for(fn -> held(ctx, "gone") == [] end)
+      assert held(ctx, "kept") == ["OPTIMAL_INTAKE"]
+    end
+
+    test "an untenanted payload is the default tenant's, and no other tenant's", ctx do
+      {:ok, default_ws} = Workspace.create(%{slug: "ie-default-#{ctx.n}", name: "IE default"})
+      q = queue(ctx)
+      IntakeQueue.drain_now(q)
+
+      payload = fn ws ->
+        Jason.encode!(%{
+          "connector_id" => "untenanted-#{ctx.n}",
+          "workspace_id" => ws,
+          "signal" => %{"content" => "zqintakeuntenanted#{ctx.n}xv"}
+        })
+      end
+
+      for {ws, i} <- [{default_ws.id, 1}, {ctx.ws, 2}] do
+        {:ok, _} =
+          OptimalEngine.Storage.NATS.JetStream.publish(
+            ctx.conn,
+            "optimal.intake.default.untenanted-#{ctx.n}",
+            payload.(ws),
+            msg_id: "untenanted-#{ctx.n}-#{i}"
+          )
+      end
+
+      # Another tenant's erasure of a workspace id never touches them.
+      assert {:ok, %{queued_purged: 0}} =
+               IntakeQueue.forget_workspace(ctx.tenant, ctx.ws, "archived",
+                 connection: ctx.conn,
+                 namespace: "optimal"
+               )
+
+      assert length(held(ctx, "untenanted")) == 2
+
+      assert {:ok, %{queued_purged: 1}} =
+               IntakeQueue.forget_workspace("default", default_ws.id, "archived",
+                 connection: ctx.conn,
+                 namespace: "optimal"
+               )
+
+      assert length(held(ctx, "untenanted")) == 1
+    end
+  end
+
   describe "the dead-letter age limit" do
     defp dead_letter_config(ctx),
       do: NATSStub.streams(ctx.stub)["OPTIMAL_DEAD_LETTERS"].config
@@ -243,9 +353,15 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
       assert :ok = DeadLetters.ensure(ctx.conn, "optimal")
       assert dead_letter_config(ctx)["max_age"] == 0
 
-      # Not a whole number of hours: the default, never a crash.
+      # Not a whole number of hours: the default, never a crash, and said so.
       System.put_env("OPTIMAL_NATS_DEAD_LETTER_MAX_AGE_HOURS", "soon")
-      assert DeadLetters.max_age_ms() == 720 * 3_600_000
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert DeadLetters.max_age_ms() == 720 * 3_600_000
+        end)
+
+      assert log =~ "OPTIMAL_NATS_DEAD_LETTER_MAX_AGE_HOURS"
     end
 
     test "is the limit the work queue provisions the dead letters with", ctx do
