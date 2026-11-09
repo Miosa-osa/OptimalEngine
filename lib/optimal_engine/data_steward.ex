@@ -362,6 +362,7 @@ defmodule OptimalEngine.DataSteward do
     tenant = Keyword.fetch!(opts, :tenant_id)
 
     with {:ok, tables} <- workspace_tables(),
+         {:ok, lock_names} <- all_tables(),
          {:ok, evidence_key} <- recording_key(tenant, source_workspace_id) do
       {scoped, unscoped} = Enum.split_with(tables, & &1.tenant_scoped?)
       # A mention that records no tenant is traced through its context or
@@ -371,7 +372,9 @@ defmodule OptimalEngine.DataSteward do
       traced = for name <- @traced_tables, table <- unscoped, table.name == name, do: table
 
       Store.transaction(fn txn ->
-        with :ok <- check_target(txn, tenant, target_workspace_id),
+        # Writers wait for the repair rather than starve it (see rename_workspace/3).
+        with :ok <- Store.txn_lock_tables(txn, lock_names),
+             :ok <- check_target(txn, tenant, target_workspace_id),
              :ok <- check_orphan_source(txn, tenant, source_workspace_id),
              {:ok, moved_traced} <-
                move_rows(txn, traced, source_workspace_id, target_workspace_id, tenant),
@@ -460,6 +463,7 @@ defmodule OptimalEngine.DataSteward do
 
     with :ok <- source_registered(tenant, source_workspace_id),
          {:ok, tables} <- workspace_tables(),
+         {:ok, lock_names} <- all_tables(),
          {:ok, evidence_key} <- recording_key(tenant, source_workspace_id) do
       # A crash during an earlier rename may have left a directory under the id its rows
       # do not have; put it back before looking at the directory again.
@@ -472,8 +476,11 @@ defmodule OptimalEngine.DataSteward do
 
       Store.transaction(
         fn txn ->
-          # Updates of the workspace wait for the rename rather than starve it.
-          with :ok <- Store.txn_lock_row(txn, "workspaces", "id", source_workspace_id),
+          # Writers wait for the rename rather than starve it: it reads and rewrites
+          # every table, and on PostgreSQL each short transaction that wrote one of
+          # them while it ran would abort it again.
+          with :ok <- Store.txn_lock_tables(txn, lock_names),
+               :ok <- Store.txn_lock_row(txn, "workspaces", "id", source_workspace_id),
                {:ok, workspace} <- read_source(txn, tenant, source_workspace_id),
                :ok <- check_rename_target(txn, workspace, tenant, target_workspace_id),
                :ok <- target_free_of_rows(txn, tables, target_workspace_id),

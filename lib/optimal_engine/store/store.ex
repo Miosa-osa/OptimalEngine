@@ -141,6 +141,29 @@ defmodule OptimalEngine.Store do
     end
   end
 
+  @doc """
+  Holds `tables` against writers until the transaction ends; readers go on.
+  A transaction that reads and rewrites many tables is otherwise aborted by
+  the serialization checks of every short transaction that writes any of them
+  while it runs, and under steady load its retries run out. Writers wait for
+  it instead, as they always do on SQLite, whose store runs one writer at a
+  time, so there it does nothing. Call it first in the transaction, before any
+  read, so the transaction's snapshot is taken once the tables are held.
+  """
+  @spec txn_lock_tables(term(), [String.t()]) :: :ok | {:error, term()}
+  def txn_lock_tables(_txn, []), do: :ok
+
+  def txn_lock_tables(txn, tables) when is_list(tables) do
+    if selected?(OptimalEngine.Store.Postgres) do
+      names = Enum.map_join(tables, ", ", &~s("#{String.replace(&1, ~s("), ~s(""))}"))
+      sql = "LOCK TABLE #{names} IN SHARE ROW EXCLUSIVE MODE"
+
+      with {:ok, _} <- OptimalEngine.Store.Postgres.txn_execute_native(txn, sql, []), do: :ok
+    else
+      :ok
+    end
+  end
+
   def insert_chunks(chunks), do: adapter().insert_chunks(chunks)
 
   def insert_classifications(rows), do: adapter().insert_classifications(rows)
