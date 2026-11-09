@@ -124,8 +124,10 @@ Replace every development credential before exposing the service.
 | Service in the overlay | Status |
 | --- | --- |
 | Garage (S3) | Wired. Assets and offsite backups. |
-| PostgreSQL | Wired but partial, and for an Engine started with `OPTIMAL_STORE=postgres`. Behind the separate `postgres` profile. The stock image keeps its data in SQLite. |
-| NATS JetStream, Valkey, Qdrant | An adapter checks and proves each one; no Engine feature uses them yet. Commented out in the overlay; uncomment one to try its probe and proof. |
+| PostgreSQL | Wired, for an Engine started with `OPTIMAL_STORE=postgres`. Behind the separate `postgres` profile. The stock image keeps its data in SQLite. |
+| NATS JetStream | Checked and proved, and carries the flows named in `OPTIMAL_NATS_FLOWS` (the change ledger, background jobs, connector intake). Commented out in the overlay. |
+| Valkey | Checked and proved, and carries the API and connector rate limits, the verified API key cache and the sync gate cache when configured, with ETS as the fallback. Commented out in the overlay. |
+| Qdrant | An adapter checks and proves it; no Engine feature uses it yet. Commented out in the overlay; uncomment it to try its probe and proof. |
 | OpenBao | Checked and proved, and used when configured: secret references (`openbao:<path>#<field>`), connector credentials (opt in with `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`), and backup transit keys ([Storage providers](../docs/guides/storage-providers.md#openbao)). Commented out in the overlay. |
 
 Garage signs requests for the region in `storage/garage.toml` (`s3_region = "garage"`).

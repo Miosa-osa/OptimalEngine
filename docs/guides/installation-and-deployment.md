@@ -220,7 +220,7 @@ Only two providers are usable today.
 | Provider | Status | What it holds |
 | --- | --- | --- |
 | S3-compatible storage (Garage, MinIO, or another) | Wired | Assets and offsite backups |
-| PostgreSQL | Wired but partial | The canonical relational store of a Postgres build |
+| PostgreSQL | Wired | The canonical relational store of an `OPTIMAL_STORE=postgres` Engine |
 | NATS JetStream | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS`; nothing without them |
 | Valkey | Adapter, health-checked and proved, in the data path | Shared rate limits and caches, ETS as the fallback |
 | Qdrant | Adapter, health-checked and proved | Nothing yet; no Engine feature uses it |
@@ -304,7 +304,7 @@ The Engine is still one instance on one durable disk.
 | Provider | Status | Notes |
 | --- | --- | --- |
 | Managed S3: AWS S3, Cloudflare R2 | Wired | Assets and offsite backups |
-| Managed PostgreSQL | Wired but partial | The Postgres build above, with the same refusals |
+| Managed PostgreSQL | Wired | The `OPTIMAL_STORE=postgres` Engine above |
 | Managed NATS | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS` |
 | Managed Valkey | Adapter, health-checked and proved | Shared rate limits and caches across the Engine's processes |
 | Managed Qdrant | Adapter, health-checked and proved | Reached and proved; no Engine feature uses it yet |

@@ -34,7 +34,7 @@ CLI_BUILD = ROOT / 'apps' / 'cli' / 'build.sh'
 VERSION = mix_version()
 MCP_ARCHIVE = f'optimal-engine-mcp-{VERSION}.tar.gz'
 ENV_VARS = ('env_vars = ["OPTIMAL_ENGINE_URL", "OPTIMAL_ENGINE_API_KEY", "OPTIMAL_ENGINE_API_KEY_FILE", '
-            '"OPTIMAL_WORKSPACE", "OPTIMAL_PROFILE", "XDG_CONFIG_HOME"]')
+            '"OPTIMAL_WORKSPACE", "OPTIMAL_PROFILE", "OPTIMAL_WAKE_TIMEOUT", "XDG_CONFIG_HOME"]')
 
 
 def node_ok():

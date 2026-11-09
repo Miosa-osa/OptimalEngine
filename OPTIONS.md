@@ -107,9 +107,11 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 
 The mirror is not what retrieval reads: the graph that search and assembly read is the `graph_edges` table in SQLite.
 
-Providers with an adapter that no Engine feature uses yet: `OPTIMAL_VALKEY_URL` and `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`.
+`OPTIMAL_VALKEY_URL` puts the API and connector rate limits, the verified API key cache and the sync gate cache in Valkey, with ETS as the fallback; see [Valkey](docs/guides/storage-providers.md#valkey).
 OpenBao (above) is in the data path: see [Storage providers](docs/guides/storage-providers.md#openbao).
-Setting them lets `GET /api/storage/providers?probe=true` check each service and the provider proofs prove it with a round trip; the Engine's data stays where it is.
+`OPTIMAL_ANALYTICS_PATH` (DuckDB and Parquet, below) holds each workspace's analytics files.
+The provider with an adapter that no Engine feature uses yet is Qdrant: `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`.
+Setting these lets `GET /api/storage/providers?probe=true` check each service and the provider proofs prove it with a round trip; the Engine's data stays where it is.
 NATS JetStream is reached the same way, and runs the flows it is given:
 
 | Variable | Default | Purpose |
