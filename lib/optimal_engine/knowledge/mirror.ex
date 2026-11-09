@@ -35,8 +35,9 @@ defmodule OptimalEngine.Knowledge.Mirror do
 
   The triggers are installed at boot and not by a migration, because the
   PostgreSQL store derives its schema from the migrations and has no
-  counterpart for a trigger that writes an ordinary table. A PostgreSQL build
-  records no changes.
+  counterpart for a trigger that writes an ordinary table. On PostgreSQL they
+  are one PL/pgSQL trigger function with the same two cases, installed the
+  same way.
   """
 
   require Logger
@@ -109,13 +110,61 @@ defmodule OptimalEngine.Knowledge.Mirror do
 
   @doc """
   Installs the two triggers, or replaces them when their definition changed.
-  Only the SQLite store records changes.
+  Both stores record changes.
   """
   @spec install() :: :ok | :skipped | {:error, term()}
   def install do
     if Store.selected?(OptimalEngine.Store.SQLite),
       do: store_call(&install_triggers/0),
-      else: :skipped
+      else: store_call(&install_postgres/0)
+  end
+
+  # The same two cases as the SQLite triggers, in one function, replaced as a
+  # whole each boot (CREATE OR REPLACE), under a lock so engines that share a
+  # database install it one at a time.
+  @postgres_function """
+  CREATE OR REPLACE FUNCTION triple_mirror_change() RETURNS trigger
+  LANGUAGE plpgsql SET search_path FROM CURRENT AS $fn$
+  BEGIN
+    IF TG_OP = 'DELETE' THEN
+      INSERT INTO triple_mirror_changes (op, graph, subject, predicate, object)
+      VALUES ('retract', OLD.workspace_id, OLD.source_id, OLD.relation, OLD.target_id);
+    ELSIF OLD.workspace_id IS DISTINCT FROM NEW.workspace_id
+       OR OLD.source_id IS DISTINCT FROM NEW.source_id
+       OR OLD.relation IS DISTINCT FROM NEW.relation
+       OR OLD.target_id IS DISTINCT FROM NEW.target_id THEN
+      INSERT INTO triple_mirror_changes (op, graph, subject, predicate, object)
+      VALUES ('retract', OLD.workspace_id, OLD.source_id, OLD.relation, OLD.target_id);
+      INSERT INTO triple_mirror_changes (op, graph, subject, predicate, object)
+      VALUES ('assert', NEW.workspace_id, NEW.source_id, NEW.relation, NEW.target_id);
+    END IF;
+    RETURN NULL;
+  END
+  $fn$
+  """
+
+  defp install_postgres do
+    statements = [
+      "SELECT pg_advisory_xact_lock(hashtext('optimal_engine.triple_mirror'))",
+      @postgres_function,
+      "CREATE OR REPLACE TRIGGER triple_mirror_edge_deleted AFTER DELETE ON graph_edges " <>
+        "FOR EACH ROW EXECUTE FUNCTION triple_mirror_change()",
+      "CREATE OR REPLACE TRIGGER triple_mirror_edge_moved " <>
+        "AFTER UPDATE OF workspace_id, source_id, relation, target_id ON graph_edges " <>
+        "FOR EACH ROW EXECUTE FUNCTION triple_mirror_change()"
+    ]
+
+    result =
+      Store.transaction(fn txn ->
+        Enum.reduce_while(statements, {:ok, :installed}, fn sql, ok ->
+          case OptimalEngine.Store.Postgres.txn_query_native(txn, sql, []) do
+            {:ok, _} -> {:cont, ok}
+            {:error, _} = error -> {:halt, error}
+          end
+        end)
+      end)
+
+    with {:ok, _} <- result, do: :ok
   end
 
   defp install_triggers do

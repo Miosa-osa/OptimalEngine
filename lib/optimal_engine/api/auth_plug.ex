@@ -114,6 +114,15 @@ defmodule OptimalEngine.API.AuthPlug do
       {:error, :expired} ->
         halt_401(conn, "api_key_expired")
 
+      # The key could not be read in time: a retry may succeed, so the answer
+      # is the busy one the routes give, not a refusal of the key.
+      {:error, :busy} ->
+        conn
+        |> put_resp_header("retry-after", "1")
+        |> put_resp_content_type("application/json")
+        |> send_resp(503, Jason.encode!(%{error: "busy"}))
+        |> halt()
+
       {:error, _} ->
         halt_401(conn, "invalid_api_key")
     end

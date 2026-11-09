@@ -138,7 +138,9 @@ defmodule OptimalEngine.Store.Postgres.SQLiteFunctionsParityTest do
         ~s/SELECT v GLOB 'a*', v GLOB 'A*', v GLOB 'a?c', v GLOB '[a-c]bc', v GLOB '[^a]*', v GLOB 'a.c' FROM (SELECT 'abc' AS v) t/,
         {~s/SELECT v GLOB ?1, v NOT GLOB ?1 FROM (SELECT 'exampleorg-1:secrets' AS v) t/,
          ["exampleorg-*:secrets"]},
-        ~s|SELECT v GLOB '*[^!-~]*' FROM (SELECT 'ascii' AS v UNION ALL SELECT 'naïve') t|
+        ~s|SELECT v GLOB '*[^!-~]*' FROM (SELECT 'ascii' AS v UNION ALL SELECT 'naïve') t|,
+        # The text of a json_extract, as migration 72 matches an external id.
+        ~s|SELECT json_extract(m, '$.id') GLOB '*[^!-~]*', NOT (json_extract(m, '$.id') GLOB 'x*') FROM (SELECT '{"id":"x-1"}' AS m UNION ALL SELECT '{"id":"naïve"}' UNION ALL SELECT '{"id":7}') t|
       ])
     )
   end

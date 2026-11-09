@@ -24,6 +24,7 @@ defmodule OptimalEngine.Store.Postgres.Errors do
   """
 
   @retryable [:serialization_failure, :deadlock_detected]
+  @busy [:query_canceled, :lock_not_available]
 
   @doc "The error as SQLite would word it."
   @spec message(term()) :: String.t()
@@ -31,6 +32,21 @@ defmodule OptimalEngine.Store.Postgres.Errors do
   def message(%Postgrex.Error{message: message}) when is_binary(message), do: message
   def message(%{__exception__: true} = exception), do: Exception.message(exception)
   def message(other), do: inspect(other)
+
+  @doc """
+  A failed statement as the store returns it: `:busy` when it did not finish
+  in its time (its timeout ran out, or a lock it waited for did not come), as
+  SQLite's store answers a call it could not serve in time; otherwise the
+  message SQLite would give.
+  """
+  @spec failure(term()) :: :busy | String.t()
+  def failure(%Postgrex.Error{postgres: %{code: code}}) when code in @busy, do: :busy
+
+  def failure(%DBConnection.ConnectionError{message: message} = error) do
+    if message =~ ~r/time(d)? ?out/i, do: :busy, else: message(error)
+  end
+
+  def failure(error), do: message(error)
 
   @doc """
   True for the failures PostgreSQL asks the client to retry: a serialization

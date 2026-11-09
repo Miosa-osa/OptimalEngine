@@ -815,20 +815,15 @@ defmodule OptimalEngine.AuthorityTest do
     test "swapping two entries breaks the links", ctx do
       for _ <- 1..3, do: grant!(ctx)
 
-      {:ok, _} =
-        Store.raw_query(
-          """
-          UPDATE authority_evidence SET tenant_seq = CASE tenant_seq WHEN 2 THEN 1002 WHEN 3 THEN 2 END
-          WHERE tenant_id = ?1 AND tenant_seq IN (2, 3)
-          """,
-          [ctx.tenant]
-        )
-
-      {:ok, _} =
-        Store.raw_query(
-          "UPDATE authority_evidence SET tenant_seq = 3 WHERE tenant_id = ?1 AND tenant_seq = 1002",
-          [ctx.tenant]
-        )
+      # One row at a time: a unique key is checked as each row changes, and the
+      # stores change the rows of one UPDATE in no order they promise.
+      for {from, to} <- [{2, 1002}, {3, 2}, {1002, 3}] do
+        {:ok, _} =
+          Store.raw_query(
+            "UPDATE authority_evidence SET tenant_seq = ?2 WHERE tenant_id = ?1 AND tenant_seq = ?3",
+            [ctx.tenant, to, from]
+          )
+      end
 
       assert {:error, %{reason: reason}} = Evidence.verify(ctx.tenant)
       assert reason in [:broken_link, :hash_mismatch]

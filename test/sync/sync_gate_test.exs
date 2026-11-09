@@ -3448,9 +3448,17 @@ defmodule OptimalEngine.SyncGateTest do
     result = fun.()
 
     cond do
-      stamp_sequences() == before -> result
-      attempts > 1 -> while_stamp_holds(fun, attempts - 1)
-      true -> flunk("the write sequences kept moving under the test")
+      stamp_sequences() == before ->
+        result
+
+      # A write elsewhere in the Engine (a scheduler, a test's leftover task)
+      # moved them; it settles in a moment.
+      attempts > 1 ->
+        Process.sleep(50)
+        while_stamp_holds(fun, attempts - 1)
+
+      true ->
+        flunk("the write sequences kept moving under the test")
     end
   end
 

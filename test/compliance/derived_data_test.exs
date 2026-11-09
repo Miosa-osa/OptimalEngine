@@ -42,7 +42,7 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
         {name, value} -> Application.put_env(:optimal_engine, name, value)
       end)
 
-      Store.raw_query("DROP TABLE IF EXISTS source_packages_fts", [])
+      OptimalEngine.Test.StoreDDL.execute("DROP TABLE IF EXISTS source_packages_fts", [])
       File.rm_rf(root)
     end)
 
@@ -349,8 +349,8 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
       # The third batch cannot be deleted.
       poison = List.last(ids)
 
-      {:ok, _} =
-        Store.raw_query(
+      :ok =
+        OptimalEngine.Test.StoreDDL.execute(
           """
           CREATE TRIGGER IF NOT EXISTS derived_data_test_poison BEFORE DELETE ON contexts
           WHEN old.id = '#{poison}'
@@ -364,11 +364,14 @@ defmodule OptimalEngine.Compliance.DerivedDataTest do
       remaining = Enum.count(ids, &(count("contexts", "id", &1) == 1))
       assert remaining == 50
 
-      {:ok, _} = Store.raw_query("DROP TRIGGER derived_data_test_poison", [])
+      :ok = OptimalEngine.Test.StoreDDL.execute("DROP TRIGGER derived_data_test_poison", [])
       assert {:ok, %{contexts: 50}} = DerivedData.erase_contexts("default", ids)
       assert Enum.all?(ids, &(count("contexts", "id", &1) == 0))
     end
 
+    # An FTS5 table older SQLite databases have. A PostgreSQL store never had
+    # one: its full-text rows follow the table they index (Postgres.FullTextTest).
+    @tag :sqlite_store
     test "deletes a source package's full-text index rows where an older database has one", ctx do
       seeded = seed!("fts-#{ctx.n}", ctx)
 

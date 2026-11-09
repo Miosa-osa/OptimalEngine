@@ -830,12 +830,14 @@ defmodule OptimalEngine.DataStewardTenantTest do
   describe "tables with no tenant column" do
     setup do
       :ok =
-        Store.raw_execute(
+        OptimalEngine.Test.StoreDDL.execute(
           "CREATE TABLE IF NOT EXISTS steward_tenantless_test (workspace_id TEXT NOT NULL, note TEXT)",
           []
         )
 
-      on_exit(fn -> Store.raw_execute("DROP TABLE IF EXISTS steward_tenantless_test", []) end)
+      on_exit(fn ->
+        OptimalEngine.Test.StoreDDL.execute("DROP TABLE IF EXISTS steward_tenantless_test", [])
+      end)
     end
 
     defp tenantless(workspace) do

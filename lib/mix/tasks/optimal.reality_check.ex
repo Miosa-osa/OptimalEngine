@@ -1971,7 +1971,7 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
         IO.ANSI.red() <> "Reality check: #{fail} failures. See FAIL lines above." <> IO.ANSI.reset()
       )
 
-      System.halt(1)
+      exit({:shutdown, 1})
     end
   end
 end

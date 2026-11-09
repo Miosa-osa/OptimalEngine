@@ -562,12 +562,19 @@ defmodule OptimalEngine.Store.Postgres.Schema do
   defp views(objects) do
     for [name, "view", _wr, sql] <- objects, reduce: {[], []} do
       {views, notes} ->
+        # A json_extract in a view's select list would make its column JSON
+        # rather than SQLite's value, which only a query's own results convert.
         with [_, select] <- Regex.run(@view_header, sql),
+             {:ok, _, %{json_columns: []}} <- Dialect.translate(select),
              {:ok, translated} <- Dialect.to_postgres(select) do
           {views ++ [%{name: name, sql: translated}], notes}
         else
           nil ->
             {views, notes ++ [%{kind: :view, name: name, reason: "unrecognised header"}]}
+
+          {:ok, _translated, %{json_columns: [_ | _]}} ->
+            {views,
+             notes ++ [%{kind: :view, name: name, reason: "json_extract in the select list"}]}
 
           {:error, reason} ->
             {views, notes ++ [%{kind: :view, name: name, reason: inspect(reason)}]}

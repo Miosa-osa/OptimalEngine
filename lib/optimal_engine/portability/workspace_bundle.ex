@@ -2185,6 +2185,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     {:ok, total} =
       Store.transaction(fn txn ->
+        # A hundred table-wide deletes meet every concurrent writer at
+        # SERIALIZABLE; the rows are the workspace's own.
+        :ok = Store.txn_read_committed(txn)
         {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
 
         total =

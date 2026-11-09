@@ -523,15 +523,10 @@ defmodule OptimalEngine.Pipeline.UniqueUriTest do
       assert {:ok, [[77]]} =
                Store.raw_query("SELECT version FROM schema_migrations WHERE version = 77", [])
 
-      {:ok, names} =
-        Store.raw_query(
-          "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'contexts'",
-          []
-        )
-
-      names = List.flatten(names)
-      assert "idx_contexts_ws_uri" in names
-      assert "idx_contexts_ws_path" in names
+      # Index names differ between the stores; the columns are what the check reads.
+      {:ok, indexes} = OptimalEngine.Store.Catalog.index_columns("contexts")
+      assert ["workspace_id", "uri"] in indexes
+      assert ["workspace_id", "path"] in indexes
     end
   end
 end

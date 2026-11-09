@@ -28,7 +28,7 @@ defmodule StoreRealityProof do
   alias OptimalEngine.Models.Registry
   alias OptimalEngine.Pipeline.DecompositionRuns
   alias OptimalEngine.Storage.{PolicyStore, Providers}
-  alias OptimalEngine.Store.{FileCache, Vectors}
+  alias OptimalEngine.Store.{FileCache, FullText, Vectors}
   alias OptimalEngine.Telemetry.History
   alias OptimalEngine.WorkspaceTopology
 
@@ -149,7 +149,7 @@ defmodule StoreRealityProof do
      %{
        write: "WorkspaceTopology.create_workspace #{ws}",
        read: "Workspace.get returned slug #{workspace.slug}",
-       persistence: "independent read-only SQLite connection found the workspaces row",
+       persistence: "independent #{connection_kind()} found the workspaces row",
        failure: "duplicate workspace refused (#{short(duplicate)}) and original row unchanged"
      }}
   end
@@ -158,23 +158,27 @@ defmodule StoreRealityProof do
     token = "proofterm#{s}"
     id = context!(ws, "proof-fts-#{s}", "Store proof note mentioning #{token}")
 
-    {:ok, [[^id]]} =
-      Store.raw_query("SELECT id FROM contexts_fts WHERE contexts_fts MATCH ?1", [token])
+    phrase = ~s("#{token}")
+    {:ok, [{^id, _score}]} = FullText.match("contexts_fts", phrase)
 
-    {:ok, _memory} = Memory.create(%{content: "Proof memory about #{token}", workspace_id: ws})
+    {:ok, memory} = Memory.create(%{content: "Proof memory about #{token}", workspace_id: ws})
+    memory_id = memory.id
+    {:ok, [{^memory_id, _score}]} = FullText.match("memories_fts", phrase)
 
-    {:ok, [[1]]} =
-      Store.raw_query("SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?1", [token])
+    # SQLite's FTS5 file, or PostgreSQL's posting lists, read on a connection
+    # of their own.
+    [[^id]] =
+      if FullText.postgres?(),
+        do: on_disk("SELECT id FROM contexts_fts WHERE id = ?1", [id]),
+        else: on_disk("SELECT id FROM contexts_fts WHERE contexts_fts MATCH ?1", [token])
 
-    [[^id]] = on_disk("SELECT id FROM contexts_fts WHERE contexts_fts MATCH ?1", [token])
-
-    {:error, malformed} =
-      Store.raw_query("SELECT id FROM contexts_fts WHERE contexts_fts MATCH ?1", ["\"open"])
+    {:error, malformed} = FullText.match("contexts_fts", "\"open")
 
     {:ok,
      %{
        write: "Store.insert_context and Memory.create with a unique term",
-       read: "FTS5 MATCH found the context (contexts_fts) and the memory (memories_fts)",
+       read:
+         "a full-text match (#{if FullText.postgres?(), do: "PostgreSQL posting lists", else: "FTS5"}) found the context (contexts_fts) and the memory (memories_fts)",
        persistence: "independent connection matched the term in contexts_fts",
        failure: "malformed MATCH expression returned an error (#{short(malformed)})"
      }}
@@ -314,10 +318,7 @@ defmodule StoreRealityProof do
 
   defp cache(%{ws: ws, suffix: s}) do
     id = context!(ws, "proof-cache-#{s}", "cached context")
-    [{^id, %Context{}}] = :ets.lookup(:optimal_engine_store_cache, id)
-    :ets.delete(:optimal_engine_store_cache, id)
-    {:ok, %Context{id: ^id}} = Store.get_context(id)
-    [{^id, %Context{}}] = :ets.lookup(:optimal_engine_store_cache, id)
+    hot = hot_cache(id)
     {:error, :not_found} = Store.get_context("missing-#{s}")
 
     scope = {"default", "default:proof"}
@@ -335,8 +336,7 @@ defmodule StoreRealityProof do
 
     {:ok,
      %{
-       ets:
-         "insert_context populated the ETS hot cache; after eviction get_context reloaded from SQLite and re-cached",
+       ets: hot,
        filesystem:
          "FileCache entry written under #{FileCache.root()} and read back by a separate process",
        failure: "missing context returned not_found; a corrupt cache file was discarded as a miss"
@@ -661,8 +661,56 @@ defmodule StoreRealityProof do
     id
   end
 
-  defp on_disk(sql, params),
-    do: read_db(Application.fetch_env!(:optimal_engine, :db_path), sql, params)
+  # The SQLite store caches contexts in ETS; the PostgreSQL store keeps no hot
+  # cache, by decision, and every read is the database's.
+  defp hot_cache(id) do
+    if Store.selected?(OptimalEngine.Store.Postgres) do
+      {:ok, %Context{id: ^id}} = Store.get_context(id)
+      [[^id]] = on_disk("SELECT id FROM contexts WHERE id = ?1", [id])
+      "the PostgreSQL store keeps no hot cache: get_context read the row the database holds"
+    else
+      [{^id, %Context{}}] = :ets.lookup(:optimal_engine_store_cache, id)
+      :ets.delete(:optimal_engine_store_cache, id)
+      {:ok, %Context{id: ^id}} = Store.get_context(id)
+      [{^id, %Context{}}] = :ets.lookup(:optimal_engine_store_cache, id)
+      "insert_context populated the ETS hot cache; after eviction get_context reloaded from SQLite and re-cached"
+    end
+  end
+
+  defp connection_kind do
+    if Store.selected?(OptimalEngine.Store.Postgres),
+      do: "PostgreSQL connection outside the store's pool",
+      else: "read-only SQLite connection"
+  end
+
+  defp on_disk(sql, params) do
+    if Store.selected?(OptimalEngine.Store.Postgres),
+      do: read_postgres(sql, params),
+      else: read_db(Application.fetch_env!(:optimal_engine, :db_path), sql, params)
+  end
+
+  # A connection of its own to the store's schema, outside the store's pool.
+  defp read_postgres(sql, params) do
+    {:ok, config} = OptimalEngine.Storage.Postgres.config()
+
+    schema =
+      Keyword.get(Application.get_env(:optimal_engine, :postgres_store, []), :schema, "public")
+
+    options =
+      config
+      |> Map.take([:hostname, :port, :database, :username, :password, :ssl])
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Keyword.merge(pool_size: 1, parameters: [search_path: schema])
+
+    {:ok, conn} = Postgrex.start_link(options)
+
+    try do
+      {:ok, translated} = OptimalEngine.Store.Dialect.to_postgres(sql)
+      Postgrex.query!(conn, translated, params).rows
+    after
+      GenServer.stop(conn)
+    end
+  end
 
   defp read_db(path, sql, params) do
     {:ok, db} = Exqlite.Sqlite3.open(path, mode: :readonly)

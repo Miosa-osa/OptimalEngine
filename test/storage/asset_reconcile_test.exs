@@ -424,12 +424,19 @@ defmodule OptimalEngine.Storage.AssetReconcileTest do
   # absent policy.
   defp without_policy_table(fun) do
     away = "workspace_storage_policies_away"
-    :ok = Store.raw_execute("ALTER TABLE workspace_storage_policies RENAME TO #{away}")
+
+    :ok =
+      OptimalEngine.Test.StoreDDL.execute(
+        "ALTER TABLE workspace_storage_policies RENAME TO #{away}"
+      )
 
     try do
       fun.()
     after
-      :ok = Store.raw_execute("ALTER TABLE #{away} RENAME TO workspace_storage_policies")
+      :ok =
+        OptimalEngine.Test.StoreDDL.execute(
+          "ALTER TABLE #{away} RENAME TO workspace_storage_policies"
+        )
     end
   end
 end

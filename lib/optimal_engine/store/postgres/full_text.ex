@@ -16,7 +16,7 @@ defmodule OptimalEngine.Store.Postgres.FullText do
   | `optimal_fts_queue` | the keys of indexed rows written since they were last indexed |
   | `optimal_fts_enqueue()` | the trigger function that appends to the queue |
   | `optimal_fts_match(index, query)` | the rows a query matches, with their BM25 score |
-  | views `contexts_fts`, `memories_fts` | the indexed keys, as `id`, for counts and joins |
+  | views `contexts_fts`, `memories_fts` | the indexed keys, as `id`, and the indexed columns, for counts and joins |
 
   ## Keeping an index current
 
@@ -124,7 +124,26 @@ defmodule OptimalEngine.Store.Postgres.FullText do
 
   # An index created at runtime is read from the registry inside the batch's
   # own transaction; one dropped meanwhile has nothing left to index.
+  # A batch runs at READ COMMITTED under a lock of its own index, so refreshers
+  # of one index take turns and none is aborted by a writer of the indexed
+  # table. That is safe: a refresh reads each row as it is when the batch
+  # reads it, and deletes only the queue entries it read, so a write it does
+  # not see leaves its entry for the next batch.
   defp index_batch(txn, name) do
+    with {:ok, _} <- native(txn, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED", []),
+         {:ok, _} <-
+           native(
+             txn,
+             "SELECT pg_advisory_xact_lock(hashtext('optimal_engine.fts'), hashtext($1))",
+             [
+               name
+             ]
+           ) do
+      index_batch_locked(txn, name)
+    end
+  end
+
+  defp index_batch_locked(txn, name) do
     case index_def(txn, name) do
       {:ok, nil} -> {:ok, 0}
       {:ok, index} -> queued_batch(txn, index)
@@ -509,7 +528,10 @@ defmodule OptimalEngine.Store.Postgres.FullText do
       """,
       """
       CREATE OR REPLACE VIEW #{quote_name(name)} AS
-      SELECT doc_key AS id FROM optimal_fts_docs WHERE index_name = '#{name}'
+      SELECT d.doc_key AS id#{Enum.map_join(columns -- ["id"], "", &", t.#{quote_name(&1)}")}
+      FROM optimal_fts_docs d
+      JOIN #{quote_name(table)} t ON t.#{quote_name(key)}::text = d.doc_key
+      WHERE d.index_name = '#{name}'
       """,
       {"""
        WITH added AS (

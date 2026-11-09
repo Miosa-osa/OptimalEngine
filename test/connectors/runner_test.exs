@@ -376,7 +376,7 @@ defmodule OptimalEngine.Connectors.RunnerTest do
     trigger = "runner_fail_#{System.unique_integer([:positive])}"
 
     :ok =
-      Store.raw_execute("""
+      OptimalEngine.Test.StoreDDL.execute("""
       CREATE TRIGGER #{trigger} BEFORE UPDATE ON connector_runs
       WHEN NEW.connector_id = '#{id}' AND NEW.status = 'success'
       BEGIN
@@ -384,7 +384,7 @@ defmodule OptimalEngine.Connectors.RunnerTest do
       END
       """)
 
-    on_exit(fn -> Store.raw_execute("DROP TRIGGER IF EXISTS #{trigger}") end)
+    on_exit(fn -> OptimalEngine.Test.StoreDDL.execute("DROP TRIGGER IF EXISTS #{trigger}") end)
 
     assert {:ok, %{status: :error, reason: :persist_failed, cursor_after: nil}} =
              capture_runner_log(fn ->

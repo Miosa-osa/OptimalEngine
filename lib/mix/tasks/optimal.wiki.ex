@@ -119,7 +119,7 @@ defmodule Mix.Tasks.Optimal.Wiki do
           "Page not found: #{slug} (audience=#{audience}, tenant=#{tenant_id}, workspace=#{workspace_id})"
         )
 
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 
@@ -130,7 +130,7 @@ defmodule Mix.Tasks.Optimal.Wiki do
     else
       {:error, :not_found} ->
         Mix.shell().error("Page not found: #{slug}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 
@@ -190,7 +190,7 @@ defmodule Mix.Tasks.Optimal.Wiki do
 
       {:error, reason} ->
         Mix.shell().error("Could not render node wiki page: #{inspect(reason)}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 
@@ -211,7 +211,7 @@ defmodule Mix.Tasks.Optimal.Wiki do
 
       {:error, reason} ->
         Mix.shell().error("Could not render workspace tree wiki page: #{inspect(reason)}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 
@@ -226,7 +226,7 @@ defmodule Mix.Tasks.Optimal.Wiki do
 
       {:error, reason} ->
         Mix.shell().error("Could not check wiki page: #{inspect(reason)}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 

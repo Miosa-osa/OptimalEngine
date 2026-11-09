@@ -12,6 +12,11 @@ defmodule OptimalEngine.Store.FailingMigrationTest do
 
   use ExUnit.Case, async: false
 
+  # A copy of the SQLite store, migrated by SQLite's migrations. PostgreSQL's
+  # schema is applied in one transaction, so a failed sync leaves nothing
+  # (Postgres.SchemaSyncTest, Postgres.MigrateTest).
+  @moduletag :sqlite_store
+
   alias OptimalEngine.Store
   alias OptimalEngine.Store.{FailingMigration, Migrations}
 

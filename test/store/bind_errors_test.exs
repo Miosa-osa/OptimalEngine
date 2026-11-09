@@ -15,7 +15,7 @@ defmodule OptimalEngine.Store.BindErrorsTest do
 
   @too_big 9_223_372_036_854_775_808
 
-  defp store_pid, do: Process.whereis(OptimalEngine.Store.SQLite)
+  defp store_pid, do: Process.whereis(OptimalEngine.Store.adapter())
 
   describe "transaction/1" do
     test "txn_query/3 answers the error, the transaction ends, and the Store keeps running" do
@@ -45,7 +45,7 @@ defmodule OptimalEngine.Store.BindErrorsTest do
                       {:ok, _} <-
                         Store.txn_execute(
                           txn,
-                          "UPDATE contexts SET title = title WHERE rowid = ?1",
+                          "UPDATE contexts SET title = title WHERE id = ?1",
                           [@too_big]
                         ) do
                    {:ok, :committed}
@@ -59,7 +59,7 @@ defmodule OptimalEngine.Store.BindErrorsTest do
     test "the largest 64-bit integer still binds inside a transaction" do
       assert {:ok, [[9_223_372_036_854_775_807]]} =
                Store.transaction(fn txn ->
-                 Store.txn_query(txn, "SELECT ?1", [9_223_372_036_854_775_807])
+                 Store.txn_query(txn, "SELECT CAST(?1 AS INTEGER)", [9_223_372_036_854_775_807])
                end)
     end
   end

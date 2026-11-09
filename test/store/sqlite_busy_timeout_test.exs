@@ -10,6 +10,9 @@ defmodule OptimalEngine.Store.SQLiteBusyTimeoutTest do
 
   alias OptimalEngine.Store
 
+  # PostgreSQL's sessions have a lock timeout of their own
+  # (Postgres.ConnectionTest "each session has statement, lock and idle timeouts").
+  @tag :sqlite_store
   test "the Store's connection waits up to 3 s for a lock another process holds" do
     assert {:ok, [[3_000]]} = Store.raw_query("PRAGMA busy_timeout", [])
   end

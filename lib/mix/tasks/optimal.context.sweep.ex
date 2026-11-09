@@ -95,7 +95,7 @@ defmodule Mix.Tasks.Optimal.Context.Sweep do
 
       {:error, reason} ->
         Mix.shell().error("Context package sweep failed: #{inspect(reason)}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 end

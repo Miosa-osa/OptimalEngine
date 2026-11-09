@@ -193,7 +193,7 @@ defmodule OptimalEngine.Authority.LocalDenyRekeyTest do
   describe "the record of a deny" do
     defp refuse_evidence(kind) do
       :ok =
-        Store.raw_execute(
+        OptimalEngine.Test.StoreDDL.execute(
           """
           CREATE TRIGGER deny_test_refuses
           BEFORE INSERT ON authority_evidence
@@ -203,7 +203,9 @@ defmodule OptimalEngine.Authority.LocalDenyRekeyTest do
           []
         )
 
-      on_exit(fn -> Store.raw_execute("DROP TRIGGER IF EXISTS deny_test_refuses", []) end)
+      on_exit(fn ->
+        OptimalEngine.Test.StoreDDL.execute("DROP TRIGGER IF EXISTS deny_test_refuses", [])
+      end)
     end
 
     test "is written with the deny, or neither is", %{tenant: tenant} do

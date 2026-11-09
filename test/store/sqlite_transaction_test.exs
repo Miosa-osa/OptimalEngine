@@ -122,10 +122,10 @@ defmodule OptimalEngine.Store.SQLiteTransactionTest do
       parent = "txn_parent_#{n}"
       child = "txn_child_#{n}"
 
-      :ok = Store.raw_execute("CREATE TABLE #{parent} (id INTEGER PRIMARY KEY)")
+      :ok = OptimalEngine.Test.StoreDDL.execute("CREATE TABLE #{parent} (id INTEGER PRIMARY KEY)")
 
       :ok =
-        Store.raw_execute(
+        OptimalEngine.Test.StoreDDL.execute(
           "CREATE TABLE #{child} (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES #{parent}(id) DEFERRABLE INITIALLY DEFERRED)"
         )
 
@@ -135,8 +135,8 @@ defmodule OptimalEngine.Store.SQLiteTransactionTest do
       :ok = Store.insert_clusters([cluster])
 
       on_exit(fn ->
-        Store.raw_execute("DROP TABLE IF EXISTS #{child}")
-        Store.raw_execute("DROP TABLE IF EXISTS #{parent}")
+        OptimalEngine.Test.StoreDDL.execute("DROP TABLE IF EXISTS #{child}")
+        OptimalEngine.Test.StoreDDL.execute("DROP TABLE IF EXISTS #{parent}")
         Store.raw_execute("DELETE FROM clusters WHERE id = ?1", [cluster.id])
         Store.raw_execute("DELETE FROM chunks WHERE signal_id = ?1", ["txn-signal-#{n}"])
         Store.raw_execute("DELETE FROM contexts WHERE id = ?1", ["txn-ctx-#{n}"])
@@ -170,6 +170,10 @@ defmodule OptimalEngine.Store.SQLiteTransactionTest do
         assert count.() == 0
       end
 
+      # Opens a transaction behind SQLite's connection. On PostgreSQL each
+      # transaction checks out a connection of its own, and one left inside a
+      # transaction is closed, not used (Postgres.ConnectionTest "sessions").
+      @tag :sqlite_store
       test "insert_#{insert} reports a BEGIN that fails as begin_failed", ctx do
         %{write: write, count: count} = insert_case(unquote(insert), ctx)
 
@@ -186,6 +190,9 @@ defmodule OptimalEngine.Store.SQLiteTransactionTest do
       assert {:error, :not_found} = Store.get_context(id)
     end
 
+    # SQLite's one connection. PostgreSQL's equivalent: "every way out of a
+    # transaction leaves its connection outside one" (Postgres.ConnectionTest).
+    @tag :sqlite_store
     test "a transaction that cannot be ended restarts the Store on a new connection" do
       before = Process.whereis(OptimalEngine.Store.SQLite)
       ref = Process.monitor(before)
@@ -235,11 +242,11 @@ defmodule OptimalEngine.Store.SQLiteTransactionTest do
     test "allows statements that only contain transaction keywords", ctx do
       trigger = "txn_trigger_#{ctx.n}"
       spans = "txn_spans_#{ctx.n}"
-      on_exit(fn -> Store.raw_execute("DROP TABLE IF EXISTS #{spans}") end)
+      on_exit(fn -> OptimalEngine.Test.StoreDDL.execute("DROP TABLE IF EXISTS #{spans}") end)
 
       # A trigger body is BEGIN .. END inside one CREATE statement.
       assert :ok =
-               Store.raw_execute("""
+               OptimalEngine.Test.StoreDDL.execute("""
                CREATE TRIGGER #{trigger} AFTER INSERT ON #{ctx.parent}
                BEGIN
                  SELECT 1;
@@ -247,10 +254,12 @@ defmodule OptimalEngine.Store.SQLiteTransactionTest do
                """)
 
       assert :ok = Store.raw_execute("INSERT INTO #{ctx.parent} VALUES (1)")
-      assert :ok = Store.raw_execute("DROP TRIGGER #{trigger}")
+      assert :ok = OptimalEngine.Test.StoreDDL.execute("DROP TRIGGER #{trigger}")
 
       assert :ok =
-               Store.raw_execute(~s|CREATE TABLE #{spans} (id INTEGER PRIMARY KEY, "end" INTEGER)|)
+               OptimalEngine.Test.StoreDDL.execute(
+                 ~s|CREATE TABLE #{spans} (id INTEGER PRIMARY KEY, "end" INTEGER)|
+               )
 
       assert :ok = Store.raw_execute(~s|INSERT INTO #{spans} (id, "end") VALUES (1, 1)|)
       assert :ok = Store.raw_execute(~s|UPDATE #{spans} SET "end" = 2 WHERE id = 1|)
@@ -379,14 +388,14 @@ defmodule OptimalEngine.Store.SQLiteTransactionTest do
     trigger = "txn_fail_#{table}_#{ctx.n}"
 
     :ok =
-      Store.raw_execute("""
+      OptimalEngine.Test.StoreDDL.execute("""
       CREATE TRIGGER #{trigger} AFTER INSERT ON #{table} WHEN #{match}
       BEGIN
         INSERT INTO #{ctx.child} (parent_id) VALUES (99);
       END
       """)
 
-    on_exit(fn -> Store.raw_execute("DROP TRIGGER IF EXISTS #{trigger}") end)
+    on_exit(fn -> OptimalEngine.Test.StoreDDL.execute("DROP TRIGGER IF EXISTS #{trigger}") end)
   end
 
   # Opens a transaction on the Store's connection behind its back, so the

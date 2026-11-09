@@ -21,7 +21,7 @@ defmodule OptimalEngine.MemoryCore.GovernedModelTest do
         SELECT function_name, run_status, decision_state, latency_ms, metadata
         FROM model_call_runs
         WHERE function_name = ?1
-        ORDER BY rowid DESC
+        ORDER BY created_at DESC, #{OptimalEngine.Store.Catalog.insertion_order("id")} DESC
         """,
         [function_name]
       )

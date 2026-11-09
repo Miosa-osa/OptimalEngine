@@ -27,13 +27,31 @@ defmodule OptimalEngine.Storage.ProvidersTest do
 
     ids = Enum.map(plan.providers, & &1.id)
     assert ids == ~w(sqlite fts5 embedded_vectors rocksdb filesystem ets)
-    assert plan.ready
+
+    # The plan names SQLite as the canonical store: ready on a SQLite build,
+    # and on a PostgreSQL build it asks for that store to be activated.
+    if OptimalEngine.Store.selected?(OptimalEngine.Store.SQLite) do
+      assert plan.ready
+    else
+      refute plan.ready
+      assert plan.activation_required == ["sqlite"]
+    end
+
     assert plan.adapter_missing == []
     assert Enum.all?(plan.providers, & &1.adapter_implemented)
 
-    for provider <- plan.providers, provider.id != "rocksdb" do
+    for provider <- plan.providers,
+        provider.id != "rocksdb",
+        provider.id not in plan.activation_required do
       assert provider.lifecycle_state == "active", provider.id
     end
+  end
+
+  test "a plan whose canonical store is PostgreSQL is ready only on a PostgreSQL build" do
+    # Probed: a configured PostgreSQL counts once it answers.
+    assert {:ok, plan} = Planner.plan(["geospatial"], probe: true)
+    assert Enum.map(plan.providers, & &1.id) == ["postgres"]
+    assert plan.ready == OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres)
   end
 
   describe "the RocksDB provider" do
@@ -62,8 +80,9 @@ defmodule OptimalEngine.Storage.ProvidersTest do
         assert rocksdb.health == "healthy"
       end
 
+      # An available RocksDB never holds a plan back.
       assert {:ok, plan} = Planner.plan(["desktop_local"])
-      assert plan.ready
+      refute "rocksdb" in plan.activation_required
     end
   end
 
@@ -103,9 +122,15 @@ defmodule OptimalEngine.Storage.ProvidersTest do
 
   test "providers without an adapter report adapter_missing even when configured" do
     System.put_env("OPTIMAL_QDRANT_URL", "http://127.0.0.1:1")
+    previous_url = System.get_env("OPTIMAL_POSTGRES_URL")
     System.put_env("OPTIMAL_POSTGRES_URL", "postgres://user:pass@127.0.0.1:1/db")
     on_exit(fn -> System.delete_env("OPTIMAL_QDRANT_URL") end)
-    on_exit(fn -> System.delete_env("OPTIMAL_POSTGRES_URL") end)
+
+    on_exit(fn ->
+      if previous_url,
+        do: System.put_env("OPTIMAL_POSTGRES_URL", previous_url),
+        else: System.delete_env("OPTIMAL_POSTGRES_URL")
+    end)
 
     for id <- @unimplemented do
       assert {:ok, provider} = Providers.get(id)

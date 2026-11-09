@@ -139,7 +139,7 @@ defmodule OptimalEngine.Graph.UpgradeLegacyShapeTest do
         description == "graph edges keyed by tenant and workspace"
       end)
 
-    for {_label, sql} <- statements, do: {:ok, _} = Store.raw_query(sql, [])
+    OptimalEngine.Test.MigrationReplay.run!(statements)
   end
 
   defp key(tenant) do

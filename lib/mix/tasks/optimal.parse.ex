@@ -41,7 +41,7 @@ defmodule Mix.Tasks.Optimal.Parse do
 
       {:error, reason} ->
         Mix.shell().error("Parse failed: #{inspect(reason)}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 

@@ -485,6 +485,60 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
       # Six writers on one row conflict; PostgreSQL aborted some and they ran again.
       assert_received {:retried, %{scope: :transaction, reason: :serialization_failure}}
     end
+
+    test "concurrent transactions that take the next number each get one", %{pool: pool} do
+      # MAX(n) + 1 then INSERT: two writers that read the same MAX meet a unique
+      # violation, and the one that lost reads the new MAX when it runs again.
+      append = fn ->
+        Connection.transaction(
+          pool,
+          fn txn ->
+            {:ok, %{rows: [[next]]}} =
+              Connection.txn_query(
+                txn,
+                "SELECT COALESCE(MAX(n), 0) + 1 FROM items WHERE name LIKE 'seq-%'"
+              )
+
+            Process.sleep(2)
+
+            case Connection.txn_query(txn, "INSERT INTO items (name, n) VALUES (?1, ?2)", [
+                   "seq-#{next}",
+                   next
+                 ]) do
+              {:ok, _} -> {:ok, next}
+              {:error, reason} -> {:error, reason}
+            end
+          end,
+          30_000
+        )
+      end
+
+      results =
+        1..16
+        |> Task.async_stream(fn _ -> append.() end, max_concurrency: 8, timeout: 60_000)
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1)), inspect(results)
+      assert results |> Enum.map(fn {:ok, n} -> n end) |> Enum.sort() == Enum.to_list(1..16)
+    end
+
+    test "a transaction that repeats a key itself is answered after one more run",
+         %{pool: pool} do
+      query!(pool, "INSERT INTO items (name) VALUES (?1)", ["taken"])
+      runs = :counters.new(1, [])
+
+      assert {:error, "UNIQUE constraint failed: items.name"} =
+               Connection.transaction(
+                 pool,
+                 fn txn ->
+                   :counters.add(runs, 1, 1)
+                   Connection.txn_query(txn, "INSERT INTO items (name) VALUES (?1)", ["taken"])
+                 end,
+                 5_000
+               )
+
+      assert :counters.get(runs, 1) == 2
+    end
   end
 
   describe "retries" do
@@ -653,11 +707,19 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
         {"SELECT name FROM items WHERE n > ?1 ORDER BY n DESC", [1]},
         {"SELECT COUNT(*), SUM(n), MIN(score), MAX(score) FROM items", []},
         {"SELECT name, json_extract(meta, '$.kind') FROM items ORDER BY name", []},
+        # A selected json_extract is SQLite's value: a number, 1 or 0 for a
+        # boolean, an object as JSON text, NULL for JSON null.
+        {"SELECT name, json_extract(meta, '$.num'), json_extract(meta, '$.flag'), json_extract(meta, '$.tags'), json_extract(meta, '$.none') FROM items ORDER BY name",
+         []},
+        {"SELECT json_extract(meta, '$.kind'), COUNT(*) FROM items GROUP BY json_extract(meta, '$.kind') ORDER BY 2, 1",
+         []},
         {"SELECT name FROM items WHERE json_extract(meta, '$.tags.a') = ?1", ["1"]},
         {"SELECT COALESCE(n, -1) FROM items ORDER BY name", []},
         # The part of a value before a separator, empty when it is absent.
         {"SELECT name, substr(name, 1, instr(name, 'a') - 1) FROM items ORDER BY name", []},
         {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["acme:ops"]},
+        # A selected placeholder is the value bound, as SQLite returns it.
+        {"SELECT ?1, ?2 AS b, ?3", [9_223_372_036_854_775_807, 2.5, "text"]},
         {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["default"]},
         {"SELECT substr(?1, 1, instr(?1, ':') - 1)", [":ops"]},
         {"SELECT substr(?1, 1, instr(?1, ':') - 1)", ["a:b:c"]},
@@ -705,11 +767,25 @@ defmodule OptimalEngine.Store.Postgres.ConnectionTest do
         {"SELECT name FROM items WHERE json_extract(meta, '$.flag') = 1 ORDER BY name", []},
         {"SELECT name FROM items WHERE json_extract(meta, '$.flag') = 0 ORDER BY name", []},
         {"SELECT name FROM items WHERE json_extract(meta, '$.num') <> 2 ORDER BY name", []},
+        # Ordered against a number: a JSON number or boolean compares as a
+        # number, text (the string "1", an object) sorts after every number.
+        {"SELECT name FROM items WHERE json_extract(meta, '$.num') > 1 ORDER BY name", []},
+        {"SELECT name FROM items WHERE json_extract(meta, '$.num') >= ?1 ORDER BY name", [1]},
+        {"SELECT name FROM items WHERE json_extract(meta, '$.num') < ?1 ORDER BY name", [1.5]},
+        {"SELECT name FROM items WHERE json_extract(meta, '$.num') <= 0 ORDER BY name", []},
+        {"SELECT name FROM items WHERE json_extract(meta, '$.flag') < 1 ORDER BY name", []},
+        {"SELECT name FROM items WHERE json_extract(meta, '$.tags') > -1 ORDER BY name", []},
+        {"SELECT name FROM items WHERE json_extract(meta, '$.kind') < 100 ORDER BY name", []},
         {"SELECT name, COALESCE(json_extract(meta, '$.kind'), 'none') FROM items ORDER BY name",
          []},
         {"SELECT name, CASE WHEN json_valid(meta) THEN json_extract(meta, '$.kind') END FROM items ORDER BY name",
          []},
         {"SELECT a.name FROM items a, items b WHERE json_extract(a.meta, '$.kind') = b.name ORDER BY a.name",
+         []},
+        # Two json_extract values compare by type and value: 1 is not "1".
+        {"SELECT a.name, b.name FROM items a, items b WHERE json_extract(a.meta, '$.num') = json_extract(b.meta, '$.num') ORDER BY a.name, b.name",
+         []},
+        {"SELECT a.name FROM items a, items b WHERE b.meta = json_extract(a.meta, '$.kind') ORDER BY a.name",
          []}
       ]
 

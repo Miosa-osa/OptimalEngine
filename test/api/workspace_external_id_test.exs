@@ -420,8 +420,8 @@ defmodule OptimalEngine.API.WorkspaceExternalIdTest do
     # Every statement runs twice, as a re-run would: the column add is a
     # duplicate (tolerated, as the migration runner does), the rest change
     # nothing the second time.
-    for _run <- 1..2, {label, sql} <- statements do
-      case Store.raw_query(sql, []) do
+    for _run <- 1..2, {label, result} <- OptimalEngine.Test.MigrationReplay.run(statements) do
+      case result do
         {:ok, _} -> :ok
         {:error, message} -> assert message =~ "duplicate column", "#{label}: #{message}"
       end

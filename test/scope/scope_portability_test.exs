@@ -1577,18 +1577,12 @@ defmodule OptimalEngine.ScopePortabilityTest do
     test "a mark whose workspace cannot be removed now is kept for the next try", ctx do
       {partial, written} = partial_workspace(ctx, "unremovable", "token-#{ctx.n}")
       mark = write_mark(ctx.tenant, partial.id, "token-#{ctx.n}", [written])
-      store = Process.whereis(OptimalEngine.Store.SQLite)
-
       # The Store does not answer in time.
       with_env(:bundle_mark_timeout_ms, 300, fn ->
-        :sys.suspend(store)
-
-        try do
+        OptimalEngine.Test.StoreStall.stalled(fn ->
           task = Task.async(fn -> WorkspaceBundle.discard_unfinished_imports([mark]) end)
           assert {:ok, 0} = Task.yield(task, 10_000) || Task.shutdown(task, :brutal_kill)
-        after
-          :sys.resume(store)
-        end
+        end)
       end)
 
       assert File.exists?(mark)
@@ -1604,20 +1598,15 @@ defmodule OptimalEngine.ScopePortabilityTest do
          ctx do
       {partial, written} = partial_workspace(ctx, "behind-boot", "token-#{ctx.n}")
       mark = write_mark(ctx.tenant, partial.id, "token-#{ctx.n}", [written])
-      store = Process.whereis(OptimalEngine.Store.SQLite)
 
       with_env(:bundle_mark_timeout_ms, 5_000, fn ->
-        :sys.suspend(store)
-
-        try do
+        OptimalEngine.Test.StoreStall.stalled(fn ->
           started = System.monotonic_time(:millisecond)
           task = Task.async(fn -> OptimalEngine.Application.discard_unfinished_imports([mark]) end)
           assert {:ok, {:ok, pid}} = Task.yield(task, 3_000) || Task.shutdown(task, :brutal_kill)
           assert is_pid(pid)
           assert System.monotonic_time(:millisecond) - started < 1_000
-        after
-          :sys.resume(store)
-        end
+        end)
       end)
 
       # The take-back still happens, once the Store answers.

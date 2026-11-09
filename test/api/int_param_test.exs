@@ -218,7 +218,7 @@ defmodule OptimalEngine.API.IntParamTest do
     end
 
     test "a value outside 64 bits is a 400 invalid_parameter and the Store keeps running", ctx do
-      store = Process.whereis(OptimalEngine.Store.SQLite)
+      store = Process.whereis(OptimalEngine.Store.adapter())
 
       failures =
         for {method, path, where, params} <- @routes,
@@ -231,7 +231,7 @@ defmodule OptimalEngine.API.IntParamTest do
         end
 
       assert failures == [], Enum.join(failures, "\n")
-      assert Process.whereis(OptimalEngine.Store.SQLite) == store
+      assert Process.whereis(OptimalEngine.Store.adapter()) == store
     end
 
     test "the largest 64-bit integer is not refused", ctx do

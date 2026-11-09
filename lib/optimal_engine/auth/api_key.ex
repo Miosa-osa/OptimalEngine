@@ -152,8 +152,10 @@ defmodule OptimalEngine.Auth.ApiKey do
   - `{:error, :invalid}` when the token cannot be parsed or bcrypt check fails
   - `{:error, :revoked}` when the key has been soft-revoked
   - `{:error, :expired}` when `expires_at` is in the past
+  - `{:error, :busy}` when the Store did not answer in time, so nothing is
+    known about the key yet
   """
-  @spec verify(String.t()) :: {:ok, t()} | {:error, :invalid | :revoked | :expired}
+  @spec verify(String.t()) :: {:ok, t()} | {:error, :invalid | :revoked | :expired | :busy}
   def verify(token) when is_binary(token) do
     with {:parse, {:ok, id, secret}} <- {:parse, parse_token(token)},
          {:lookup, {:ok, key}} <- {:lookup, get_by_id(id)},
@@ -163,6 +165,7 @@ defmodule OptimalEngine.Auth.ApiKey do
       {:ok, key}
     else
       {:parse, _} -> {:error, :invalid}
+      {:lookup, {:error, :busy}} -> {:error, :busy}
       {:lookup, _} -> {:error, :invalid}
       {:revoked, _} -> {:error, :revoked}
       {:expired, _} -> {:error, :expired}

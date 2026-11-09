@@ -162,6 +162,39 @@ defmodule OptimalEngine.Store.FullText do
   def query_param(name, match), do: query_json(index!(name).tokenize, match)
 
   @doc """
+  The keys of the rows a `MATCH` string finds in one of the engine's indexes,
+  with their score (`-bm25()`), best first, on either store: an FTS5 `MATCH`
+  on SQLite, `optimal_fts_match` on PostgreSQL.
+  """
+  @spec match(String.t(), String.t()) :: {:ok, [{String.t(), float()}]} | {:error, term()}
+  def match(name, match) do
+    index = index!(name)
+
+    result =
+      if postgres?() do
+        with {:ok, param} <- query_param(name, match) do
+          Store.raw_query(
+            "SELECT doc_key, score FROM optimal_fts_match(?1, ?2) ORDER BY score DESC, doc_key",
+            [name, param]
+          )
+        end
+      else
+        # contexts_fts carries the key; memories_fts is keyed by its table's rowid.
+        key =
+          if name == "contexts_fts",
+            do: "#{name}.id",
+            else: "(SELECT t.#{index.key} FROM #{index.table} t WHERE t.rowid = #{name}.rowid)"
+
+        Store.raw_query(
+          "SELECT #{key}, -bm25(#{name}) AS score FROM #{name} WHERE #{name} MATCH ?1 ORDER BY score DESC, 1",
+          [match]
+        )
+      end
+
+    with {:ok, rows} <- result, do: {:ok, Enum.map(rows, &List.to_tuple/1)}
+  end
+
+  @doc """
   `query_param/2` for an index created at runtime, by its FTS5 `tokenize`
   option (`nil` for FTS5's default).
   """

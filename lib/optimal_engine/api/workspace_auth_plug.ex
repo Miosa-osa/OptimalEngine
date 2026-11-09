@@ -343,6 +343,11 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
 
         {:error, :invalid_workspace_directory} ->
           {:halt, halt_json(conn, 400, "invalid workspace")}
+
+        # The Store did not answer in time: nothing is decided yet, so the
+        # answer is the busy one, and a retry may pass.
+        {:error, :busy} ->
+          {:halt, conn |> put_resp_header("retry-after", "1") |> halt_json(503, "busy")}
       end
     end)
   end
@@ -395,6 +400,9 @@ defmodule OptimalEngine.API.WorkspaceAuthPlug do
           _ ->
             own_directory(workspace_id, role)
         end
+
+      {:error, :busy} ->
+        {:error, :busy}
 
       _other ->
         # Store unavailable — fail closed.

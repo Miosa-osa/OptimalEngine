@@ -150,6 +150,10 @@ defmodule OptimalEngine.Authority.ScenariosTest do
       Keyword.merge(original, auth_required: true, bcrypt_cost: 4)
     )
 
+    # A linked task that crashes kills the test before `after` runs; the auth
+    # setting must not outlive the test either way.
+    on_exit(fn -> Application.put_env(:optimal_engine, :auth, original) end)
+
     try do
       fun.()
     after

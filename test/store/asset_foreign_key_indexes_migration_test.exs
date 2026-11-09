@@ -27,6 +27,9 @@ defmodule OptimalEngine.Store.AssetForeignKeyIndexesMigrationTest do
     end
   end
 
+  # Its statements run on SQLite; PostgreSQL's schema is derived from them and
+  # a second sync changes nothing (Postgres.SchemaSyncTest).
+  @tag :sqlite_store
   test "running its statements again changes nothing" do
     {_version, _description, statements} = migration()
 
@@ -37,14 +40,11 @@ defmodule OptimalEngine.Store.AssetForeignKeyIndexesMigrationTest do
 
   for {table, column} <- @indexed do
     test "#{table} is read by #{column} through idx_#{table}_#{column}" do
-      {:ok, plan} =
-        Store.raw_query(
-          "EXPLAIN QUERY PLAN SELECT 1 FROM #{unquote(table)} WHERE #{unquote(column)} = ?1",
-          ["x"]
-        )
-
-      details = plan |> Enum.map(&List.last/1) |> Enum.join(" | ")
-      assert details =~ "idx_#{unquote(table)}_#{unquote(column)}", details
+      OptimalEngine.Test.IndexReads.assert_read_by_index(
+        unquote(table),
+        unquote(column),
+        "idx_#{unquote(table)}_#{unquote(column)}"
+      )
     end
   end
 

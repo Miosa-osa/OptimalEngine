@@ -29,7 +29,7 @@ defmodule Mix.Tasks.Optimal.Reweave do
 
     if topic == "" do
       IO.puts("Usage: mix optimal.reweave \"topic\" [--days N] [--limit N]")
-      System.halt(1)
+      exit({:shutdown, 1})
     end
 
     opts =

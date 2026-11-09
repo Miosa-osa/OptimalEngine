@@ -72,7 +72,7 @@ defmodule Mix.Tasks.Optimal.Context.RefreshStale do
 
       {:error, reason} ->
         Mix.shell().error("Context refresh failed: #{inspect(reason)}")
-        System.halt(1)
+        exit({:shutdown, 1})
     end
   end
 end

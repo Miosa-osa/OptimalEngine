@@ -47,6 +47,9 @@ defmodule OptimalEngine.Store.DerivedDataIndexesMigrationTest do
     end
   end
 
+  # Its statements run on SQLite; PostgreSQL's schema is derived from them and
+  # a second sync changes nothing (Postgres.SchemaSyncTest).
+  @tag :sqlite_store
   test "running its statements again changes nothing" do
     {_version, _description, statements} = migration()
 
@@ -57,19 +60,11 @@ defmodule OptimalEngine.Store.DerivedDataIndexesMigrationTest do
 
   for {table, column} <- @read_by do
     test "#{table} is read by #{column} through an index" do
-      {:ok, plan} =
-        Store.raw_query(
-          "EXPLAIN QUERY PLAN SELECT 1 FROM #{unquote(table)} WHERE #{unquote(column)} = ?1",
-          ["x"]
-        )
-
-      details = plan |> Enum.map(&List.last/1) |> Enum.join(" | ")
-      index = "idx_#{unquote(table)}_#{unquote(column)}"
-
-      assert details =~ "USING INDEX #{index}" or details =~ "USING COVERING INDEX #{index}",
-             details
-
-      refute details =~ "SCAN #{unquote(table)}", details
+      OptimalEngine.Test.IndexReads.assert_read_by_index(
+        unquote(table),
+        unquote(column),
+        "idx_#{unquote(table)}_#{unquote(column)}"
+      )
     end
   end
 end

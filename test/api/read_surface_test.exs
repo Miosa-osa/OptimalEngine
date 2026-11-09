@@ -1438,12 +1438,20 @@ defmodule OptimalEngine.API.ReadSurfaceTest do
   end
 
   defp with_renamed_column(table, column, renamed, fun) do
-    {:ok, _} = Store.raw_query("ALTER TABLE #{table} RENAME COLUMN #{column} TO #{renamed}", [])
+    :ok =
+      OptimalEngine.Test.StoreDDL.execute(
+        "ALTER TABLE #{table} RENAME COLUMN #{column} TO #{renamed}",
+        []
+      )
 
     try do
       fun.()
     after
-      {:ok, _} = Store.raw_query("ALTER TABLE #{table} RENAME COLUMN #{renamed} TO #{column}", [])
+      :ok =
+        OptimalEngine.Test.StoreDDL.execute(
+          "ALTER TABLE #{table} RENAME COLUMN #{renamed} TO #{column}",
+          []
+        )
     end
   end
 

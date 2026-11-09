@@ -14,7 +14,7 @@ defmodule OptimalEngine.Store.BindGuardTest do
   @int64_max 9_223_372_036_854_775_807
   @past_int64 @int64_max + 1
 
-  defp store_pid, do: Process.whereis(OptimalEngine.Store.SQLite)
+  defp store_pid, do: Process.whereis(OptimalEngine.Store.adapter())
 
   # How a request ended: its status, or :raised when the router answered 500
   # and raised the error again, as it does for a server error.

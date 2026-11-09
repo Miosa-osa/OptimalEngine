@@ -23,9 +23,11 @@ defmodule OptimalEngine.Store.TransactionTest do
     table = "txn_test_#{System.unique_integer([:positive])}"
 
     :ok =
-      Store.raw_execute("CREATE TABLE IF NOT EXISTS #{table} (id INTEGER PRIMARY KEY, val TEXT)")
+      OptimalEngine.Test.StoreDDL.execute(
+        "CREATE TABLE IF NOT EXISTS #{table} (id INTEGER PRIMARY KEY, val TEXT)"
+      )
 
-    on_exit(fn -> Store.raw_execute("DROP TABLE IF EXISTS #{table}") end)
+    on_exit(fn -> OptimalEngine.Test.StoreDDL.execute("DROP TABLE IF EXISTS #{table}") end)
 
     {:ok, table: table}
   end

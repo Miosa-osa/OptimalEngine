@@ -91,11 +91,11 @@ defmodule Mix.Tasks.Optimal.Backup do
 
         {:ok, issues} ->
           IO.puts("  integrity_check:  FAILED - #{inspect(issues)}")
-          System.halt(1)
+          exit({:shutdown, 1})
 
         {:error, reason} ->
           IO.puts("  integrity_check:  ERROR - #{inspect(reason)}")
-          System.halt(1)
+          exit({:shutdown, 1})
       end
     end
   end
@@ -110,7 +110,7 @@ defmodule Mix.Tasks.Optimal.Backup do
 
   defp report_offsite(%{status: "failed"} = offsite) do
     IO.puts("  offsite:          FAILED - #{Map.get(offsite, :message, offsite.reason)}")
-    System.halt(1)
+    exit({:shutdown, 1})
   end
 
   defp list_offsite do

@@ -169,8 +169,22 @@ defmodule OptimalEngine.Store.Postgres do
          do: {:ok, report}
   end
 
+  @doc """
+  Applies the derived schema again, as starting the store does, and returns
+  the sync's report: `mix optimal.migrate` on a PostgreSQL store.
+  """
+  @spec sync_schema() :: {:ok, map()} | {:error, term()}
+  def sync_schema, do: GenServer.call(__MODULE__, :sync_schema, 300_000)
+
   @impl GenServer
   def handle_call(:schema_report, _from, state), do: {:reply, state.report, state}
+
+  def handle_call(:sync_schema, _from, state) do
+    case ready(state.schema) do
+      {:ok, report} -> {:reply, {:ok, report}, %{state | report: report}}
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
 
   @impl GenServer
   def handle_info(:full_text, state) do
@@ -527,6 +541,12 @@ defmodule OptimalEngine.Store.Postgres do
           {:ok, non_neg_integer()} | {:error, term()}
   def txn_execute_native(txn, sql, params \\ []) do
     with {:ok, %{num_rows: count}} <- txn_native(txn, sql, params), do: {:ok, count}
+  end
+
+  @doc "Runs a statement written for PostgreSQL inside a transaction and returns its rows."
+  @spec txn_query_native(term(), String.t(), [term()]) :: {:ok, [[term()]]} | {:error, term()}
+  def txn_query_native(txn, sql, params \\ []) do
+    with {:ok, %{rows: rows}} <- txn_native(txn, sql, params), do: {:ok, rows}
   end
 
   # ---------------------------------------------------------------------------
