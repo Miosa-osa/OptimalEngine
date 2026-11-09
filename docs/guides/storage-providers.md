@@ -367,7 +367,7 @@ Setting `OPTIMAL_NATS_URL` alone checks and proves the server; nothing the Engin
 
 | Flow | What runs through JetStream | Without NATS, or while it is down |
 | --- | --- | --- |
-| `ledger` | The change ledger of every workspace enabled for replication, as stream `<NAMESPACE>_LEDGER` | The ledger stays in SQLite (`sync_mutations`), as it always does; the backlog goes out when NATS is back |
+| `ledger` | The change ledger of every workspace enabled for replication, as stream `<NAMESPACE>_LEDGER` | The ledger stays in the Engine's store (`sync_mutations`, on SQLite or PostgreSQL), as it always does; the backlog goes out when NATS is back |
 | `jobs` | The dispatch of background jobs: every queued job announced on `<NAMESPACE>_JOBS`, its worker woken when it is due | Workers poll the `jobs` table as they always have; jobs queued meanwhile are announced when NATS is back |
 | `intake` | Connector pulls: each pulled Signal queued on `<NAMESPACE>_INTAKE` and ingested by the queue's consumer | The pull ingests its Signals in process, as it always has |
 
@@ -381,6 +381,7 @@ The provider's `serves` names the flows that are on (`change_ledger_stream`, `ba
 With `ledger` on, `OptimalEngine.Storage.NATS.LedgerPublisher` publishes, every second, what `GET /api/sync/changes` would serve a peer that pulls: the changes of the workspaces enabled for replication, only the tables that replicate, and never a row the data-class gate keeps home (`config :optimal_engine, :sync_serve_max_class`, default `confidential`).
 A workspace that is not enabled for replication has no ledger, and nothing of it is published.
 Storage mutation entries (`POST /api/storage/workspaces/:id/mutations`) are not changes and are not published either.
+It reads the ledger the Engine's own store keeps, so an Engine on SQLite and one on PostgreSQL (`OPTIMAL_STORE=postgres`, whose capture triggers write the same `sync_mutations`) publish the same stream, purges and tombstones included.
 
 * Stream `<NAMESPACE>_LEDGER`, file storage, limits retention, kept `OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS` (default 168, `0` keeps it forever).
 * Subject `<namespace>.ledger.<tenant>.<workspace>.<table>.<row>`, one per row, each id made a subject token: bytes other than letters, digits, `_` and `-` are percent-encoded (`default:notes` is `default%3Anotes`).
@@ -391,6 +392,12 @@ Storage mutation entries (`POST /api/storage/workspaces/:id/mutations`) are not 
 Changes go out one at a time in ledger order, each acknowledged by the stream before the next, so a workspace's subject holds its changes in the order the Engine made them.
 A publish whose acknowledgement was lost is sent again with the same message id, and the stream stores it once.
 Where to resume is read from the stream (the `Optimal-Ledger-Seq` of the last message on the workspace's subject) at start and after every reconnect: a restart repeats nothing, and a stream that was deleted or lost is filled again from the start of the ledger.
+On PostgreSQL every writer of the ledger takes one advisory lock before it draws a sequence and holds it until it commits, so sequences commit in the order they were drawn and a reader that has seen a sequence has seen every one below it (see [PostgreSQL Provider](postgres-provider.md#replication)); without it a change that drew a lower sequence and committed later would be skipped for good.
+
+The stream stores a message id once only inside its duplicate window (the server's default, two minutes).
+Past it, a resume point older than what was already published sends those changes again: when a forget's purge removed the workspace's newest messages and the publisher stopped before the tombstone (below), when a workspace's messages aged out (`OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS`) and its ledger is published again, or when the stream was lost.
+Consumers are therefore idempotent on the workspace and `Optimal-Ledger-Seq`: keep the highest sequence applied per workspace and skip a message at or below it, or key on `Nats-Msg-Id` (the change's id, which never changes).
+No epoch is needed: a sequence belongs to the ledger, is never reused, and only grows within a workspace.
 
 `runtime.flows.ledger` in `GET /api/storage/providers/nats_jetstream` says where it stands: `state` (`off`, `buffering` while NATS is down, `publishing` while a backlog remains, `caught_up`, `error` with `last_error`), the changes published since start, and each workspace's `published_through` and `backlog`.
 
@@ -406,6 +413,7 @@ The publisher keeps the stream to what the Engine still holds instead:
 * A forget is a `delete` in the ledger (an erasure, a retention delete, a derived-data removal, any delete) or a `memories` change that sets `is_forgotten` (`Memory.forget/2`).
   Before the forget goes out, every earlier message on the row's subject is purged, and the message that replaces them is a tombstone: a delete carries the row's key only, a forgotten memory its `id` and `is_forgotten` and nothing it said.
 * A create or update that a later forget in the ledger covers is never published, so a stream filled again from the ledger (after a loss, or a first start after the forget) holds nothing forgotten either.
+* The purge and the tombstone are two calls, so a publisher stopped between them (a crash, NATS lost mid-pass) leaves the row's messages purged and no tombstone yet. The next pass resumes from the stream's last message, which is before the forget, and sends it again: the purge (nothing left to purge, so the retry is safe) and then the tombstone, with the covered create or update withheld again. The row's content does not come back, and until that pass a subscriber sees neither the row nor its tombstone. This is the same on SQLite and on PostgreSQL.
 * An archived workspace (`Workspace.archive/1`) and the old id of a renamed one (`DataSteward.rename_workspace/3`) have their whole subject tree purged (`<namespace>.ledger.<tenant>.<workspace>.>`), and an archived workspace is no longer published.
   The request is written first as an `events` row (`kind = 'nats_purge_requested'`), done at once when NATS is reachable and otherwise on the next pass after it is, so a purge asked for during an outage, or across a restart, is not lost.
 
@@ -830,7 +838,7 @@ The scripts need a standalone Valkey (or Redis 7 or later); Valkey Cluster is no
 
 ## What Is Not Implemented
 
-The Engine has no adapter for Fractal, and the provider inventory says so; NATS JetStream, Qdrant and OpenBao are reached and proved, but no Engine feature is served from them yet; DuckDB serves the workspace analytics export and query, and nothing else.
+The Engine has no adapter for Fractal, and the provider inventory says so; Qdrant is reached and proved, but no Engine feature is served from it yet; NATS JetStream carries the flows named in `OPTIMAL_NATS_FLOWS` (the change ledger, background jobs, connector intake) on either canonical store; OpenBao serves secret references and backup key wrapping; DuckDB serves the workspace analytics export and query, and nothing else.
 Valkey carries the rate limits and caches listed under [Valkey](#valkey) and nothing durable.
 PostgreSQL holds the canonical relational store with every feature of the SQLite store, and an existing Engine's data moves to it with `mix optimal.postgres.migrate` (stage 4 of [PostgreSQL Provider](postgres-provider.md)).
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.

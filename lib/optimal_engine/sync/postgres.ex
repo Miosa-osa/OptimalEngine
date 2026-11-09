@@ -27,6 +27,22 @@ defmodule OptimalEngine.Sync.Postgres do
   decode to a number equal to it, and the peer stores it in its own column's
   type.
 
+  ## Ledger sequences commit in order
+
+  A reader of the ledger (`Sync.changes/3`, which a peer pulls and the NATS
+  ledger publisher reads) follows it by sequence: it keeps the last sequence it
+  read and next asks for the rows after it. PostgreSQL draws a `sync_mutations`
+  sequence when a row is inserted, before the writer commits, so without more
+  a writer that drew 10 could commit after one that drew 11: a reader that saw
+  11 would move past 10, and the row would never be read. Every writer of the
+  ledger (sealing, an applied change, a storage mutation entry) therefore takes
+  one transaction-scoped advisory lock (`lock_ledger_sql/0`, keyed on the
+  store's schema, so Engines sharing a database and a schema share it) before it
+  inserts, and holds it until it commits or rolls back. Sequences become visible
+  in the order they were drawn, so every snapshot sees a prefix of the ledger.
+  A writer that rolls back leaves a gap no row will ever fill, and readers go
+  past it as they always did.
+
   ## The local stamp
 
   The gate cache keys an entry on the write sequences of the capture, the
@@ -51,6 +67,28 @@ defmodule OptimalEngine.Sync.Postgres do
   alias OptimalEngine.Store.Postgres.Connection
 
   @pool OptimalEngine.Store.Postgres.Pool
+
+  @ledger_lock "SELECT pg_advisory_xact_lock(hashtext('optimal_engine.sync.ledger'), hashtext(current_schema()))"
+
+  @doc """
+  The statement every ledger writer runs in its transaction before it inserts
+  into `sync_mutations` (see "Ledger sequences commit in order").
+  """
+  @spec lock_ledger_sql() :: String.t()
+  def lock_ledger_sql, do: @ledger_lock
+
+  @doc """
+  Takes the ledger lock in a Store transaction on PostgreSQL; nothing on SQLite,
+  whose one writer commits in sequence order already.
+  """
+  @spec lock_ledger(term()) :: :ok | {:error, term()}
+  def lock_ledger(txn) do
+    if active?() do
+      with {:ok, _} <- OptimalEngine.Store.Postgres.txn_query_native(txn, @ledger_lock, []), do: :ok
+    else
+      :ok
+    end
+  end
 
   @doc "True when this build's store is PostgreSQL."
   @spec active?() :: boolean()
@@ -422,6 +460,7 @@ defmodule OptimalEngine.Sync.Postgres do
       @pool,
       fn conn ->
         Postgrex.query!(conn, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED", [])
+        if entries != [], do: Postgrex.query!(conn, @ledger_lock, [])
         Enum.each(entries, &Postgrex.query!(conn, insert, &1))
         Postgrex.query!(conn, "DELETE FROM sync_capture WHERE seq <= $1", [max_seq])
         length(entries)

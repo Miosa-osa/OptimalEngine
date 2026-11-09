@@ -11,7 +11,9 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   the tables that replicate, and never a row the data-class gate keeps home
   (`config :optimal_engine, :sync_serve_max_class`, default `confidential`).
   A workspace that is not enabled for replication has no ledger, and nothing
-  of it is published.
+  of it is published. The ledger is the one the Engine's store keeps, SQLite
+  or PostgreSQL (`OptimalEngine.Sync.Postgres` captures the same changes), so
+  both publish the same stream.
 
   ## Where it goes
 
@@ -40,6 +42,19 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   start and after every reconnect, so a restart repeats nothing, and a stream
   that was lost is filled again from the ledger's beginning.
 
+  The stream stores a message id once only inside its duplicate window (the
+  server's default, two minutes). A resume point the stream gives that is
+  older than what was published goes out again past that window: the
+  workspace's newest messages were purged by a forget whose tombstone did not
+  go out (see below), they aged out (`OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS`, a
+  workspace idle that long), or the stream was lost. A consumer is therefore
+  idempotent on the workspace and `Optimal-Ledger-Seq`: it keeps the highest
+  sequence it applied per workspace and skips a message at or below it (or
+  keys on `Nats-Msg-Id`, the change's id, which never changes). No epoch is
+  needed: a sequence is the ledger's, never reused, and on PostgreSQL commits
+  in order (`OptimalEngine.Sync.Postgres`), so a workspace's sequences only
+  grow.
+
   No Engine write waits on this: the ledger is written in the write's
   transaction, and this process reads it afterwards. While NATS is down the
   publisher reports `buffering` with each workspace's backlog, and the
@@ -57,6 +72,13 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   `target_uri = "workspace:<id>"`) with the rows forgotten and the messages
   purged. `flush/1` runs a pass at once for an erasure, which records its
   result in the erasure's report and audit event.
+
+  The purge and the tombstone are two calls. A publisher stopped between them
+  leaves the row's earlier messages gone and no tombstone yet; the next pass
+  resumes from the stream's last message, which is before the forget, and
+  sends the forget again: the purge again (nothing left to purge), then the
+  tombstone. The create or update the forget covers is withheld on that pass
+  too, so nothing erased goes back. This is the same on either store.
 
   A workspace archived or removed (`forget_workspace/4`) has its whole subject
   tree purged. The request is an `events` row (`nats_purge_requested`) written
@@ -230,8 +252,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   def handle_call({:forget_workspace, tenant, ws, reason}, _from, state) do
     id = request_purge(state.namespace, tenant, ws, reason)
 
-    with :ok <- sqlite(),
-         {:ok, state} <- provision(state) do
+    with {:ok, state} <- provision(state) do
       {done, state} = process_requests(state)
 
       case Map.fetch(done, id) do
@@ -255,8 +276,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
        subjects: if(state.enabled, do: "#{state.namespace}.ledger.>"),
        published: state.published,
        messages_purged: state.purged,
-       purges_pending:
-         if(state.enabled and sqlite() == :ok, do: length(pending_requests(state)), else: 0),
+       purges_pending: if(state.enabled, do: length(pending_requests(state)), else: 0),
        last_published_at: state.last_published_at,
        last_error: state.last_error,
        workspaces: if(state.enabled, do: backlogs(state), else: [])
@@ -281,8 +301,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   # ---------------------------------------------------------------------------
 
   defp pass(state, only) do
-    with :ok <- sqlite(),
-         {:ok, state} <- provision(state) do
+    with {:ok, state} <- provision(state) do
       {done, state} = process_requests(state)
       requested = done |> Map.values() |> Enum.sum()
 
@@ -328,10 +347,6 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   end
 
   defp add(a, b), do: Map.merge(a, b, fn _key, x, y -> x + y end)
-
-  defp sqlite do
-    if Store.selected?(OptimalEngine.Store.SQLite), do: :ok, else: {:error, :unsupported_store}
-  end
 
   # The stream is made sure of once per connection; a new connection may be to
   # a server that lost it, so where each workspace stands is read again.
@@ -658,22 +673,18 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
 
   # Sealed first, so a write the triggers captured counts before a pass ran.
   defp backlogs(state) do
-    if sqlite() == :ok do
-      {:ok, _} = OptimalEngine.Sync.Capture.seal()
+    {:ok, _} = OptimalEngine.Sync.Capture.seal()
 
-      for {tenant, ws} = workspace <- workspaces(state, nil) do
-        through = Map.get(state.cursors, workspace)
+    for {tenant, ws} = workspace <- workspaces(state, nil) do
+      through = Map.get(state.cursors, workspace)
 
-        {:ok, [[backlog]]} =
-          Store.raw_query(
-            "SELECT COUNT(*) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3",
-            [tenant, ws, through || 0]
-          )
+      {:ok, [[backlog]]} =
+        Store.raw_query(
+          "SELECT COUNT(*) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3",
+          [tenant, ws, through || 0]
+        )
 
-        %{tenant_id: tenant, workspace_id: ws, published_through: through, backlog: backlog}
-      end
-    else
-      []
+      %{tenant_id: tenant, workspace_id: ws, published_through: through, backlog: backlog}
     end
   end
 

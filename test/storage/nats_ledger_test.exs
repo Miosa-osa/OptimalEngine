@@ -85,9 +85,6 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     end
   end
 
-  # The ledger publisher reads SQLite's ledger and refuses another store
-  # (`{:error, :unsupported_store}`), so this runs with the Engine on SQLite.
-  @tag :sqlite_store
   test "each change goes out once, in ledger order, on its workspace's subject", ctx do
     for i <- 1..3, do: insert_context(ctx, "c#{i}-#{ctx.n}", "T#{i}")
     pub = publisher(ctx)
@@ -120,9 +117,6 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     assert {:ok, %{published: 1}} = LedgerPublisher.publish_now(pub)
   end
 
-  # The ledger publisher reads SQLite's ledger and refuses another store
-  # (`{:error, :unsupported_store}`), so this runs with the Engine on SQLite.
-  @tag :sqlite_store
   test "a restarted publisher picks up where the stream left off and repeats nothing", ctx do
     for i <- 1..2, do: insert_context(ctx, "r#{i}-#{ctx.n}", "R#{i}")
     first = publisher(ctx)
@@ -138,9 +132,6 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     assert ids == Enum.uniq(ids)
   end
 
-  # The ledger publisher reads SQLite's ledger and refuses another store
-  # (`{:error, :unsupported_store}`), so this runs with the Engine on SQLite.
-  @tag :sqlite_store
   test "NATS down: the write succeeds, the publisher buffers, and the backlog goes out in order",
        ctx do
     pub = publisher(ctx)
@@ -179,9 +170,6 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     assert %{state: "caught_up", workspaces: [%{backlog: 0}]} = LedgerPublisher.status(pub)
   end
 
-  # The ledger publisher reads SQLite's ledger and refuses another store
-  # (`{:error, :unsupported_store}`), so this runs with the Engine on SQLite.
-  @tag :sqlite_store
   test "a change the data-class gate keeps home is never published", ctx do
     {:ok, _} =
       Store.raw_query(

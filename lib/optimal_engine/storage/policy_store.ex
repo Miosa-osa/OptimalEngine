@@ -135,7 +135,7 @@ defmodule OptimalEngine.Storage.PolicyStore do
     occurred_at = Map.get(attrs, :occurred_at, DateTime.utc_now() |> DateTime.to_iso8601())
     idempotency_key = Map.get(attrs, :idempotency_key, id)
 
-    case Store.raw_execute(
+    case append_ledger_row(
            """
            INSERT OR IGNORE INTO sync_mutations (
              id, tenant_id, organization_id, workspace_id, device_id, actor_id,
@@ -161,6 +161,26 @@ defmodule OptimalEngine.Storage.PolicyStore do
          ) do
       :ok -> resolve_appended(tenant_id, attrs.workspace_id, idempotency_key, fingerprint)
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # On PostgreSQL the row's sequence is drawn under the ledger lock and the lock
+  # held until it commits, so ledger sequences commit in order and a reader
+  # following them never moves past one still to commit (Sync.Postgres).
+  defp append_ledger_row(sql, params) do
+    if OptimalEngine.Sync.Postgres.active?() do
+      Store.transaction(fn txn ->
+        with :ok <- OptimalEngine.Sync.Postgres.lock_ledger(txn),
+             {:ok, _} <- Store.txn_execute(txn, sql, params) do
+          {:ok, :appended}
+        end
+      end)
+      |> case do
+        {:ok, :appended} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      Store.raw_execute(sql, params)
     end
   end
 
