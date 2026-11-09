@@ -140,8 +140,10 @@ defmodule OptimalEngine.Secrets.OpenBaoSecretsTest do
       refute log =~ hex
       refute log =~ stub.token
 
-      # A failure is never kept: unsealing makes the next fetch succeed.
+      # Sealed is kept only for the outage window (OpenBaoBreakerTest); once
+      # that is over, or forgotten, unsealing makes the next fetch succeed.
       OpenBaoStub.unseal(stub)
+      Secrets.flush_cache()
       assert Secrets.fetch("OPTIMAL_BACKUP_KEY") == {:ok, hex}
 
       OpenBaoStub.stop(stub)

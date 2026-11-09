@@ -39,6 +39,17 @@ defmodule OptimalEngine.Storage.OpenBao do
   `{:openbao_status, status}`. A read of a path that holds nothing is
   `{:error, :not_found}`. No reason carries a secret, a token or a response
   body that could hold one.
+
+  ## While OpenBao is down
+
+  A data-path call that finds OpenBao sealed or not answering (a refused
+  connection, a timeout, a standby that cannot serve) marks that address down
+  for `OPTIMAL_OPENBAO_RETRY_AFTER_MS` (5000; `0` turns it off). Inside that
+  window every data-path call to the address fails at once with the same
+  reason instead of waiting out the HTTP timeout again; the first call after
+  it asks OpenBao again, and any answer that is not an outage clears the mark.
+  A definite answer (a refused token, a missing secret) is never kept. The
+  health probe and the proof always ask.
   """
 
   alias OptimalEngine.Connectors.HTTP
@@ -55,6 +66,9 @@ defmodule OptimalEngine.Storage.OpenBao do
   # A secret a path names is a few keys and values, never more than this.
   @max_body_bytes 1_048_576
   @default_timeout 3_000
+  @retry_after_env "OPTIMAL_OPENBAO_RETRY_AFTER_MS"
+  @default_retry_after_ms 5_000
+  @breaker_key {__MODULE__, :down}
 
   @type health :: :healthy | :unreachable | :not_configured | :invalid_config
 
@@ -62,9 +76,9 @@ defmodule OptimalEngine.Storage.OpenBao do
   @spec env_names() :: [String.t()]
   def env_names, do: [@addr_env, @token_env]
 
-  @doc "The optional environment variables: the KV mount and the transit key and mount."
+  @doc "The optional environment variables: the KV mount, the transit key and mount, and the outage window."
   @spec optional_env_names() :: [String.t()]
-  def optional_env_names, do: [@mount_env, @transit_key_env, @transit_mount_env]
+  def optional_env_names, do: [@mount_env, @transit_key_env, @transit_mount_env, @retry_after_env]
 
   @doc "Whether the address and the token are set and the address is an http(s) URL."
   @spec configured?() :: boolean()
@@ -138,7 +152,7 @@ defmodule OptimalEngine.Storage.OpenBao do
   @spec availability(keyword()) :: :ok | {:error, term()}
   def availability(opts \\ []) do
     with {:ok, config} <- data_config(opts) do
-      case call(config, :get, "/v1/sys/health?standbyok=true", nil, opts) do
+      case guarded_call(config, :get, "/v1/sys/health?standbyok=true", nil, opts) do
         {:ok, 200, %{"sealed" => true}} -> {:error, :openbao_sealed}
         {:ok, 200, _body} -> :ok
         {:ok, 501, _body} -> {:error, :openbao_not_initialized}
@@ -204,7 +218,7 @@ defmodule OptimalEngine.Storage.OpenBao do
   def kv_read(path, opts \\ []) do
     with {:ok, config} <- data_config(opts),
          {:ok, segments} <- secret_path(path) do
-      case call(config, :get, "/v1/#{config.mount}/data/#{segments}", nil, opts) do
+      case guarded_call(config, :get, "/v1/#{config.mount}/data/#{segments}", nil, opts) do
         {:ok, 200, %{"data" => %{"data" => data}}} when is_map(data) -> {:ok, data}
         # A secret whose latest version was deleted answers 404 with its metadata.
         {:ok, 404, _body} -> {:error, :not_found}
@@ -223,7 +237,7 @@ defmodule OptimalEngine.Storage.OpenBao do
     with {:ok, config} <- data_config(opts),
          {:ok, segments} <- secret_path(path) do
       write = fn ->
-        call(config, :post, "/v1/#{config.mount}/data/#{segments}", %{data: data}, opts)
+        guarded_call(config, :post, "/v1/#{config.mount}/data/#{segments}", %{data: data}, opts)
       end
 
       case write.() do
@@ -247,7 +261,7 @@ defmodule OptimalEngine.Storage.OpenBao do
   def kv_delete(path, opts \\ []) do
     with {:ok, config} <- data_config(opts),
          {:ok, segments} <- secret_path(path) do
-      case call(config, :delete, "/v1/#{config.mount}/metadata/#{segments}", nil, opts) do
+      case guarded_call(config, :delete, "/v1/#{config.mount}/metadata/#{segments}", nil, opts) do
         {:ok, status, _body} when status in [200, 204, 404] -> :ok
         other -> failure(other)
       end
@@ -260,7 +274,7 @@ defmodule OptimalEngine.Storage.OpenBao do
   defp enable_kv_and_retry(config, write, opts) do
     mount_body = %{type: "kv", options: %{version: "2"}, description: "Optimal Engine secrets"}
 
-    case call(config, :post, "/v1/sys/mounts/#{config.mount}", mount_body, opts) do
+    case guarded_call(config, :post, "/v1/sys/mounts/#{config.mount}", mount_body, opts) do
       {:ok, status, _body} when status in [200, 204] ->
         Logger.info("OpenBao: enabled the KV version 2 mount #{config.mount} for Engine secrets.")
         retry_write(write, Keyword.get(opts, :mount_retries, 10))
@@ -328,7 +342,7 @@ defmodule OptimalEngine.Storage.OpenBao do
   def transit_data_key(%{mount: mount, name: name}, opts \\ []) do
     with {:ok, config} <- data_config(opts),
          {:ok, key} <- secret_path(name) do
-      case call(config, :post, "/v1/#{mount}/datakey/plaintext/#{key}", %{bits: 256}, opts) do
+      case guarded_call(config, :post, "/v1/#{mount}/datakey/plaintext/#{key}", %{bits: 256}, opts) do
         {:ok, 200, %{"data" => %{"plaintext" => plain, "ciphertext" => wrapped}}}
         when is_binary(plain) and is_binary(wrapped) ->
           case Base.decode64(plain) do
@@ -349,7 +363,13 @@ defmodule OptimalEngine.Storage.OpenBao do
       when is_binary(ciphertext) do
     with {:ok, config} <- data_config(opts),
          {:ok, key} <- secret_path(name) do
-      case call(config, :post, "/v1/#{mount}/decrypt/#{key}", %{ciphertext: ciphertext}, opts) do
+      case guarded_call(
+             config,
+             :post,
+             "/v1/#{mount}/decrypt/#{key}",
+             %{ciphertext: ciphertext},
+             opts
+           ) do
         {:ok, 200, %{"data" => %{"plaintext" => plain}}} when is_binary(plain) ->
           case Base.decode64(plain) do
             {:ok, data_key} -> {:ok, data_key}
@@ -418,7 +438,60 @@ defmodule OptimalEngine.Storage.OpenBao do
     do: {:error, :openbao_unreachable}
 
   defp failure({:ok, status, _body}), do: {:error, {:openbao_status, status}}
+  defp failure({:error, {:openbao_down, reason}}), do: {:error, reason}
   defp failure({:error, _reason}), do: {:error, :openbao_unreachable}
+
+  # ─── outage window ───────────────────────────────────────────────────────
+
+  @doc "Forgets that any OpenBao address was down, so the next call asks it."
+  @spec reset_outages() :: :ok
+  def reset_outages do
+    :persistent_term.erase(@breaker_key)
+    :ok
+  end
+
+  defp guarded_call(config, method, path, body, opts) do
+    now = System.monotonic_time(:millisecond)
+
+    case :persistent_term.get(@breaker_key, nil) do
+      {base_url, until, reason} when base_url == config.base_url and until > now ->
+        {:error, {:openbao_down, reason}}
+
+      marked ->
+        result = call(config, method, path, body, opts)
+        note_outage(marked, config.base_url, outage(result), now)
+        result
+    end
+  end
+
+  # Only what says OpenBao cannot serve at all opens the window.
+  defp outage({:ok, 503, _body}), do: :openbao_sealed
+  defp outage({:ok, status, _body}) when status in [429, 472, 473], do: :openbao_unreachable
+  defp outage({:ok, _status, _body}), do: nil
+  defp outage({:error, _reason}), do: :openbao_unreachable
+
+  # persistent_term is written only when the state changes: once when an
+  # outage starts (and once per window while it lasts), once when it ends.
+  defp note_outage(marked, base_url, nil, _now) do
+    if match?({^base_url, _until, _reason}, marked), do: :persistent_term.erase(@breaker_key)
+    :ok
+  end
+
+  defp note_outage(_marked, base_url, reason, now) do
+    case retry_after_ms() do
+      0 -> :ok
+      window -> :persistent_term.put(@breaker_key, {base_url, now + window, reason})
+    end
+
+    :ok
+  end
+
+  defp retry_after_ms do
+    case Integer.parse(System.get_env(@retry_after_env) || "") do
+      {ms, ""} when ms >= 0 -> ms
+      _unset_or_invalid -> @default_retry_after_ms
+    end
+  end
 
   defp no_route?(%{"errors" => errors}) when is_list(errors),
     do: Enum.any?(errors, &(is_binary(&1) and &1 =~ "no handler for route"))

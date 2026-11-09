@@ -536,6 +536,7 @@ A backup is then refused with `backup_key_unavailable`, an authority key is not 
 A sealed or unreachable OpenBao never stops the Engine from booting.
 The Engine starts and serves, and readiness (`GET /api/health`, `GET /api/status`, `Release.preflight/0`) reports it as degraded, not down: the `secrets` check warns `openbao_unavailable` with the reason (`openbao_sealed`, `openbao_unreachable`, ...), and `credential_key` warns `connector_key_unavailable` when `CONNECTOR_KEY` is a reference.
 Until OpenBao is unsealed, each feature that needs a secret fails with that reason as above; nothing needs a restart once it is.
+While OpenBao is sealed or not answering, the Engine asks it again only every `OPTIMAL_OPENBAO_RETRY_AFTER_MS` (5000 ms): calls in between fail at once with the same reason rather than each waiting out the three-second timeout, so an unsealed OpenBao is used again within that window.
 
 ### Connector Credentials
 

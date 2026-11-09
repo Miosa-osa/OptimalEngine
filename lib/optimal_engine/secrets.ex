@@ -25,8 +25,12 @@ defmodule OptimalEngine.Secrets do
 
   A value read from OpenBao is kept in memory for `@ttl_ms` (a minute), so a
   multipart upload or a burst of connector runs does not ask OpenBao for the
-  same secret on every call; a failure is never kept. `flush_cache/0` drops
-  every kept value, and a rotated secret is read within the minute.
+  same secret on every call. A sealed or unreachable OpenBao is not asked again
+  for a few seconds (`OPTIMAL_OPENBAO_RETRY_AFTER_MS`, see
+  `OptimalEngine.Storage.OpenBao`), so a burst of calls during an outage fails
+  at once rather than each waiting out the timeout; any other failure is never
+  kept. `flush_cache/0` drops every kept value and that outage mark, and a
+  rotated secret is read within the minute.
 
   Nothing here logs, inspects or returns a secret anywhere but to the caller
   that asked for it: errors and log lines name the variable and the reason.
@@ -129,11 +133,14 @@ defmodule OptimalEngine.Secrets do
     end
   end
 
-  @doc "Drops every value read from OpenBao, so the next fetch reads it again."
+  @doc """
+  Drops every value read from OpenBao, and forgets that OpenBao was down
+  (`OptimalEngine.Storage.OpenBao.reset_outages/0`), so the next fetch asks it.
+  """
   @spec flush_cache() :: :ok
   def flush_cache do
     :persistent_term.erase(@cache_key)
-    :ok
+    OpenBao.reset_outages()
   end
 
   @doc "A sentence naming what went wrong, for a log line or an operator. Never carries a secret."

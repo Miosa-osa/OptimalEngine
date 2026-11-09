@@ -98,6 +98,7 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 | `CONNECTOR_KEY` | none | 64 hex characters, or `openbao:<path>#<field>`; seals connector and peer credentials in the database. |
 | `OPTIMAL_AUTHORITY_KEY` | none | 64 hex characters, or `openbao:<path>#<field>`; wraps the authority signing keys. |
 | `OPTIMAL_OPENBAO_ADDR`, `OPTIMAL_OPENBAO_TOKEN` | none | OpenBao address and token. With both set the secret references above resolve; connector credentials stay in the Engine unless `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`. |
+| `OPTIMAL_OPENBAO_RETRY_AFTER_MS` | `5000` | After OpenBao is found sealed or not answering, how long every call fails at once with that reason before OpenBao is asked again. `0` asks every time. |
 | `OPTIMAL_OPENBAO_KV_MOUNT` | `secret` | KV version 2 mount for references and connector credentials; enabled on first write when the token may. |
 | `OPTIMAL_OPENBAO_TRANSIT_KEY`, `OPTIMAL_OPENBAO_TRANSIT_MOUNT` | none, `transit` | Transit key that wraps each offsite backup's data key beside `OPTIMAL_BACKUP_KEY`, which stays required so a copy restores without this OpenBao. |
 | `OPTIMAL_BACKUP_TRANSIT_ONLY` | `false` | `true` lets a transit key seal copies without `OPTIMAL_BACKUP_KEY`. Risk: those copies open only through that OpenBao, and are lost with it (its machine, storage or unseal keys). |
