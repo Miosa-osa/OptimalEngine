@@ -33,9 +33,10 @@ defmodule OptimalEngine.Store.Postgres do
 
   ## Features not on PostgreSQL
 
-  Replication, app data collections and the statements that use SQLite's JSON
-  functions, date arithmetic, catalog, `rowid` and other SQLite-only functions
-  are not on PostgreSQL yet
+  Replication, app data collections and the statements that use SQLite's
+  catalog or `rowid` are not on PostgreSQL yet; SQLite's JSON, date and text
+  functions run as PostgreSQL functions
+  (`OptimalEngine.Store.Postgres.SQLiteFunctions`)
   (`OptimalEngine.Storage.Postgres.unavailable/0`). Each is refused by name
   when used. A database that holds replication or app data collection data
   stops the store from starting, rather than letting it run without them.

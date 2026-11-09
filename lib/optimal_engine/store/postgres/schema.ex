@@ -81,7 +81,7 @@ defmodule OptimalEngine.Store.Postgres.Schema do
   require Logger
 
   alias OptimalEngine.Store.Dialect
-  alias OptimalEngine.Store.Postgres.{Connection, Errors, Steps}
+  alias OptimalEngine.Store.Postgres.{Connection, Errors, SQLiteFunctions, Steps}
 
   @text ~s(TEXT COLLATE "C")
   @identifier ~r/\A[a-z_][a-z0-9_]*\z/
@@ -905,6 +905,10 @@ defmodule OptimalEngine.Store.Postgres.Schema do
             do: required!(conn, "CREATE SCHEMA IF NOT EXISTS #{quote_name(schema)}")
 
           in_schema!(conn, schema)
+
+          # SQLite's functions first: an index or view the dialect translated
+          # can call them (OptimalEngine.Store.Postgres.SQLiteFunctions).
+          Enum.each(SQLiteFunctions.ddl(), &required!(conn, &1))
 
           required!(
             conn,

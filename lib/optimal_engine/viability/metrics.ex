@@ -189,6 +189,8 @@ defmodule OptimalEngine.Viability.Metrics do
     })
   end
 
+  # sig has one row per context, so MIN(s.at) is its time; PostgreSQL wants
+  # the aggregate where SQLite takes the bare column.
   defp time_to_decode(scope) do
     {:ok, rows} =
       Store.raw_query(
@@ -205,7 +207,7 @@ defmodule OptimalEngine.Viability.Metrics do
           WHERE tenant_id = ?1 AND state = 'closed' AND source_context_id IN (SELECT id FROM sig)
           GROUP BY source_context_id
         )
-        SELECT (julianday(MIN(f.at)) - julianday(s.at)) * 24.0
+        SELECT (julianday(MIN(f.at)) - julianday(MIN(s.at))) * 24.0
         FROM sig s JOIN first_action f ON f.id = s.id
         GROUP BY s.id
         """,

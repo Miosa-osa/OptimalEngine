@@ -367,8 +367,10 @@ defmodule OptimalEngine.Wiki.Scheduler do
   defp gather_new_citations(%Page{last_curated: nil}), do: []
 
   defp gather_new_citations(%Page{} = page) do
+    # The order's column is selected: PostgreSQL orders a DISTINCT only by
+    # what it selects.
     sql = """
-    SELECT DISTINCT ch.id, ch.text, ctx.node
+    SELECT DISTINCT ch.id, ch.text, ctx.node, ctx.created_at
     FROM contexts ctx
     JOIN chunks ch ON ch.signal_id = ctx.id
     WHERE ctx.node IN (
@@ -397,7 +399,7 @@ defmodule OptimalEngine.Wiki.Scheduler do
 
     case RawStore.raw_query(sql, params) do
       {:ok, rows} ->
-        Enum.map(rows, fn [chunk_id, text, node] -> citation(chunk_id, text, node) end)
+        Enum.map(rows, fn [chunk_id, text, node, _at] -> citation(chunk_id, text, node) end)
 
       _ ->
         []

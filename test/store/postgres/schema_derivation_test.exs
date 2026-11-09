@@ -239,7 +239,7 @@ defmodule OptimalEngine.Store.Postgres.SchemaDerivationTest do
         END;
         CREATE TABLE keyless (a TEXT);
         INSERT INTO keyless VALUES ('seed');
-        CREATE INDEX odd_shape ON odd (shape) WHERE "Mixed" GLOB 'x*';
+        CREATE INDEX odd_shape ON odd (shape) WHERE typeof("Mixed") = 'text';
         """)
 
       plan = Schema.from_sqlite(db)

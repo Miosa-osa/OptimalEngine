@@ -84,7 +84,7 @@ defmodule OptimalEngine.Store.DialectTest do
       assert {:error, {:unsupported, "PRAGMA"}} = Dialect.to_postgres("PRAGMA foreign_keys = OFF")
     end
 
-    test "the part of a value before a separator, and instr anywhere else refused" do
+    test "the part of a value before a separator, and instr anywhere else strpos" do
       assert {:ok,
               "SELECT (CASE WHEN strpos($1, ':') > 0 THEN substr($1, 1, strpos($1, ':') - 1) WHEN strpos($1, ':') = 0 THEN '' END) FROM t WHERE w.id = $1"} =
                Dialect.to_postgres(
@@ -95,10 +95,8 @@ defmodule OptimalEngine.Store.DialectTest do
               "SELECT (CASE WHEN strpos(w.id, ':') > 0 THEN substr(w.id, 1, strpos(w.id, ':') - 1) WHEN strpos(w.id, ':') = 0 THEN '' END) FROM workspaces w"} =
                Dialect.to_postgres("SELECT substr(w.id, 1, instr(w.id, ':') - 1) FROM workspaces w")
 
-      assert {:error, {:unsupported, "instr"}} = Dialect.to_postgres("SELECT instr(a, 'b') FROM t")
-
-      assert {:error, {:unsupported, "instr"}} =
-               Dialect.to_postgres("SELECT substr(?, 1, instr(?, ':') - 1) FROM t")
+      assert {:ok, "SELECT strpos(CAST((a) AS text), CAST(('b') AS text)) FROM t"} =
+               Dialect.to_postgres("SELECT instr(a, 'b') FROM t")
     end
 
     test "an UPDATE with a conflict clause is refused by name" do
@@ -136,17 +134,18 @@ defmodule OptimalEngine.Store.DialectTest do
                Dialect.to_postgres("SELECT id FROM contexts WHERE NOT indexed_at IS NULL")
     end
 
-    test "a list bound as one JSON array parameter, and json_each anywhere else refused" do
+    test "a list bound as one JSON array parameter, and json_each anywhere else sqlite_json_each" do
       assert {:ok,
               "SELECT id FROM t WHERE a IN (SELECT value FROM jsonb_array_elements_text(CAST($2 AS text)::jsonb)) AND tenant_id = $1"} =
                Dialect.to_postgres(
                  "SELECT id FROM t WHERE a IN (SELECT value FROM json_each(?2)) AND tenant_id = ?1"
                )
 
-      assert {:error, {:unsupported, "json_each"}} =
+      assert {:ok, "SELECT key FROM t, sqlite_json_each(CAST((t.meta) AS text))"} =
                Dialect.to_postgres("SELECT key FROM t, json_each(t.meta)")
 
-      assert {:error, {:unsupported, "json_each"}} =
+      assert {:ok,
+              "SELECT id FROM t WHERE a IN (SELECT value FROM sqlite_json_each(CAST((t.meta) AS text)))"} =
                Dialect.to_postgres(
                  "SELECT id FROM t WHERE a IN (SELECT value FROM json_each(t.meta))"
                )
@@ -188,9 +187,13 @@ defmodule OptimalEngine.Store.DialectTest do
                Dialect.to_postgres("SELECT * FROM t WHERE a LIKE lower(?1)")
     end
 
-    test "GLOB is refused" do
-      assert {:error, {:unsupported, "GLOB"}} =
+    test "GLOB of a column or placeholder is a regular expression match, anything else refused" do
+      assert {:ok,
+              "SELECT * FROM t WHERE (CAST((a) AS text) ~ sqlite_glob_regex(CAST(($1) AS text)))"} =
                Dialect.to_postgres("SELECT * FROM t WHERE a GLOB ?1")
+
+      assert {:error, {:unsupported, "GLOB"}} =
+               Dialect.to_postgres("SELECT * FROM t WHERE lower(a) GLOB ?1")
     end
   end
 
@@ -295,39 +298,48 @@ defmodule OptimalEngine.Store.DialectTest do
                Dialect.to_postgres("SELECT last_insert_rowid()")
     end
 
-    test "SQLite-only functions are refused by name" do
+    test "SQLite-only functions without a PostgreSQL counterpart are refused by name" do
       for {sql, name} <- [
-            {"SELECT value FROM json_each(?1)", "json_each"},
-            {"UPDATE t SET meta = json_set(meta, '$.a', 1)", "json_set"},
-            {"SELECT group_concat(name) FROM t", "group_concat"},
             {"SELECT typeof(a) FROM t", "typeof"},
-            {"SELECT julianday(a) FROM t", "julianday"},
-            {"SELECT date(created_at) FROM t", "date"},
-            {"SELECT a FROM t WHERE json_valid(lower(a))", "json_valid of an expression"}
+            {"SELECT printf('%d', a) FROM t", "printf"},
+            {"SELECT json_patch(a, b) FROM t", "json_patch"},
+            {"SELECT json_tree(a) FROM t", "json_tree"}
           ] do
         assert {:error, {:unsupported, ^name}} = Dialect.to_postgres(sql), sql
       end
     end
 
-    test "an unmapped strftime format or datetime modifier is refused" do
-      assert {:error, {:unsupported, "strftime format %s"}} =
-               Dialect.to_postgres("SELECT strftime('%s', 'now')")
+    test "a placeholder tested for NULL is read as text, so PostgreSQL can type it" do
+      assert {:ok, "SELECT id FROM facts WHERE (CAST($1 AS text) IS NULL OR subject_anchor = $1)"} =
+               Dialect.to_postgres("SELECT id FROM facts WHERE (?1 IS NULL OR subject_anchor = ?1)")
 
-      assert {:error, {:unsupported, "unmapped date/time function"}} =
-               Dialect.to_postgres("SELECT datetime('now', ?1)")
+      assert {:ok, "SELECT 1 FROM t WHERE CAST($1 AS text) IS NOT NULL AND a IS NULL"} =
+               Dialect.to_postgres("SELECT 1 FROM t WHERE ? IS NOT NULL AND a IS NULL")
+    end
 
-      assert {:error, {:unsupported, "unmapped date/time function"}} =
-               Dialect.to_postgres("SELECT datetime(created_at) FROM t")
-
-      # strftime('now') with a modifier, or of a column, is not mapped.
-      for sql <- [
-            "SELECT 1 FROM t WHERE created_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
-            "UPDATE t SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour')",
-            "SELECT strftime('%Y-%m-%d', created_at) FROM t"
+    test "SQLite's JSON, date and text functions are renamed to their PostgreSQL functions" do
+      for {sql, translated} <- [
+            {"UPDATE t SET meta = json_set(meta, '$.a', 1)",
+             "UPDATE t SET meta = sqlite_json_set(CAST((meta) AS text), CAST(('$.a') AS text), sqlite_json_value(1))"},
+            {"UPDATE t SET meta = json_set(meta, '$.a', json(?1), '$.b', ?2)",
+             "UPDATE t SET meta = sqlite_json_set(CAST((meta) AS text), CAST(('$.a') AS text), sqlite_json(CAST(($1) AS text)), CAST(('$.b') AS text), sqlite_json_value(CAST(($2) AS text)))"},
+            {"SELECT group_concat(DISTINCT name) FROM t",
+             "SELECT string_agg(DISTINCT CAST((name) AS text), ',') FROM t"},
+            {"SELECT julianday(a) FROM t", "SELECT sqlite_julianday(CAST((a) AS text)) FROM t"},
+            {"SELECT date(created_at) FROM t",
+             "SELECT sqlite_date(CAST((created_at) AS text)) FROM t"},
+            {"SELECT a FROM t WHERE json_valid(lower(a))",
+             "SELECT a FROM t WHERE (CAST((lower(a)) AS text) IS JSON)"},
+            {"SELECT strftime('%s', 'now')",
+             "SELECT sqlite_strftime(CAST(('%s') AS text), CAST(('now') AS text))"},
+            {"SELECT datetime('now', ?1)",
+             "SELECT sqlite_datetime(CAST(('now') AS text), CAST(($1) AS text))"},
+            {"SELECT datetime(created_at) FROM t",
+             "SELECT sqlite_datetime(CAST((created_at) AS text)) FROM t"},
+            {"SELECT 1 FROM t WHERE created_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
+             "SELECT 1 FROM t WHERE created_at > sqlite_strftime(CAST(('%Y-%m-%dT%H:%M:%SZ') AS text), CAST(('now') AS text), CAST(($1) AS text))"}
           ] do
-        assert {:error, {:unsupported, "unmapped date/time function"}} =
-                 Dialect.to_postgres(sql),
-               sql
+        assert {:ok, ^translated} = Dialect.to_postgres(sql), sql
       end
     end
 

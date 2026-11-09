@@ -129,6 +129,22 @@ defmodule OptimalEngine.Store.Postgres.JsonExtractParityTest do
          "created_at" => "2026-10-07T09:00:00Z",
          "metadata" => Jason.encode!(%{"outward" => "pricing", "tag" => "seed-b"})
        }},
+      {"memory_reconstruction_runs",
+       %{
+         "id" => "rr1",
+         "tenant_id" => "default",
+         "workspace_id" => "default",
+         "citations" => Jason.encode!(["a", "b", "c"]),
+         "metadata" => Jason.encode!(%{"engine_version" => "1"})
+       }},
+      {"memory_reconstruction_runs",
+       %{
+         "id" => "rr2",
+         "tenant_id" => "default",
+         "workspace_id" => "default",
+         "citations" => "[]",
+         "metadata" => Jason.encode!(%{"engine_version" => "1"})
+       }},
       {"sessions",
        %{
          "id" => "s1",
@@ -327,10 +343,10 @@ defmodule OptimalEngine.Store.Postgres.JsonExtractParityTest do
        WHERE id = ?2 AND workspace_id = ?3 AND archived_at IS NULL
          AND (json_extract(metadata, '$.routing_review.state') IS NOT ?4
               OR json_extract(metadata, '$.routing_review.proposed_workspace_id') IS NOT ?5)
-       """, ["{}", "c1", @intake, "review", "default:alpha"], {:refused, "json_set"}},
+       """, ["{}", "c1", @intake, "review", "default:alpha"], :changes},
       {"lib/optimal_engine/corpus_organizer.ex", "'$.routing_placement', json(?1)",
        "UPDATE contexts SET metadata = json_set(COALESCE(metadata, '{}'), '$.routing_placement', json(?1)) WHERE id = ?2",
-       ["{}", "c1"], {:refused, "json_set"}},
+       ["{}", "c1"], :changes},
       {"lib/optimal_engine/chat_session.ex", "AND json_extract(metadata, '$.correlation_id') = ?3",
        "SELECT COUNT(*) FROM sessions WHERE tenant_id = ?1 AND workspace_id = ?2 AND json_extract(metadata, '$.kind') = 'chat' AND json_extract(metadata, '$.correlation_id') = ?3",
        ["default", "default", "corr-1"], :rows},
@@ -452,7 +468,7 @@ defmodule OptimalEngine.Store.Postgres.JsonExtractParityTest do
       {"lib/optimal_engine/memory_core/reconstruction_learning.ex",
        "COALESCE(AVG(json_array_length(r.citations)), 0)",
        "SELECT COALESCE(AVG(json_array_length(r.citations)), 0) FROM memory_reconstruction_runs r WHERE json_extract(r.metadata, '$.engine_version') = ?1",
-       ["1"], {:refused, "json_array_length"}},
+       ["1"], :rows},
       {"lib/optimal_engine/backup/schedule.ex",
        "AND json_extract(metadata, '$.schedule_job_id') = ?1",
        """
