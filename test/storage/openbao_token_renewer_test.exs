@@ -17,6 +17,9 @@ defmodule OptimalEngine.Storage.OpenBaoTokenRenewerTest do
 
   setup do
     previous = Map.new(@env, &{&1, System.get_env(&1)})
+    # Tokens here live seconds, not hours: renew as often as they need.
+    Application.put_env(:optimal_engine, :openbao_renew_floor_ms, 100)
+    on_exit(fn -> Application.delete_env(:optimal_engine, :openbao_renew_floor_ms) end)
 
     on_exit(fn ->
       Enum.each(previous, fn
@@ -47,6 +50,30 @@ defmodule OptimalEngine.Storage.OpenBaoTokenRenewerTest do
     assert renewals(stub) >= 2
     assert Process.alive?(pid)
     assert TokenRenewer.status(pid).renewable
+  end
+
+  test "a lease that stops growing is renewed no more, and that is said once" do
+    # Near its maximum TTL each renewal answers less than the last.
+    stub = start(token_ttl: 2, renewable: true, renew_ttls: [2, 1, 1, 1])
+
+    log =
+      capture_log(fn ->
+        pid = start_supervised!({TokenRenewer, name: nil})
+        Process.sleep(2_500)
+        assert Process.alive?(pid)
+      end)
+
+    assert renewals(stub) <= 3
+    assert length(String.split(log, "stopped growing")) == 2
+    refute log =~ stub.token
+  end
+
+  test "nothing is scheduled below the floor, whatever the lease" do
+    Application.put_env(:optimal_engine, :openbao_renew_floor_ms, 30_000)
+    stub = start(token_ttl: 1, renewable: true)
+    _pid = start_supervised!({TokenRenewer, name: nil})
+    Process.sleep(1_200)
+    assert renewals(stub) == 0
   end
 
   test "a token that cannot be renewed is logged once, and never renewed" do

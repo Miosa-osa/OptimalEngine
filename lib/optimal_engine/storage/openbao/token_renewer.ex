@@ -12,7 +12,12 @@ defmodule OptimalEngine.Storage.OpenBao.TokenRenewer do
     * expiring and not renewable: a warning is logged once, saying when it
       runs out, so the operator replaces it before secrets stop resolving.
 
-  OpenBao sealed or unreachable is tried again in 30 seconds, without a log
+  A renewal that answers a shorter lease than the one before means the token
+  is nearing its maximum TTL: it is renewed no more, and that is logged once.
+  Nothing is ever scheduled sooner than 30 seconds ahead (`config
+  :optimal_engine, :openbao_renew_floor_ms`), so a lease that keeps shrinking
+  never turns into a renewal loop; a token with less left than that is left to
+  expire. OpenBao sealed or unreachable is tried again in 30 seconds, without a log
   line each time. The token is never logged. Not started without OpenBao
   configured (`:ignore`).
   """
@@ -26,7 +31,7 @@ defmodule OptimalEngine.Storage.OpenBao.TokenRenewer do
 
   @idle_ms :timer.hours(1)
   @retry_ms :timer.seconds(30)
-  @min_ms 500
+  @default_floor_ms 30_000
 
   def start_link(opts \\ []) do
     if OpenBao.configured?() do
@@ -52,7 +57,8 @@ defmodule OptimalEngine.Storage.OpenBao.TokenRenewer do
 
   @impl true
   def init(_opts) do
-    {:ok, %{timer: nil, ttl: nil, renewable: nil, warned: false, problem: nil}, {:continue, :check}}
+    {:ok, %{timer: nil, ttl: nil, renewable: nil, warned: false, problem: nil, stopped: false},
+     {:continue, :check}}
   end
 
   @impl true
@@ -89,6 +95,13 @@ defmodule OptimalEngine.Storage.OpenBao.TokenRenewer do
 
   defp renew(state) do
     case OpenBao.token_renew() do
+      {:ok, ttl} when is_integer(state.ttl) and ttl < state.ttl ->
+        Logger.warning(
+          "OpenBao: OPTIMAL_OPENBAO_TOKEN stopped growing on renewal (#{ttl}s left): it is reaching its maximum TTL and will expire. It is renewed no more; replace it with a periodic token or a fresh one before then."
+        )
+
+        %{state | ttl: ttl, problem: nil, stopped: true}
+
       {:ok, ttl} ->
         Logger.debug("OpenBao: OPTIMAL_OPENBAO_TOKEN renewed for #{ttl}s.")
         schedule(%{state | ttl: ttl, problem: nil}, half(ttl), :renew)
@@ -115,10 +128,21 @@ defmodule OptimalEngine.Storage.OpenBao.TokenRenewer do
     %{state | warned: true}
   end
 
-  defp half(ttl), do: max(div(ttl * 1000, 2), @min_ms)
+  defp half(ttl), do: div(ttl * 1000, 2)
 
+  defp floor_ms do
+    case Application.get_env(:optimal_engine, :openbao_renew_floor_ms) do
+      ms when is_integer(ms) and ms > 0 -> ms
+      _ -> @default_floor_ms
+    end
+  end
+
+  # Below the floor nothing is scheduled: the token is left as it is.
   defp schedule(%{timer: timer} = state, ms, message \\ :check) do
     if timer, do: Process.cancel_timer(timer)
-    %{state | timer: Process.send_after(self(), message, ms)}
+
+    if ms < floor_ms(),
+      do: %{state | timer: nil},
+      else: %{state | timer: Process.send_after(self(), message, ms)}
   end
 end
