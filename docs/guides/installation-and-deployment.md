@@ -215,7 +215,7 @@ A request to a protected route without a key must return 401.
 ## Mode 2: Self-Hosted With Providers
 
 Start from mode 1 and add providers on your own infrastructure.
-Only two providers are usable today.
+The table says what each provider does today; only Fractal has no adapter.
 
 | Provider | Status | What it holds |
 | --- | --- | --- |
@@ -467,7 +467,7 @@ A production deployment starts as one Engine instance (mode 1) and separates fiv
 
 | Concern | Recommended role |
 | --- | --- |
-| Canonical runtime rows | The instance's SQLite file with verified backups. A Postgres build is an optional, partial provider for scale (mode 2). |
+| Canonical runtime rows | The instance's SQLite file with verified backups. A Postgres build is an optional provider for scale (mode 2). |
 | Raw artifacts | The instance's files, or S3-compatible object storage (wired) with retention, backup, and access policy. |
 | Indexes and caches | Rebuildable FTS/vector/chunk/parse/cache projections. |
 | Worker runtime | Supervised Elixir workers plus adapter/model/tool worker processes. |

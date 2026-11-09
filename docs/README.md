@@ -170,7 +170,7 @@ Use these terms precisely:
 
 | Term | Meaning | Examples |
 | --- | --- | --- |
-| Storage substrate | Where bytes or records physically live. | SQLite, raw artifact storage, FTS/vector indexes, cache directories, graph backends, and optional providers (S3, a partial Postgres build). |
+| Storage substrate | Where bytes or records physically live. | SQLite, raw artifact storage, FTS/vector indexes, cache directories, graph backends, and optional providers (S3, a Postgres build). |
 | Domain layer | The owner of lifecycle and meaning. | Topology, Memory Core, Retrieval, Workflow, Governance. |
 | Projection surface | A way humans, agents, apps, or tools see/control state. | Markdown, wiki, HTML, API, MCP, desktop app, reports, agent context packages. |
 

@@ -136,7 +136,7 @@ audit_event_links
 
 ```text
 SQLite is the canonical store of the default build, in one Engine instance that holds every store inside it.
-Postgres is an optional provider for scale (a partial `OPTIMAL_STORE=postgres` store).
+Postgres is an optional provider for scale (an `OPTIMAL_STORE=postgres` store that holds the same tables).
 Raw artifact storage preserves evidence.
 Indexes/caches/projections are rebuildable.
 Markdown/wiki/app/API views are surfaces, not separate truth.

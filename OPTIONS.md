@@ -262,7 +262,7 @@ They should not connect to the owner's private engine unless explicitly configur
 | --- | --- | --- |
 | Local source checkout | Developer or local agent work | `bin/optimal dev` runs the engine on `localhost:4200`. |
 | Bundled desktop engine | BusinessOS desktop user | App launches a local release with fresh local runtime data. |
-| Production service | Hosted org or workspace | Service uses production secrets and scoped keys. Postgres is an optional, partial provider chosen when the Engine boots (`OPTIMAL_STORE=postgres`), not switched on by configuring a URL alone. |
+| Production service | Hosted org or workspace | Service uses production secrets and scoped keys. Postgres is an optional provider chosen when the Engine boots (`OPTIMAL_STORE=postgres`), not switched on by configuring a URL alone. |
 | Test mode | CI and unit tests | Use isolated temp stores and avoid private `.optimal/` data. |
 
 ## Compatibility And API Grants

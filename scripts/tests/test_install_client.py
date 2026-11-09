@@ -1497,5 +1497,16 @@ class RegisterTests(InstallClientTestCase):
         self.assertFalse((self.home / '.codex').exists())
 
 
+
+class ClientInstallDocTest(unittest.TestCase):
+    """CLIENT-INSTALL.md names the variables the installer gives Codex's MCP server."""
+
+    def test_the_documented_env_vars_are_the_installers(self):
+        script = INSTALLER.read_text()
+        listed = re.search(r"^MCP_ENV_VARS='(.*)'$", script, re.M).group(1)
+        doc = (ROOT / 'deploy' / 'miosa-template' / 'CLIENT-INSTALL.md').read_text()
+        self.assertIn(f'env_vars = [{listed}]', doc)
+        self.assertEqual(ENV_VARS, f'env_vars = [{listed}]')
+
 if __name__ == '__main__':
     unittest.main()
