@@ -106,7 +106,7 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 
 The mirror is not what retrieval reads: the graph that search and assembly read is the `graph_edges` table in SQLite.
 
-Providers with an adapter that no Engine feature uses yet: `OPTIMAL_VALKEY_URL`, `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`, and `OPTIMAL_ANALYTICS_PATH` (DuckDB and Parquet).
+Providers with an adapter that no Engine feature uses yet: `OPTIMAL_VALKEY_URL` and `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`.
 OpenBao (above) is in the data path: see [Storage providers](docs/guides/storage-providers.md#openbao).
 Setting them lets `GET /api/storage/providers?probe=true` check each service and the provider proofs prove it with a round trip; the Engine's data stays where it is.
 NATS JetStream is reached the same way, and runs the flows it is given:
@@ -120,6 +120,16 @@ NATS JetStream is reached the same way, and runs the flows it is given:
 
 `OPTIMAL_FRACTAL_ENDPOINT` with `OPTIMAL_FRACTAL_CREDENTIAL_REF` is declared with no adapter, and the inventory reports it `adapter_missing` whatever is set.
 See [Storage providers](docs/guides/storage-providers.md) and [Installation and deployment](docs/guides/installation-and-deployment.md).
+
+### Analytics (DuckDB and Parquet)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPTIMAL_ANALYTICS_PATH` | none (analytics off) | A writable directory; the daily `analytics_export` analysis writes each workspace's Parquet files under it, and `GET /api/analytics/query` reads them. Needs the `duckdb` executable on the PATH (the Engine image ships it). |
+| `OPTIMAL_ANALYTICS_MAX_PROCESSES` | `1` | How many `duckdb` processes analytics runs at once. Each may use 512 MB, so `1` suits a 1 GiB guest; raise it on a larger machine. A query past the cap is `503 {"error": "analytics_busy"}` with `Retry-After: 5`; an export waits for a free process. |
+| `OPTIMAL_ANALYSES_INTERVAL_MS` | `300000` | How often the analyses worker schedules and drains analyses, the export among them; `0` turns it off. |
+
+See [DuckDB And Parquet Analytics](docs/guides/storage-providers.md#duckdb-and-parquet-analytics).
 
 ## Text Embeddings
 

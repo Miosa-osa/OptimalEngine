@@ -1174,7 +1174,15 @@ defmodule OptimalEngine.DataSteward do
   # target workspace builds its own entries as its text is embedded.
   defp purge_vacated_cache({:ok, result}, source_workspace_id, reason) do
     purged = Cache.summary(Cache.purge_workspace(source_workspace_id, reason))
-    {:ok, Map.put(result, :cache_purged, purged)}
+
+    # So are its analytics files; the target's are written by its next export.
+    analytics =
+      case OptimalEngine.Analytics.purge_workspace(source_workspace_id) do
+        :ok -> :ok
+        {:error, cause} -> inspect(cause)
+      end
+
+    {:ok, result |> Map.put(:cache_purged, purged) |> Map.put(:analytics_purged, analytics)}
   end
 
   defp purge_vacated_cache(other, _source_workspace_id, _reason), do: other

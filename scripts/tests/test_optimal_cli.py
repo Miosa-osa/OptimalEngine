@@ -184,6 +184,7 @@ class VersionAndAliasTests(CliTestCase):
                         'close', 'memory', 'claims', 'review', 'routing', 'authority', 'status',
                         'version', 'start', 'stop', 'restart', 'log', 'index', 'graph',
                         'reality-check', 'backup', 'init', 'size', 'viability', 'chain', 'check', 'analyses', 'jobs',
+                        'analytics',
                         'session', 'sessions', 'policy', 'org-section', 'whoami']:
             self.assertIn(command, text)
 
@@ -407,6 +408,17 @@ class RouteMappingTests(CliTestCase):
         self.check(['analyses', 'run', 'storage_usage', ws], 'POST', '/api/analyses/run',
                    body={'workspace': ws, 'kind': 'storage_usage'})
         self.check(['jobs', ws, '--state', 'dead'], 'GET', '/api/jobs', {'workspace': ws, 'status': 'dead'})
+        self.check(['analytics', ws], 'GET', '/api/analytics', {'workspace': ws})
+        self.check(['analytics', 'query', 'metrics', ws, '--bucket', 'hour', '--from', '2026-11-01',
+                    '--to', '2026-11-08', '-n', '50', '--metric', 'search.latency'],
+                   'GET', '/api/analytics/query',
+                   {'workspace': ws, 'dataset': 'metrics', 'bucket': 'hour', 'from': '2026-11-01',
+                    'to': '2026-11-08', 'limit': '50', 'metric': 'search.latency'})
+        self.check(['analytics', 'query', 'ledger', ws, '--origin', 'peer', '--table', 'contexts'],
+                   'GET', '/api/analytics/query',
+                   {'workspace': ws, 'dataset': 'ledger', 'origin': 'peer', 'table': 'contexts'})
+        self.check(['analytics', 'export', ws], 'POST', '/api/analyses/run',
+                   body={'workspace': ws, 'kind': 'analytics_export'})
         self.check(['viability', ws], 'GET', '/api/viability', {'workspace': ws})
         self.check(['viability', '--workspaces', '*'], 'GET', '/api/viability', {'workspaces': '*'})
         self.check(['viability', 'history', ws, '--days', '14'], 'GET', '/api/viability/history',
@@ -653,7 +665,8 @@ class ConfigTests(CliTestCase):
         for args in [['search'], ['bogus'], ['search', 'x', '--nope'], ['-n', 'ten', 'search', 'x'],
                      ['loops', 'close', '../x'], ['authority', 'decide'], ['init'], ['chain'],
                      ['chain', '../x'], ['viability', 'history', '--days', 'ten'], ['analyses', 'run'],
-                     ['analyses', 'run', '../x']]:
+                     ['analyses', 'run', '../x'], ['analytics', 'query'], ['analytics', 'query', 'contexts'],
+                     ['analytics', 'query', 'metrics', '--bucket', 'second']]:
             with self.subTest(args=args):
                 self.assertEqual(self.run_cli(*args).returncode, 64)
 

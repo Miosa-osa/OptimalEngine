@@ -615,11 +615,72 @@ Providers are what a deployment grows onto, and this table is the status of each
 | `nats_jetstream` | Wired | The probe and the proof, a supervised JetStream client that reconnects with backoff, and with `OPTIMAL_NATS_FLOWS` the change ledger published as a stream per workspace subject, background jobs dispatched through a work queue, and connector intake queued | Replication between Engines does not use it (see "Replication over NATS: not implemented") |
 | `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
-| `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`) and the proof (a Parquet file written and read back) | No Engine projection is written to it yet |
+| `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`), the proof (a Parquet file written and read back), the daily Parquet export of each workspace's metrics, sync runs, ledger and usage, and the read-only `GET /api/analytics/query` over them (see [DuckDB And Parquet Analytics](#duckdb-and-parquet-analytics)) | Arbitrary SQL; Engine-wide metrics; any dataset beyond the four |
 | `openbao` | Wired, in the data path | Secret references for the backup, authority, connector and S3 keys; connector credentials kept in KV instead of the database (opt in, not in Engine backups); backup data keys wrapped by transit beside `OPTIMAL_BACKUP_KEY`; the probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` ([OpenBao](#openbao)) | PKI; the OpenBao token itself still comes from the environment; peer sync credentials are still sealed with `CONNECTOR_KEY` |
 | `fractal` | Declared, no adapter yet | | Everything |
 
 `GET /api/storage/providers` reports `adapter_implemented` for each entry and `adapter_missing` as the lifecycle state of the declared ones, whatever is configured.
+
+## DuckDB And Parquet Analytics
+
+The `duckdb` provider holds analytical projections: Parquet files rebuilt from the canonical store, never a source of truth.
+It needs the `duckdb` command line client on the PATH and `OPTIMAL_ANALYTICS_PATH` naming a writable directory.
+The Engine image (`deploy/Dockerfile.engine`) ships DuckDB 1.3.2, pinned with the SHA-256 of each architecture's release asset, the release the MIOSA guest image ships; a managed MIOSA Engine sets `OPTIMAL_ANALYTICS_PATH=/data/analytics`.
+Without the variable analytics stay off, and nothing is written.
+
+### The export
+
+The `analytics_export` analysis (`OptimalEngine.Analytics.Export`) writes one directory per workspace, `<OPTIMAL_ANALYTICS_PATH>/workspaces/<workspace id>`, the `:` of a `tenant:slug` id written as `~`.
+
+| File | Rows | Read from |
+| --- | --- | --- |
+| `metrics.parquet` | one per sample: `recorded_at`, `metric_name`, `metric_kind`, `value`, `labels` | `metric_samples` of the workspace |
+| `sync_runs.parquet` | one per peer cycle: `peer_id`, `started_at`, `finished_at`, `status`, `pulled`, `pushed`, `conflicts`, `gated`, `duration_ms` | `sync_runs` |
+| `ledger.parquet` | changes per hour: `hour`, `entity_type`, `operation`, `origin` (`local` or `peer`), `changes` | `sync_mutations` |
+| `usage.parquet` | events per hour: `hour`, `kind`, `events`, `latency_ms_sum`, `latency_ms_count`, `latency_ms_max` | `events` |
+| `manifest.json` | when the files were written and each file's row count | |
+
+No payload, entity id, run message, principal or target leaves the store: the ledger and usage files hold counts.
+Every export starts again from the store, a page at a time, into a staging directory beside the files; the files are moved into place only when every dataset converted, so a failed export leaves the previous files as they were.
+Deleting the directory loses nothing; the next export writes it again.
+Archiving a workspace removes its directory, and so does a data steward rename for the id the rows moved away from.
+
+The export runs once a day for every active workspace while `OPTIMAL_ANALYTICS_PATH` is set, through the analyses worker (`OPTIMAL_ANALYSES_INTERVAL_MS`, see [Operating layer](operating-layer.md)), and on demand:
+
+```bash
+curl -s -X POST "$URL/api/analyses/run" -H "authorization: Bearer $ADMIN_KEY" \
+  -H 'content-type: application/json' -d '{"workspace": "acme:ops", "kind": "analytics_export"}'
+optimal analytics export acme:ops
+```
+
+### The query
+
+`GET /api/analytics/query` answers one fixed question per dataset; a caller sends parameters, never SQL.
+It needs the `read` grant and the workspace in the key's scope, like every workspace route.
+
+| Dataset | Answer per bucket | Filters |
+| --- | --- | --- |
+| `metrics` | `metric_name`, `samples`, `avg`, `min`, `max` | `metric` |
+| `sync_runs` | `peer_id`, `runs`, `ok`, `error`, `paused`, `pulled`, `pushed`, `conflicts`, `gated`, `avg_duration_ms` | `peer` |
+| `ledger` | `entity_type`, `operation`, `origin`, `changes` | `table`, `origin` (`local` or `peer`) |
+| `usage` | `kind`, `events`, `avg_latency_ms`, `max_latency_ms` | `kind` |
+
+Every question takes `bucket` (`hour`, `day`, `week` or `month`; default `day`), `from` (inclusive) and `to` (exclusive) as ISO-8601 dates or times, and `limit` (default 200, at most 1000).
+Rows come newest bucket first, each `bucket` an ISO-8601 UTC time.
+A parameter that is not valid is `400 {"error": "invalid_parameter", "parameter", "expected"}`, and a filter of another dataset is refused, not ignored.
+A workspace no export has written is `404 {"error": "not_exported"}`; without `OPTIMAL_ANALYTICS_PATH` the route is `503 {"error": "analytics_not_configured"}`, and without the executable `503 {"error": "analytics_unavailable"}`.
+A `workspace` given as a list or a map (`workspace[]=`) is a 400.
+`GET /api/analytics` reports whether analytics is configured, when the workspace's files were exported, each file's rows and the questions; it never names the server's path.
+
+```bash
+curl -s "$URL/api/analytics/query?workspace=acme:ops&dataset=usage&bucket=day&from=2026-11-01" \
+  -H "authorization: Bearer $KEY" | jq '.rows[:3]'
+optimal analytics query usage acme:ops --bucket day --from 2026-11-01
+```
+
+DuckDB reads any path it is given, so every statement the Engine runs is locked first: the workspace's own directory (the staging directory, for an export) is the only allowed directory, external access is off, installing and autoloading extensions is off, memory is 512 MB and threads 2, what does not fit in memory spills to a fresh directory inside the allowed one (removed after the statement), and the configuration is locked, so the statement cannot turn any of it back on.
+At most `OPTIMAL_ANALYTICS_MAX_PROCESSES` `duckdb` processes run at once (default 1, for a 1 GiB guest): a query past the cap is `503 {"error": "analytics_busy"}` with `Retry-After: 5`, and an export waits its turn.
+The values a caller sends are checked against a fixed shape (a dataset and a bucket from a list, a date, a name pattern) before the Engine writes them into the statement as quoted literals.
 
 ## Use Cases And Plans
 
@@ -769,7 +830,7 @@ The scripts need a standalone Valkey (or Redis 7 or later); Valkey Cluster is no
 
 ## What Is Not Implemented
 
-The Engine has no adapter for Fractal, and the provider inventory says so; NATS JetStream, Qdrant, OpenBao and DuckDB are reached and proved, but no Engine feature is served from them yet.
+The Engine has no adapter for Fractal, and the provider inventory says so; NATS JetStream, Qdrant and OpenBao are reached and proved, but no Engine feature is served from them yet; DuckDB serves the workspace analytics export and query, and nothing else.
 Valkey carries the rate limits and caches listed under [Valkey](#valkey) and nothing durable.
 PostgreSQL holds the canonical relational store with every feature of the SQLite store, and an existing Engine's data moves to it with `mix optimal.postgres.migrate` (stage 4 of [PostgreSQL Provider](postgres-provider.md)).
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.

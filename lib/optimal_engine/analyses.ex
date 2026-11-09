@@ -11,6 +11,7 @@ defmodule OptimalEngine.Analyses do
   | `file_audit` | the tenant | storage and hierarchy audits: index and graph parity, isolation, leaked fixtures, asset paths, workspace and node structure |
   | `storage_usage` | the tenant | usage against the size profile (`OptimalEngine.Sizing`) with the resize advice |
   | `retention_sweep` | the tenant | applies the tenant's retention policies; legal holds win |
+  | `analytics_export` | each workspace, while `OPTIMAL_ANALYTICS_PATH` is set | rebuilds the workspace's analytics Parquet files (`OptimalEngine.Analytics.Export`) |
 
   `schedule/1` enqueues each day's analyses once (an idempotency key per
   kind, workspace, and day); the worker (`Analyses.Worker`) drains them.
@@ -29,13 +30,16 @@ defmodule OptimalEngine.Analyses do
     Store
   }
 
+  alias OptimalEngine.Analytics.Export, as: AnalyticsExport
   alias OptimalEngine.Connectors.{PullScheduler, Runner}
   alias OptimalEngine.Embed.Backfill
   alias OptimalEngine.Operating.Loops
+  alias OptimalEngine.Storage.DuckDB
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Workspace
 
-  @kinds ~w(promises workspace_population meeting_archive file_audit storage_usage retention_sweep)
+  @kinds ~w(promises workspace_population meeting_archive file_audit storage_usage retention_sweep
+            analytics_export)
   @tenant_kinds ~w(file_audit storage_usage retention_sweep)
   @meeting_connectors ~w(zoom teams fathom)
 
@@ -278,6 +282,15 @@ defmodule OptimalEngine.Analyses do
      json_safe(result)}
   end
 
+  defp analyze("analytics_export", tenant_id, workspace_id, _payload) do
+    with {:ok, result} <- AnalyticsExport.run(tenant_id, workspace_id) do
+      rows = Enum.map_join(result.datasets, ", ", fn {name, %{rows: n}} -> "#{name} #{n}" end)
+
+      {:ok, "Analytics exported at #{result.exported_at}: #{rows} rows.",
+       json_safe(Map.delete(result, :path))}
+    end
+  end
+
   defp analyze(kind, _tenant_id, _workspace_id, _payload), do: {:error, {:unknown_analysis, kind}}
 
   # Placement by meaning compares document vectors, so documents still
@@ -309,7 +322,9 @@ defmodule OptimalEngine.Analyses do
 
     meetings = for id <- ids, meeting_connectors(tenant_id, id) != [], do: {id, "meeting_archive"}
 
-    Enum.map(ids, &{&1, "promises"}) ++ population ++ meetings ++ tenant_pairs
+    analytics = if DuckDB.configured?(), do: Enum.map(ids, &{&1, "analytics_export"}), else: []
+
+    Enum.map(ids, &{&1, "promises"}) ++ population ++ meetings ++ tenant_pairs ++ analytics
   end
 
   # Tenant-wide analyses run on the tenant's default workspace, or its first.

@@ -14,11 +14,18 @@ defmodule OptimalEngine.Storage.DuckDB.Adapter do
 
   @capabilities ~w(analytics columnar lakehouse)a
 
+  # The workspace analytics export and query (OptimalEngine.Analytics).
+  @serves ~w(workspace_analytics)
+
   @impl OptimalEngine.Storage.Provider
   def id, do: "duckdb"
 
   @impl OptimalEngine.Storage.Provider
   def capabilities, do: @capabilities
+
+  @doc "What the Engine keeps on DuckDB and Parquet while `OPTIMAL_ANALYTICS_PATH` is set."
+  @spec serves() :: [String.t()]
+  def serves, do: @serves
 
   @impl OptimalEngine.Storage.Provider
   def describe do

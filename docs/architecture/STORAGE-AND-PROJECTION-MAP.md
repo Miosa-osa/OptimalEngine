@@ -258,7 +258,7 @@ Each moves one concern off the single disk without changing what the Engine stor
 | Replayable events and jobs | NATS JetStream | Adapter wired; `available` when `OPTIMAL_NATS_URL` answers with JetStream. The change ledger is published to it with `OPTIMAL_NATS_FLOWS=ledger`, background jobs are dispatched through it with `jobs` (the `jobs` table stays the record), connector intake is queued on it with `intake`. |
 | Distributed cache and locks | Valkey | In the data path when `OPTIMAL_VALKEY_URL` is set: shared rate limits and caches, ETS while it is down. |
 | High-scale vectors | Qdrant | Adapter wired; `available` when `OPTIMAL_QDRANT_URL` lists collections. |
-| Analytics | DuckDB and Parquet | Adapter wired; `available` when the executable answers against a writable `OPTIMAL_ANALYTICS_PATH`. |
+| Analytics | DuckDB and Parquet | Wired; `available` when the executable answers against a writable `OPTIMAL_ANALYTICS_PATH`. Each workspace's metrics, sync runs, ledger and usage are exported daily as Parquet and read by `GET /api/analytics/query`. |
 | Secrets | OpenBao | Adapter wired; `available` when the server is unsealed and accepts the token. Serves secret references, connector credentials (opt in) and backup transit keys when configured. |
 | Enterprise digital twin | Fractal | Declared, no adapter yet. |
 
