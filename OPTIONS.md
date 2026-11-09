@@ -89,6 +89,7 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 | `OPTIMAL_ENGINE_WORKSPACE` | none | Workspace id served when the scope is `workspace`; required then. |
 | `OPTIMAL_RELEASE_CHANNEL` | unset | `dev`, `stable`, `beta`, or `pinned`, reported by `GET /api/version`. Any other value fails startup. |
 | `OPTIMAL_BOOTSTRAP_KEY` | none | `oe_<24 hex>_<secret of 32+ chars>`; registers the first API key at boot. |
+| `OPTIMAL_METRICS_TOKEN` | none | A bearer token that opens `GET /api/metrics/prometheus` and no other route, for a scraper that holds no API key; may be an `openbao:<path>#<field>` reference. Without it the route needs the Engine operator's key (an admin key of the default tenant whose workspace scope is `*`); on an Engine that requires no key, a request without one is served. |
 | `OPTIMAL_BOOTSTRAP_TENANT`, `OPTIMAL_BOOTSTRAP_SCOPES`, `OPTIMAL_BOOTSTRAP_WORKSPACES` | `default`, `read,write`, `*` | Tenant, operation scopes, and workspace allowlist of the bootstrap key. |
 | `OPTIMAL_KNOWLEDGE_BACKEND` | `ets` | Mirror backend: `ets`, `rocksdb`, or `mnesia` (`ram_copies` only). |
 | `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` | `.optimal/knowledge-rocksdb` | Where RocksDB keeps the mirror, relative to the working directory; set an absolute path on the data volume. |

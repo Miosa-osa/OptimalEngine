@@ -51,7 +51,8 @@ defmodule OptimalEngine.Secrets do
   @engine_secrets ~w(OPTIMAL_BACKUP_KEY OPTIMAL_AUTHORITY_KEY CONNECTOR_KEY
                      OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY
                      OPTIMAL_QDRANT_API_KEY
-                     OPTIMAL_VALKEY_PASSWORD OPTIMAL_NATS_TOKEN OPTIMAL_NATS_PASSWORD)
+                     OPTIMAL_VALKEY_PASSWORD OPTIMAL_NATS_TOKEN OPTIMAL_NATS_PASSWORD
+                     OPTIMAL_METRICS_TOKEN)
 
   @type reason ::
           :openbao_not_configured

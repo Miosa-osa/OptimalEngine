@@ -47,6 +47,7 @@ A key minted with `rate_limit_per_minute` (`POST /api/auth/keys`) gets that allo
 Requests without a key share their IP address's bucket, and so does a request with an invalid, revoked or expired key, which can never spend a real key's bucket.
 Over the limit the answer is 429 `{"error": "rate_limited", "retry_after_ms": N}` with a `Retry-After` header.
 `/api/health`, `/api/status` and `/api/metrics/prometheus` are never limited.
+`/api/metrics/prometheus` holds every tenant's counters, so it answers the Engine operator's key (an admin key of the default tenant whose workspace scope is `*`) or `OPTIMAL_METRICS_TOKEN`, and on an Engine that requires no key, a request without one.
 
 A bucket lives on the node that answered the request unless `OPTIMAL_VALKEY_URL` is set.
 Behind a load balancer with several Engine processes and no Valkey, each process keeps its own buckets, so a key can spend its allowance once per process.

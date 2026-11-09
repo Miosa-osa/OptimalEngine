@@ -541,6 +541,7 @@ Any of these variables may hold an OpenBao reference instead of the value itself
 OPTIMAL_BACKUP_KEY             OPTIMAL_AUTHORITY_KEY          CONNECTOR_KEY
 OPTIMAL_S3_ACCESS_KEY_ID       OPTIMAL_S3_SECRET_ACCESS_KEY   OPTIMAL_QDRANT_API_KEY
 OPTIMAL_VALKEY_PASSWORD        OPTIMAL_NATS_TOKEN             OPTIMAL_NATS_PASSWORD
+OPTIMAL_METRICS_TOKEN
 ```
 
 `OPTIMAL_VALKEY_PASSWORD` is sent with `AUTH` instead of a password in `OPTIMAL_VALKEY_URL`, and `OPTIMAL_NATS_TOKEN` or `OPTIMAL_NATS_PASSWORD` (with the URL's user) is sent in `CONNECT` instead of the URL's credential, so the URL can name the server alone.

@@ -35,6 +35,8 @@ defmodule OptimalEngine.API.AuthPlug do
 
   import Plug.Conn
 
+  require Logger
+
   alias OptimalEngine.API.RateLimitPlug
   alias OptimalEngine.Auth.ApiKey
 
@@ -96,7 +98,43 @@ defmodule OptimalEngine.API.AuthPlug do
   # Token verification
   # ---------------------------------------------------------------------------
 
-  defp handle_token(conn, token) do
+  # The metrics token (OPTIMAL_METRICS_TOKEN, read through OptimalEngine.Secrets)
+  # opens the Prometheus route and nothing else; it is not an API key and acts
+  # for no tenant's principal.
+  @metrics_path ["api", "metrics", "prometheus"]
+
+  defp handle_token(%{path_info: @metrics_path} = conn, token) do
+    if metrics_token?(token) do
+      conn
+      |> assign(:current_tenant, OptimalEngine.Tenancy.Tenant.default_id())
+      |> assign(:current_principal, :metrics_scraper)
+      |> assign(:current_api_key, nil)
+      |> assign(:metrics_token, true)
+    else
+      verify_key(conn, token)
+    end
+  end
+
+  defp handle_token(conn, token), do: verify_key(conn, token)
+
+  defp metrics_token?(token) do
+    case OptimalEngine.Secrets.fetch("OPTIMAL_METRICS_TOKEN") do
+      {:ok, expected} when expected != "" ->
+        Plug.Crypto.secure_compare(token, expected)
+
+      {:error, :not_set} ->
+        false
+
+      {:error, reason} ->
+        Logger.warning(
+          "OPTIMAL_METRICS_TOKEN could not be read: #{OptimalEngine.Secrets.describe(reason)}"
+        )
+
+        false
+    end
+  end
+
+  defp verify_key(conn, token) do
     case ApiKey.verify(token) do
       {:ok, key} ->
         ApiKey.record_usage(key.id)

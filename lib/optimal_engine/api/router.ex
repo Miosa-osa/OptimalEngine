@@ -1353,16 +1353,28 @@ defmodule OptimalEngine.API.Router do
     })
   end
 
-  # Prometheus text exposition format — not rate-limited, no auth required.
+  # Prometheus text exposition format, not rate-limited. The counters are the
+  # whole Engine's, every tenant's, so only the Engine operator reads them (an
+  # admin key of the default tenant whose workspace scope is "*"), or a
+  # scraper holding OPTIMAL_METRICS_TOKEN (OptimalEngine.API.AuthPlug). On an
+  # Engine that requires no key, a request without one is the local operator.
   # MUST appear before the JSON /api/metrics route (first-match routing).
   get "/api/metrics/prometheus" do
     alias OptimalEngine.Telemetry.Prometheus
 
-    body = Prometheus.render()
-
-    conn
-    |> put_resp_content_type("text/plain; version=0.0.4; charset=utf-8")
-    |> send_resp(200, body)
+    if conn.assigns[:metrics_token] == true or engine_operator?(conn) do
+      conn
+      |> put_resp_content_type("text/plain; version=0.0.4; charset=utf-8")
+      |> send_resp(200, Prometheus.render())
+    else
+      conn
+      |> put_status(403)
+      |> json(%{
+        error: "operator_only",
+        message:
+          "the metrics cover every tenant; they need an admin key of the default tenant whose workspace scope is *, or OPTIMAL_METRICS_TOKEN"
+      })
+    end
   end
 
   # Runtime metrics snapshot (Phase 10 Telemetry module).

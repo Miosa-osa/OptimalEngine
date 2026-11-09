@@ -197,7 +197,7 @@ Routes: 313
 | GET | `/api/memory/reconstruction/quality` | Router | read | workspace |
 | POST | `/api/memory/remember` | Router | write | workspace |
 | GET | `/api/metrics` | Router | read | tenant |
-| GET | `/api/metrics/prometheus` | Router | read | tenant |
+| GET | `/api/metrics/prometheus` | Router | admin | tenant |
 | GET | `/api/node/:node_id` | Router | read | workspace |
 | POST | `/api/nodes` | Router | topology:write | workspace |
 | GET | `/api/operating-projection` | Router | read | workspace |
