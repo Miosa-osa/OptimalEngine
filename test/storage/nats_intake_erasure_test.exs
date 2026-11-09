@@ -588,6 +588,33 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
       assert "sp-held-#{ctx.n}" in ids
     end
 
+    test "deleting a connector again sweeps what the first delete left", ctx do
+      connector = ctx.connectors[ctx.other]
+      assert :ok = Rows.delete(ctx.tenant, connector)
+      package!(ctx, ctx.other, "sp-late-#{ctx.n}", "connector:" <> connector)
+
+      assert {:error, :not_found} = Rows.delete(ctx.tenant, connector)
+      ids = for [id, _] <- packages(ctx.other), do: id
+      refute "sp-late-#{ctx.n}" in ids
+    end
+
+    # The backstop (delete_unheld_connector_packages/1) finds a connector's
+    # packages by `source_system` "connector:<id>", which Routing writes. Any
+    # new code that builds the string is reviewed here: the store matches on
+    # it, and the intake queue names its removal request's target with it.
+    test "only Routing stamps a package with connector:<id>" do
+      stamping =
+        for path <- Path.wildcard("lib/**/*.ex"),
+            File.read!(path) =~ ~r/"connector:"\s*<>/,
+            do: path
+
+      assert Enum.sort(stamping) == [
+               "lib/optimal_engine/connectors/routing.ex",
+               "lib/optimal_engine/memory_core/store.ex",
+               "lib/optimal_engine/storage/nats/intake_queue.ex"
+             ]
+    end
+
     test "deleting a connector removes its packages no context holds", ctx do
       connector = ctx.connectors[ctx.other]
       package!(ctx, ctx.other, "sp-conn-orphan-#{ctx.n}", "connector:" <> connector)
@@ -646,15 +673,56 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
       assert done?(bad) and done?(junk)
     end
 
-    test "a request of another namespace older than a week expires with a warning", ctx do
-      old =
-        request!(ctx, Jason.encode!(%{"namespace" => "gone#{ctx.n}", "tenant_id" => ctx.tenant}))
+    # Another Engine's namespace, down for 8 days: its request stays pending
+    # for it, and is purged when it is back. Only a namespace recorded as
+    # retired has its requests expired.
+    test "a request of an Engine down for 8 days is still purged when it is back", ctx do
+      fill(ctx)
+      down = :"nats_ie_down5_#{ctx.n}"
+      start_supervised!({Connection, name: down, url: nil}, id: down)
 
-      fresh =
-        request!(ctx, Jason.encode!(%{"namespace" => "live#{ctx.n}", "tenant_id" => ctx.tenant}))
+      assert {:ok, %{pending: true}} =
+               IntakeQueue.forget_workspace(ctx.tenant, ctx.ws, "archived",
+                 connection: down,
+                 namespace: "optimal"
+               )
+
+      {:ok, [[id]]} =
+        Store.raw_query(
+          "SELECT max(id) FROM events WHERE kind = 'nats_intake_purge_requested' AND tenant_id = ?1",
+          [ctx.tenant]
+        )
 
       {:ok, _} =
-        Store.raw_query("UPDATE events SET ts = '2020-01-01 00:00:00' WHERE id = ?1", [old])
+        Store.raw_query("UPDATE events SET ts = datetime('now', '-8 days') WHERE id = ?1", [id])
+
+      # Another Engine's pass meanwhile (its own namespace) leaves it alone.
+      assert {:ok, _} = IntakeQueue.process_requests(ctx.conn, "elsewhere#{ctx.n}")
+      refute done?(id)
+
+      # It is reported as waiting.
+      assert {:warn, {:nats_intake_removals_pending, waiting}} = IntakeQueue.pending_check()
+      assert waiting >= 1
+
+      # Back up: purged, not set aside.
+      assert {:ok, done} = IntakeQueue.process_requests(ctx.conn, "optimal")
+      assert Map.has_key?(done, id)
+      assert held(ctx, "gone") == []
+    end
+
+    test "a request of a namespace recorded as retired expires with a warning", ctx do
+      ns = "retired#{ctx.n}"
+      old = request!(ctx, Jason.encode!(%{"namespace" => ns, "tenant_id" => ctx.tenant}))
+
+      kept =
+        request!(ctx, Jason.encode!(%{"namespace" => "paused#{ctx.n}", "tenant_id" => ctx.tenant}))
+
+      for id <- [old, kept] do
+        {:ok, _} =
+          Store.raw_query("UPDATE events SET ts = datetime('now', '-30 days') WHERE id = ?1", [id])
+      end
+
+      assert :ok = IntakeQueue.retire_namespace(ns)
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
@@ -662,8 +730,8 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
         end)
 
       assert done?(old)
-      refute done?(fresh)
-      assert log =~ "expired"
+      refute done?(kept)
+      assert log =~ "retired"
     end
 
     @tag :sqlite_store

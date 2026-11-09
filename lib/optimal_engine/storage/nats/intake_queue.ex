@@ -258,8 +258,11 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
       request
     else
       _ ->
-        Logger.warning("[NATS] intake removal #{id} is malformed; set aside")
-        _ = set_aside(id, row_tenant, "malformed")
+        case set_aside(id, row_tenant, "malformed") do
+          :ok -> Logger.warning("[NATS] intake removal #{id} is malformed; set aside")
+          _ -> skipped(1)
+        end
+
         :malformed
     end
   end
@@ -267,10 +270,63 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   defp optional_string?(value), do: is_nil(value) or is_binary(value)
   defp strings?(values), do: is_list(values) and Enum.all?(values, &is_binary/1)
 
-  # Requests of another namespace that no Engine took within a week: that
-  # namespace is no longer configured anywhere this store serves. They are set
-  # aside, so the pending ones do not grow without end.
-  @expire_after_days 7
+  # A namespace an operator recorded as retired (`retire_namespace/1`): no
+  # Engine will take its requests, so they are set aside ("retired"). A
+  # request of any other namespace stays pending, however old: its Engine may
+  # be down or paused, and an erasure that did not happen never reads as done.
+  @retired_kind "nats_namespace_retired"
+  @waiting_after_days 7
+
+  @doc """
+  Records that no Engine serves `namespace` any more: its pending intake
+  removals are set aside on the next pass of any Engine, with a warning.
+  Their queued Signals and dead letters are not purged by this: only an
+  Engine of that namespace can purge them.
+  """
+  @spec retire_namespace(String.t()) :: :ok | {:error, term()}
+  def retire_namespace(namespace) when is_binary(namespace) and namespace != "" do
+    case Store.raw_query(
+           "INSERT INTO events (tenant_id, principal, kind, target_uri, metadata) VALUES (?1, 'system:nats', ?2, ?3, ?4)",
+           [
+             Tenant.default_id(),
+             @retired_kind,
+             "nats-namespace:" <> namespace,
+             Jason.encode!(%{namespace: namespace})
+           ]
+         ) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  Readiness: `{:warn, {:nats_intake_removals_pending, count}}` while intake
+  removals of any namespace not retired have waited more than
+  #{@waiting_after_days} days (an Engine down, or NATS unreachable), else `:ok`.
+  """
+  @spec pending_check() :: :ok | {:warn, {:nats_intake_removals_pending, pos_integer()}}
+  def pending_check do
+    case Store.raw_query(
+           """
+           SELECT count(*) FROM events r
+           WHERE r.kind = ?1
+             AND r.ts < datetime('now', ?2)
+             AND NOT EXISTS (
+               SELECT 1 FROM events d
+               WHERE d.kind = 'nats_purge' AND d.target_uri = 'nats-intake-purge-request:' || CAST(r.id AS TEXT)
+             )
+           """,
+           [@request_kind, "-#{@waiting_after_days} days"]
+         ) do
+      {:ok, [[0]]} -> :ok
+      {:ok, [[count]]} when is_integer(count) -> {:warn, {:nats_intake_removals_pending, count}}
+      _ -> :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
 
   defp expire_foreign(namespace) do
     case Store.raw_query(
@@ -278,7 +334,10 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
            SELECT r.id, r.tenant_id FROM events r
            WHERE r.kind = ?1
              AND COALESCE((CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.namespace') END), '') != ?2
-             AND r.ts < datetime('now', ?3)
+             AND (CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.namespace') END) IN (
+               SELECT (CASE WHEN json_valid(t.metadata) THEN json_extract(t.metadata, '$.namespace') END)
+                 FROM events t WHERE t.kind = ?3
+             )
              AND NOT EXISTS (
                SELECT 1 FROM events d
                WHERE d.kind = 'nats_purge' AND d.target_uri = 'nats-intake-purge-request:' || CAST(r.id AS TEXT)
@@ -286,22 +345,33 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
            ORDER BY r.id
            LIMIT 500
            """,
-           [@request_kind, namespace, "-#{@expire_after_days} days"]
+           [@request_kind, namespace, @retired_kind]
          ) do
       {:ok, []} ->
         :ok
 
       {:ok, rows} ->
-        Enum.each(rows, fn [id, tenant] -> set_aside(id, tenant, "expired") end)
+        recorded = Enum.count(rows, fn [id, tenant] -> set_aside(id, tenant, "retired") == :ok end)
 
         Logger.warning(
-          "[NATS] #{length(rows)} intake removal(s) of a namespace no Engine took in #{@expire_after_days} days expired"
+          "[NATS] #{recorded} intake removal(s) of a retired namespace set aside; their Signals were not purged"
         )
+
+        skipped(length(rows) - recorded)
 
       {:error, _reason} ->
         :ok
     end
   end
+
+  # A request that could not be set aside (its record refused) is read again
+  # on the next pass; the count says how many, so a store that keeps refusing
+  # is seen rather than silently re-read.
+  defp skipped(0), do: :ok
+
+  defp skipped(count),
+    do:
+      Logger.warning("[NATS] #{count} intake removal(s) could not be set aside; retried next pass")
 
   defp set_aside(id, tenant, why) do
     Store.raw_query(
@@ -312,6 +382,10 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
         Jason.encode!(%{flow: "intake", set_aside: why})
       ]
     )
+    |> case do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
   rescue
     _ -> {:error, :not_recorded}
   end

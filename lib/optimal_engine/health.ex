@@ -78,7 +78,7 @@ defmodule OptimalEngine.Health do
     embedder = Keyword.get(opts, :embedder, :probe)
 
     checks =
-      [:store, :migrations, :credential_key, :network_auth, :secrets, :embedder]
+      [:store, :migrations, :credential_key, :network_auth, :secrets, :intake_removals, :embedder]
       |> Enum.reject(&(&1 in skip))
       |> Enum.map(fn
         :embedder -> {:embedder, embedder_check(embedder)}
@@ -128,6 +128,11 @@ defmodule OptimalEngine.Health do
   end
 
   # ─── checks ──────────────────────────────────────────────────────────────
+
+  # Intake removals (OptimalEngine.Storage.NATS.IntakeQueue) waiting more than
+  # a week: an Engine down or NATS unreachable, so text that was to be erased
+  # is still on the stream. A count, never what they name.
+  defp run_check(:intake_removals), do: OptimalEngine.Storage.NATS.IntakeQueue.pending_check()
 
   # An API with authentication off on a network interface still serves, but
   # anyone who can reach it acts as the local operator (OptimalEngine.API.Exposure).

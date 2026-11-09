@@ -808,12 +808,27 @@ defmodule OptimalEngine.Workspace do
   end
 
   # A source package a connector's fenced ingest left in the workspace (no
-  # context or claim holds it) goes with the archive. Never fails the archive.
+  # context or claim holds it) goes with the archive. Never fails the archive;
+  # a sweep that fails is logged, and archiving again runs it again.
   defp forget_unheld_connector_packages(id) do
-    _ = OptimalEngine.MemoryCore.Store.delete_unheld_connector_packages(workspace_id: id)
+    case OptimalEngine.MemoryCore.Store.delete_unheld_connector_packages(workspace_id: id) do
+      {:ok, _count} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Workspace] #{id}: unheld connector source packages were not removed (#{inspect(reason)}); archiving it again retries"
+        )
+    end
+
     :ok
   rescue
-    _ -> :ok
+    error ->
+      Logger.warning(
+        "[Workspace] #{id}: unheld connector source packages were not removed (#{Exception.message(error)}); archiving it again retries"
+      )
+
+      :ok
   catch
     :exit, _ -> :ok
   end
