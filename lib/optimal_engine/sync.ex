@@ -3012,7 +3012,7 @@ defmodule OptimalEngine.Sync do
 
       {:error, reason} ->
         if Credential.key_error?(reason),
-          do: {:error, Credential.refusal(reason, "Sync peer key not opened")},
+          do: {:error, Credential.reason(reason)},
           else: {:error, :peer_credential_unreadable}
 
       _unreadable ->

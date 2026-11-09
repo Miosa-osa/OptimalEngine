@@ -126,6 +126,15 @@ defmodule OptimalEngine.Connectors.Credential do
     connector_reason(reason)
   end
 
+  @doc """
+  The reason a caller returns for a `t:key_error/0`, without logging: for a
+  path that runs on a timer (a peer's sync cycle), whose status already
+  carries the reason.
+  """
+  @spec reason(key_error()) ::
+          :connector_key_missing | :connector_key_invalid | :connector_key_unavailable
+  def reason(reason) when reason in @key_errors, do: connector_reason(reason)
+
   @doc "A sentence naming why the master key cannot be used. Never carries the key."
   @spec describe(key_error() | atom()) :: String.t()
   def describe(reason) when reason in [:key_missing, :connector_key_missing],

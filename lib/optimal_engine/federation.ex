@@ -269,7 +269,7 @@ defmodule OptimalEngine.Federation do
 
       {:error, reason} ->
         if Credential.key_error?(reason),
-          do: {:error, Credential.refusal(reason, "Federation peer key not opened")},
+          do: {:error, Credential.reason(reason)},
           else: {:error, :peer_credential_unreadable}
 
       _unreadable ->
