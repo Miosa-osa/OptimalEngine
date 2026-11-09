@@ -356,12 +356,18 @@ defmodule OptimalEngine.DataSteward do
   The checks and the move run in one transaction. A repair with nothing of the
   tenant's to move answers `{:error, :nothing_to_repair}` and says nothing of
   what other tenants hold under the id.
+
+  On PostgreSQL the transaction first holds every table of the store against
+  other writers (`Store.txn_lock_tables/2`): writers in every workspace stall
+  until it commits, and one that waits past its lock timeout (15 seconds) gets
+  `{:error, :busy}`. Readers do not wait.
   """
   def repair_orphan_scope(source_workspace_id, target_workspace_id, opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
     tenant = Keyword.fetch!(opts, :tenant_id)
 
     with {:ok, tables} <- workspace_tables(),
+         {:ok, held} <- held_tables(),
          {:ok, evidence_key} <- recording_key(tenant, source_workspace_id) do
       {scoped, unscoped} = Enum.split_with(tables, & &1.tenant_scoped?)
       # A mention that records no tenant is traced through its context or
@@ -371,7 +377,8 @@ defmodule OptimalEngine.DataSteward do
       traced = for name <- @traced_tables, table <- unscoped, table.name == name, do: table
 
       Store.transaction(fn txn ->
-        with :ok <- check_target(txn, tenant, target_workspace_id),
+        with :ok <- Store.txn_lock_tables(txn, held),
+             :ok <- check_target(txn, tenant, target_workspace_id),
              :ok <- check_orphan_source(txn, tenant, source_workspace_id),
              {:ok, moved_traced} <-
                move_rows(txn, traced, source_workspace_id, target_workspace_id, tenant),
@@ -453,6 +460,12 @@ defmodule OptimalEngine.DataSteward do
   bodies) is not rewritten. The answer says whether the directory moved
   (`directory_moved`) and how many paths and addresses were rewritten
   (`paths_rewritten`).
+
+  On PostgreSQL the transaction first holds every table of the store against
+  other writers (`Store.txn_lock_tables/2`), as SQLite's one writer does:
+  writers in every workspace stall until the rename commits, and one that waits
+  past its lock timeout (15 seconds) gets `{:error, :busy}`. Readers do not
+  wait.
   """
   def rename_workspace(source_workspace_id, target_workspace_id, opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
@@ -460,6 +473,7 @@ defmodule OptimalEngine.DataSteward do
 
     with :ok <- source_registered(tenant, source_workspace_id),
          {:ok, tables} <- workspace_tables(),
+         {:ok, held} <- held_tables(),
          {:ok, evidence_key} <- recording_key(tenant, source_workspace_id) do
       # A crash during an earlier rename may have left a directory under the id its rows
       # do not have; put it back before looking at the directory again.
@@ -472,8 +486,9 @@ defmodule OptimalEngine.DataSteward do
 
       Store.transaction(
         fn txn ->
-          # Updates of the workspace wait for the rename rather than starve it.
-          with :ok <- Store.txn_lock_row(txn, "workspaces", "id", source_workspace_id),
+          # Writers wait for the rename rather than starve it (held_tables/0).
+          with :ok <- Store.txn_lock_tables(txn, held),
+               :ok <- Store.txn_lock_row(txn, "workspaces", "id", source_workspace_id),
                {:ok, workspace} <- read_source(txn, tenant, source_workspace_id),
                :ok <- check_rename_target(txn, workspace, tenant, target_workspace_id),
                :ok <- target_free_of_rows(txn, tables, target_workspace_id),
@@ -1456,6 +1471,18 @@ defmodule OptimalEngine.DataSteward do
 
       {:ok, tables}
     end
+  end
+
+  # The tables a rename or a merge holds against other writers while it runs,
+  # read before its transaction begins (Store.txn_lock_tables/2): on PostgreSQL
+  # every table of the store. A rename or merge reads and rewrites a workspace
+  # in every table; at SERIALIZABLE it conflicts with almost any concurrent
+  # writer and, being the longest transaction, is the one aborted, so beside a
+  # busy Engine it never finished. Held, the tables make writers wait for it as
+  # SQLite's one writer does, and a writer that read what it changed is the one
+  # run again. On SQLite nothing is held: its store runs one writer at a time.
+  defp held_tables do
+    if Store.selected?(OptimalEngine.Store.Postgres), do: all_tables(), else: {:ok, []}
   end
 
   # Every table but SQLite's own, virtual ones included, as before; on

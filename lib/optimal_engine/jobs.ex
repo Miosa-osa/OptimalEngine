@@ -11,7 +11,13 @@ defmodule OptimalEngine.Jobs do
                               +--fail (exhausted)------> dead  (+ dead_letter_jobs row)
 
   Claiming is atomic: one Store transaction selects the next due job and
-  leases it, so two workers never run the same job. A lease that expires
+  leases it, so two workers never run the same job. On PostgreSQL the claim
+  runs at READ COMMITTED and locks the job it selects with
+  `FOR UPDATE SKIP LOCKED`: concurrent claimers each take a different job
+  instead of all reading the same one and all but one being aborted to keep
+  SERIALIZABLE. Completing, failing, deferring and extending a lease lock the
+  job's row first and also run at READ COMMITTED; they read and write that row
+  only. A lease that expires
   (the worker died) makes the job claimable again; an expired lease on a job
   with no attempts left dead-letters it instead. Completing or failing a job
   requires the lease owner, so a worker whose lease was reclaimed cannot
@@ -253,17 +259,19 @@ defmodule OptimalEngine.Jobs do
     {scope_sql, scope_params} = scope_clause(opts)
 
     Store.transaction(fn txn ->
-      with {:ok, _} <- dead_letter_expired_exhausted(txn, scope_sql, scope_params),
+      with :ok <- Store.txn_read_committed(txn),
+           {:ok, _} <- dead_letter_expired_exhausted(txn, scope_sql, scope_params),
            {:ok, rows} <-
              Store.txn_query(
                txn,
                """
                SELECT id FROM jobs
                WHERE ((status = 'available' AND run_at <= datetime('now'))
-                  OR (status = 'running' AND lease_expires_at <= datetime('now')))
+                  OR (status = 'running' AND lease_expires_at <= datetime('now')
+                      AND attempts < max_attempts))
                  #{scope_sql}
                ORDER BY priority DESC, run_at ASC, inserted_at ASC
-               LIMIT 1
+               LIMIT 1#{Store.skip_locked()}
                """,
                scope_params
              ) do
@@ -303,10 +311,12 @@ defmodule OptimalEngine.Jobs do
   @spec complete(String.t(), String.t()) :: {:ok, job()} | {:error, term()}
   def complete(job_id, lease_owner) when is_binary(job_id) and is_binary(lease_owner) do
     Store.transaction(fn txn ->
-      case Store.txn_execute(txn, @complete_sql, [job_id, lease_owner]) do
-        {:ok, 1} -> txn_get(txn, job_id)
-        {:ok, 0} -> {:error, :lease_lost}
-        {:error, reason} -> {:error, reason}
+      with :ok <- lock_job(txn, job_id) do
+        case Store.txn_execute(txn, @complete_sql, [job_id, lease_owner]) do
+          {:ok, 1} -> txn_get(txn, job_id)
+          {:ok, 0} -> {:error, :lease_lost}
+          {:error, reason} -> {:error, reason}
+        end
       end
     end)
   end
@@ -324,7 +334,8 @@ defmodule OptimalEngine.Jobs do
     message = error_message(error)
 
     Store.transaction(fn txn ->
-      with {:ok, job} <- txn_get(txn, job_id),
+      with :ok <- lock_job(txn, job_id),
+           {:ok, job} <- txn_get(txn, job_id),
            :ok <- owns_lease(job, lease_owner) do
         if job.attempts >= job.max_attempts or Keyword.get(opts, :permanent, false) do
           dead_letter(txn, job, message)
@@ -347,19 +358,21 @@ defmodule OptimalEngine.Jobs do
       when is_binary(job_id) and is_binary(lease_owner) and is_integer(seconds) and seconds > 0 do
     result =
       Store.transaction(fn txn ->
-        txn
-        |> Store.txn_execute(
-          """
-          UPDATE jobs SET lease_expires_at = datetime('now', '+' || ?3 || ' seconds'),
+        with :ok <- lock_job(txn, job_id) do
+          txn
+          |> Store.txn_execute(
+            """
+            UPDATE jobs SET lease_expires_at = datetime('now', '+' || ?3 || ' seconds'),
             updated_at = datetime('now')
-          WHERE id = ?1 AND status = 'running' AND lease_owner = ?2
-          """,
-          [job_id, lease_owner, seconds]
-        )
-        |> case do
-          {:ok, 1} -> {:ok, :extended}
-          {:ok, _} -> {:error, :lease_lost}
-          {:error, reason} -> {:error, reason}
+            WHERE id = ?1 AND status = 'running' AND lease_owner = ?2
+            """,
+            [job_id, lease_owner, seconds]
+          )
+          |> case do
+            {:ok, 1} -> {:ok, :extended}
+            {:ok, _} -> {:error, :lease_lost}
+            {:error, reason} -> {:error, reason}
+          end
         end
       end)
 
@@ -595,7 +608,8 @@ defmodule OptimalEngine.Jobs do
   def defer(job_id, lease_owner, reason, retry_in, opts \\ [])
       when is_binary(job_id) and is_binary(lease_owner) and is_integer(retry_in) do
     Store.transaction(fn txn ->
-      with {:ok, job} <- txn_get(txn, job_id),
+      with :ok <- lock_job(txn, job_id),
+           {:ok, job} <- txn_get(txn, job_id),
            :ok <- owns_lease(job, lease_owner),
            :ok <-
              one_row(
@@ -709,6 +723,14 @@ defmodule OptimalEngine.Jobs do
     kind, reason -> {:error, {kind, reason}}
   end
 
+  # The expired leases with no attempts left are dead-lettered before a job is
+  # claimed. On PostgreSQL the sweep skips a job another transaction holds (a
+  # claimer sweeping it, or its owner completing, failing or extending it):
+  # that job is swept by a later claim, once it is still expired and no longer
+  # held. A claim never takes it meanwhile: the selection takes an expired
+  # lease only with attempts left. At READ COMMITTED the sweep and the
+  # selection see different moments, so without that condition a job released
+  # between them could be run once more than `max_attempts`.
   defp dead_letter_expired_exhausted(txn, scope_sql, scope_params) do
     with {:ok, rows} <-
            Store.txn_query(
@@ -716,7 +738,7 @@ defmodule OptimalEngine.Jobs do
              """
              SELECT id FROM jobs
              WHERE status = 'running' AND lease_expires_at <= datetime('now')
-               AND attempts >= max_attempts #{scope_sql}
+               AND attempts >= max_attempts #{scope_sql}#{Store.skip_locked()}
              """,
              scope_params
            ) do
@@ -818,6 +840,14 @@ defmodule OptimalEngine.Jobs do
 
   defp owns_lease(%{status: "running", lease_owner: owner}, owner), do: :ok
   defp owns_lease(_job, _owner), do: {:error, :lease_lost}
+
+  # The transaction reads and writes this job's row only: with the row locked
+  # first, READ COMMITTED sees its latest version and nothing changes it until
+  # the commit, so no SERIALIZABLE predicate locks are needed (and none meet
+  # the claimers'). On SQLite both are no-ops.
+  defp lock_job(txn, job_id) do
+    with :ok <- Store.txn_read_committed(txn), do: Store.txn_lock_row(txn, "jobs", "id", job_id)
+  end
 
   defp txn_get(txn, id) do
     case Store.txn_query(txn, "SELECT #{@job_columns} FROM jobs WHERE id = ?1", [id]) do

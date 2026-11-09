@@ -167,10 +167,22 @@ defmodule OptimalEngine.Storage.PolicyStore do
   # On PostgreSQL the row's sequence is drawn under the ledger lock and the lock
   # held until it commits, so ledger sequences commit in order and a reader
   # following them never moves past one still to commit (Sync.Postgres).
+  #
+  # The transaction runs at READ COMMITTED. At SERIALIZABLE its snapshot would
+  # be taken by the lock statement, before the wait for the lock, and a replay
+  # of the same key committed during that wait would make INSERT OR IGNORE a
+  # serialization failure (the row it conflicts with is not in the snapshot),
+  # and the whole transaction would run again. At READ COMMITTED the insert
+  # sees what committed before it and ignores the replay, with no retry; it is
+  # the transaction's only write, and the ledger's unique keys keep it
+  # idempotent. ON CONFLICT DO NOTHING still evaluates the identity default
+  # (nextval) before it finds the conflict, so an ignored replay uses up one
+  # sequence value and leaves a gap; the readers go past gaps.
   defp append_ledger_row(sql, params) do
     if OptimalEngine.Sync.Postgres.active?() do
       Store.transaction(fn txn ->
-        with :ok <- OptimalEngine.Sync.Postgres.lock_ledger(txn),
+        with :ok <- Store.txn_read_committed(txn),
+             :ok <- OptimalEngine.Sync.Postgres.lock_ledger(txn),
              {:ok, _} <- Store.txn_execute(txn, sql, params) do
           {:ok, :appended}
         end
