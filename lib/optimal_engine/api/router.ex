@@ -1378,7 +1378,19 @@ defmodule OptimalEngine.API.Router do
   end
 
   # Runtime metrics snapshot (Phase 10 Telemetry module).
+  # Runtime metrics. The counters, histograms, sizing and gauges are the whole
+  # Engine's, every tenant's, so only the Engine operator with the admin grant
+  # gets them (OptimalEngine.API.Actor.engine_admin?/1); any other key gets its
+  # own tenant's connector metrics alone.
   get "/api/metrics" do
+    if OptimalEngine.API.Actor.engine_admin?(conn) do
+      engine_metrics(conn)
+    else
+      json(conn, %{connectors: OptimalEngine.API.ConnectorsAPI.metrics(conn)})
+    end
+  end
+
+  defp engine_metrics(conn) do
     # `try/rescue` doesn't catch GenServer exits (they aren't exceptions).
     # `try/catch :exit` does. Without this, a downed Telemetry GenServer
     # would crash this request handler instead of returning the fallback.

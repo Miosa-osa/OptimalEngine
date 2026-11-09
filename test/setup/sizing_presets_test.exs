@@ -302,8 +302,11 @@ defmodule OptimalEngine.SizingPresetsTest do
       assert bad.status == 422
       assert "tenant-per-customer" in Jason.decode!(bad.resp_body)["presets"]
 
+      # The Engine-wide sizing in /api/metrics is the Engine operator's
+      # (test/api/prometheus_access_test.exs); a tenant's key gets its connectors.
       metrics = call(:get, "/api/metrics", reader).resp_body |> Jason.decode!()
-      assert metrics["sizing"]["profile"]["id"] == "business"
+      refute Map.has_key?(metrics, "sizing")
+      assert Map.has_key?(metrics, "connectors")
     end
   end
 end

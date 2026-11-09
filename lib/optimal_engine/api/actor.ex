@@ -49,7 +49,10 @@ defmodule OptimalEngine.API.Actor do
   @doc """
   True for the Engine operator: a key of the default tenant whose workspace
   scope is `*`, or no key at all, which reaches a handler only when the Engine
-  requires none (the trusted local operator). Routes that span tenants (the
+  requires none (the trusted local operator: `OPTIMAL_AUTH_REQUIRED=false`
+  must never run where anyone else can reach the port, see OPTIONS.md, Safe
+  Defaults), or a scraper holding `OPTIMAL_METRICS_TOKEN` on the Prometheus
+  route, the only route that token opens. Routes that span tenants (the
   Engine log, a cross-tenant bundle seed) are the operator's alone.
   """
   @spec engine_operator?(Plug.Conn.t()) :: boolean()
@@ -60,6 +63,21 @@ defmodule OptimalEngine.API.Actor do
       case conn.assigns[:current_api_key] do
         nil -> true
         api_key -> "*" in (api_key.workspace_scope || [])
+      end
+  end
+
+  @doc """
+  True for the Engine operator holding the `admin` grant: `engine_operator?/1`
+  with a key whose scopes include `admin` or `*`, or no key on an Engine that
+  requires none. For a route any key may call that adds Engine-wide data only
+  for the operator (`GET /api/metrics`).
+  """
+  @spec engine_admin?(Plug.Conn.t()) :: boolean()
+  def engine_admin?(conn) do
+    engine_operator?(conn) and
+      case conn.assigns[:current_api_key] do
+        nil -> true
+        api_key -> Enum.any?(api_key.scopes || [], &(&1 in ["*", "admin"]))
       end
   end
 

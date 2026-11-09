@@ -57,7 +57,7 @@ If Valkey stops answering, each process goes back to its own buckets until it re
 ## Usage gauges
 
 `GET /api/storage` returns the active profile, one gauge per measure, the worst one, the recommendation, and how long the last boot took (`boot_ms`).
-`GET /api/metrics` carries the same under `sizing`.
+`GET /api/metrics` carries the same under `sizing` for the Engine operator with the admin grant (an admin key of the default tenant whose workspace scope is `*`); any other key gets only its tenant's `connectors`, since the counters, histograms, sizing and gauges are the whole Engine's.
 `GET /api/storage` also returns `embed_cache_legacy_purge`, the record of the one-time removal of the unpartitioned embedding cache (`OPTIONS.md`, Text Embeddings), or `null` if it has never run.
 
 | Gauge | Measured as | Limit |

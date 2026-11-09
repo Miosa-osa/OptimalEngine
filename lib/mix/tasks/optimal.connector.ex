@@ -15,6 +15,7 @@ defmodule Mix.Tasks.Optimal.Connector do
       mix optimal.connector run <id> --max-retries 3
       mix optimal.connector migrate-credentials --dry-run  - which sealed credentials would move to OpenBao
       mix optimal.connector migrate-credentials            - move them (OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao)
+      mix optimal.connector invalid-ids                    - rows an older build wrote whose id names no OpenBao path
 
   ## Options
 
@@ -68,6 +69,9 @@ defmodule Mix.Tasks.Optimal.Connector do
 
       ["run", id | _] ->
         do_run(id, parsed)
+
+      ["invalid-ids" | _] ->
+        invalid_ids()
 
       ["migrate-credentials" | _] ->
         do_migrate_credentials(parsed)
@@ -247,5 +251,24 @@ defmodule Mix.Tasks.Optimal.Connector do
     value
     |> to_string()
     |> String.pad_trailing(width)
+  end
+
+  # Not re-keyed: an id is what other rows, runs and URIs point at. The
+  # operator re-registers such a connector under a valid id and deletes the old.
+  defp invalid_ids do
+    case OptimalEngine.Connectors.CredentialVault.invalid_ids() do
+      {:ok, []} ->
+        Mix.shell().info("Every connector id is in the form ids take.")
+
+      {:ok, ids} ->
+        Mix.shell().info(
+          "#{length(ids)} connector(s) have an id outside the form ids take (letters, digits, `.`, `_`, `:`, `-`; no `/` or `..`); their credentials cannot be kept in OpenBao. Re-register each under a valid id and delete the old one:"
+        )
+
+        Enum.each(ids, fn {tenant, id} -> Mix.shell().info("  #{tenant}\t#{inspect(id)}") end)
+
+      {:error, reason} ->
+        Mix.raise("could not read the connectors: #{inspect(reason)}")
+    end
   end
 end

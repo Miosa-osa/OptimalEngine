@@ -76,6 +76,44 @@ defmodule OptimalEngine.Connectors.CredentialVault do
       else: {:error, :invalid_connector_id}
   end
 
+  @doc """
+  The connector rows (`{tenant_id, id}`) whose tenant or id is not in the form
+  ids take, so they name no OpenBao path: rows an older build wrote.
+  """
+  @spec invalid_ids() :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
+  def invalid_ids do
+    with {:ok, rows} <- OptimalEngine.Store.raw_query("SELECT tenant_id, id FROM connectors", []) do
+      invalid = for [tenant, id] <- rows, not (segment?(tenant) and segment?(id)), do: {tenant, id}
+      {:ok, invalid}
+    end
+  end
+
+  @doc """
+  Logs, at boot, how many connector rows hold an id outside the form ids take
+  (never the ids: `mix optimal.connector invalid-ids` lists them).
+  """
+  @spec warn_invalid_ids() :: :ok
+  def warn_invalid_ids do
+    case invalid_ids() do
+      {:ok, []} ->
+        :ok
+
+      {:ok, ids} ->
+        require Logger
+
+        Logger.warning(
+          "#{length(ids)} connector(s) have an id outside the form ids take now; their credentials cannot be kept in OpenBao. List them with `mix optimal.connector invalid-ids`."
+        )
+
+      {:error, _reason} ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   defp segment?(value),
     do: is_binary(value) and Regex.match?(@segment, value) and not String.contains?(value, "..")
 

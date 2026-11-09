@@ -28,6 +28,7 @@ defmodule OptimalEngine.Application do
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
         OptimalEngine.Sizing.boot_finished()
+        OptimalEngine.Connectors.CredentialVault.warn_invalid_ids()
         Logger.info("[OptimalEngine] Supervision tree started (#{inspect(pid)})")
 
         case OptimalEngine.Auth.Bootstrap.run() do

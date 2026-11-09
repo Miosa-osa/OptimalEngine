@@ -286,5 +286,6 @@ An Engine that listens beyond loopback without them is reported as open, and ref
 Only the interface the Engine binds is checked: a loopback Engine that a proxy, tunnel or port map publishes to the network is not detected, and needs `OPTIMAL_AUTH_REQUIRED=true` as well.
 The container image and the compose files listen on all the container's interfaces and set `OPTIMAL_AUTH_REQUIRED=true`.
 The default local mode is trusted and permits anonymous requests; HTTP grants do not sandbox local CLI or SQL access.
+With `OPTIMAL_AUTH_REQUIRED=false` a request without a key is the Engine operator (`OptimalEngine.API.Actor.engine_operator?/1`): it reads every tenant's data, the Engine log and the Engine-wide metrics. Never run that mode where anyone but the operator can reach the port: not on a shared network, not behind a proxy or port map others can reach.
 Applications must supply intended scope, while legacy API defaults remain documented compatibility behavior.
 Never silently share memory across tenants, organizations, or workspaces.

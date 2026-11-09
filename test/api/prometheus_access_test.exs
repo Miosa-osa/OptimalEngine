@@ -163,6 +163,25 @@ defmodule OptimalEngine.API.PrometheusAccessTest do
     end
   end
 
+  describe "GET /api/metrics" do
+    @engine_wide ~w(counters histograms uptime_ms sizing gauges)
+
+    test "another tenant's key gets its connectors and no Engine-wide field", ctx do
+      for key <- [ctx.foreign_reader, ctx.foreign_admin, ctx.default_reader, ctx.scoped_admin] do
+        resp = scrape(key, "/api/metrics")
+        assert resp.status == 200
+        body = Jason.decode!(resp.resp_body)
+        assert Map.has_key?(body, "connectors")
+        for field <- @engine_wide, do: refute(Map.has_key?(body, field), field)
+      end
+    end
+
+    test "the Engine operator gets the Engine-wide fields", ctx do
+      body = Jason.decode!(scrape(ctx.operator, "/api/metrics").resp_body)
+      for field <- ["connectors" | @engine_wide], do: assert(Map.has_key?(body, field), field)
+    end
+  end
+
   test "an Engine that requires no key serves a request without one (in-guest scrape)" do
     auth = Application.get_env(:optimal_engine, :auth, [])
     Application.put_env(:optimal_engine, :auth, Keyword.put(auth, :auth_required, false))
