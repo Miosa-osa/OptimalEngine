@@ -38,6 +38,13 @@ exclude =
     do: [:sqlite_store | exclude],
     else: [:postgres_store | exclude]
 
+# Tests of what the Engine does on its PostgreSQL store only (the posting
+# lists it refreshes after a commit) are tagged :postgres_engine.
+exclude =
+  if OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres),
+    do: exclude,
+    else: [:postgres_engine | exclude]
+
 # Analytics against a real DuckDB run with OPTIMAL_TEST_DUCKDB naming the
 # `duckdb` executable (test/analytics/analytics_duckdb_test.exs). CI sets it
 # (.github/workflows/ci.yml), so a value naming nothing that runs stops the

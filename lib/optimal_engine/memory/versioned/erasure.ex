@@ -2,15 +2,25 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   @moduledoc """
   What forgetting a memory erases (`OptimalEngine.Memory.Versioned.forget/2`).
 
-  A forgotten memory keeps its row, flagged `is_forgotten` with its reason and
-  `forget_after`, so the forget is on record. Its text goes from everywhere
-  the Engine put it or derived it, in the same transaction as the flag
-  (`forget/3`), so a forget that cannot erase is not done at all and is not
-  left flagged with its text in place:
+  Forgetting one version forgets the memory: every version of its chain (the
+  versions that share its `root_memory_id`, earlier and later). A memory that
+  extends or derives from it is a memory of its own and stays.
 
-    * the row's `content` (emptied) and its full-text entry (`memories_fts`;
-      on PostgreSQL the posting lists are refreshed after the commit);
+  Each forgotten version keeps its row, flagged `is_forgotten` with its reason
+  and `forget_after`, so the forget is on record. Its text goes from
+  everywhere the Engine put it or derived it, in the same transaction as the
+  flag (`forget/3`), so a forget that cannot erase is not done at all and is
+  not left flagged with its text in place:
+
+    * the row's `content` (emptied), `content_hash` (a hash of the text lets a
+      guess of the text be checked), `citation_uri` and `source_chunk_id`
+      (cleared), and its `metadata`, of which only the governance keys
+      (`security_labels`, `partition_ids`) stay;
+    * its full-text entry (`memories_fts`);
     * its embedding row (`memory_embeddings`);
+    * its source chunk, unless the chunk's context still exists or another
+      live memory names it (the chunk's classifications, intents and
+      embeddings go with it);
     * the source package the create and remember bridges staged the text in
       (`source_packages`, its id is the text's content id in the workspace,
       plus any package that names the memory in its metadata or URI), with the
@@ -20,74 +30,119 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   A package another live memory or a context of the workspace still holds the
   same text in is shared, and stays: that text is theirs.
 
-  The replication ledger still holds the text: `sync_mutations` keeps every
-  change's whole row, the memory's create and the flagging update included,
-  and a peer pulling the workspace is served those rows. Redacting the ledger
-  for every erasure path is a change of its own (pending, in the ledger
-  redaction PR); `test/memory/memory_forget_erasure_test.exs` asserts it under
-  the `:ledger_redaction` tag, excluded until then.
+  On PostgreSQL the posting lists are rewritten after the commit. The row
+  trigger queued each version's key in the forget's own transaction
+  (`optimal_fts_queue`), so the rewrite is on record before the forget
+  returns: a refresh that fails here is the forget's error
+  (`{:memory_erasure_failed, :fts_refresh, reason}`), the key stays queued,
+  and the store's background refresh, or the refresh every search makes
+  before it reads the index, removes the postings.
 
-  On PostgreSQL the posting lists are refreshed after the commit; a refresh
-  that fails is the forget's error (`{:memory_erasure_failed, :fts_refresh,
-  reason}`), never silence, though the rows are already erased and the next
-  refresh, which runs before any search reads the index, catches up.
+  Not covered here: the replication ledger (`sync_mutations`) keeps every
+  change's whole row, and a peer pulling the workspace is served those rows.
+  Redacting it for every erasure path is the ledger redaction's change;
+  `test/memory/memory_forget_erasure_test.exs` asserts it under the
+  `:ledger_redaction` tag, excluded until then.
   """
 
+  alias OptimalEngine.Memory.Versioned
+  alias OptimalEngine.Memory.Versioned.Store, as: VStore
   alias OptimalEngine.MemoryCore.ID
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FullText
 
   @timeout 60_000
 
+  # The metadata keys a forgotten row keeps: they decide who may see the row.
+  @governed_keys ["security_labels", "partition_ids"]
+
   @doc """
-  Flags `memory` (a `OptimalEngine.Memory.Versioned` struct read before the
-  forget) forgotten with `reason` and `forget_after`, and erases its text, in
-  one transaction: either both happen or neither does. What to remove is
-  looked up inside the transaction too, so a package or claim written
-  meanwhile is either seen or serializes after the forget. Returns how many
-  rows each step changed.
+  Forgets the memory `id` and every version of its chain: flags each one
+  forgotten with `reason` and `forget_after` and erases its text, in one
+  transaction, so either all of it happens or none does. The chain, and what
+  to remove, are read inside the transaction, so a version, package or claim
+  written meanwhile is either seen or serializes after the forget.
+
+  Returns the versions as they were before the forget (to drop what was
+  cached from their text) and how many rows each step changed. An `id` that
+  names no memory is `{:ok, %{memories: [], removed: %{}}}`.
   """
-  @spec forget(map(), String.t() | nil, String.t() | nil) ::
-          {:ok, %{atom() => non_neg_integer()}} | {:error, term()}
-  def forget(%{id: id, content: content} = memory, reason, forget_after)
-      when is_binary(id) and is_binary(content) do
+  @spec forget(String.t(), String.t() | nil, String.t() | nil) ::
+          {:ok, %{memories: [Versioned.t()], removed: %{atom() => non_neg_integer()}}}
+          | {:error, term()}
+  def forget(id, reason, forget_after) when is_binary(id) do
     result =
       Store.transaction(
         fn txn ->
-          with {:ok, _} <-
-                 Store.txn_execute(
-                   txn,
-                   """
-                   UPDATE memories
-                   SET is_forgotten = 1, forget_reason = ?2, forget_after = ?3,
-                       updated_at = datetime('now')
-                   WHERE id = ?1
-                   """,
-                   [id, reason, forget_after]
-                 ),
-               {:ok, packages} <- packages(txn, memory),
-               {:ok, claims} <- claims(txn, packages, memory),
-               {:ok, facts} <- facts(txn, claims),
-               {:ok, episodes} <- episodes(txn, packages) do
-            found = %{packages: packages, claims: claims, facts: facts, episodes: episodes}
-            run(txn, steps(memory, found), %{})
+          with {:ok, versions} <- chain(txn, id),
+               {:ok, removed} <- erase_all(txn, versions, reason, forget_after) do
+            {:ok, %{memories: versions, removed: removed}}
           end
         end,
         @timeout
       )
 
-    with {:ok, removed} <- result do
-      refresh = Application.get_env(:optimal_engine, :memory_erasure_refresh, &FullText.refresh/1)
-
-      case refresh.(["memories_fts"]) do
-        :ok -> {:ok, removed}
-        {:error, reason} -> {:error, {:memory_erasure_failed, :fts_refresh, reason}}
+    with {:ok, %{memories: versions} = done} <- result do
+      if versions == [] do
+        {:ok, done}
+      else
+        case FullText.refresh(["memories_fts"]) do
+          :ok -> {:ok, done}
+          {:error, reason} -> {:error, {:memory_erasure_failed, :fts_refresh, reason}, done}
+        end
       end
     end
   end
 
+  # The memory and every version that shares its root, in its workspace.
+  defp chain(txn, id) do
+    with {:ok, rows} <-
+           query(txn, "SELECT root_memory_id, workspace_id FROM memories WHERE id = ?1", [id]) do
+      case rows do
+        [] ->
+          {:ok, []}
+
+        [[root, workspace]] ->
+          root = root || id
+
+          with {:ok, rows} <-
+                 query(
+                   txn,
+                   """
+                   SELECT #{VStore.select_cols()} FROM memories
+                    WHERE workspace_id = ?1 AND (root_memory_id = ?2 OR id = ?2 OR id = ?3)
+                    ORDER BY version ASC
+                   """,
+                   [workspace, root, id]
+                 ) do
+            {:ok, Enum.map(rows, &Versioned.row_to_struct/1)}
+          end
+      end
+    end
+  end
+
+  defp erase_all(txn, versions, reason, forget_after) do
+    chain_ids = Jason.encode!(Enum.map(versions, & &1.id))
+
+    Enum.reduce_while(versions, {:ok, %{}}, fn memory, {:ok, removed} ->
+      with {:ok, packages} <- packages(txn, memory, chain_ids),
+           {:ok, claims} <- claims(txn, packages, memory),
+           {:ok, facts} <- facts(txn, claims),
+           {:ok, episodes} <- episodes(txn, packages),
+           found = %{packages: packages, claims: claims, facts: facts, episodes: episodes},
+           {:ok, counts} <-
+             run(txn, steps(memory, found, chain_ids, reason, forget_after), %{}) do
+        {:cont, {:ok, Map.merge(removed, counts, fn _key, a, b -> a + b end)}}
+      else
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
   # The packages that hold this memory's text and nothing that stays.
-  defp packages(txn, memory) do
+  defp packages(_txn, %{content: ""}, _chain_ids), do: {:ok, []}
+
+  defp packages(txn, memory, chain_ids) do
     tenant = memory.tenant_id || "default"
     workspace = memory.workspace_id || "default"
     by_text = ID.content_id("sp", [tenant, ":", workspace, ":", ID.sha256(memory.content)])
@@ -104,7 +159,7 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
              [by_text, "memory://" <> memory.id, memory.id]
            ) do
       Enum.reduce_while(List.flatten(rows), {:ok, []}, fn package, {:ok, acc} ->
-        case shared?(txn, package, memory) do
+        case shared?(txn, package, chain_ids) do
           {:ok, true} -> {:cont, {:ok, acc}}
           {:ok, false} -> {:cont, {:ok, [package | acc]}}
           {:error, _} = error -> {:halt, error}
@@ -113,8 +168,9 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
     end
   end
 
-  # Another live memory, or a context, of the package's workspace holds its text.
-  defp shared?(txn, package, memory) do
+  # Another live memory (not of the chain), or a context, of the package's
+  # workspace holds its text.
+  defp shared?(txn, package, chain_ids) do
     with {:ok, rows} <-
            query(
              txn,
@@ -122,13 +178,14 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
              SELECT 1 FROM source_packages p
               WHERE p.id = ?1
                 AND (EXISTS (SELECT 1 FROM memories m
-                              WHERE m.workspace_id = p.workspace_id AND m.id != ?2
+                              WHERE m.workspace_id = p.workspace_id
+                                AND m.id NOT IN (SELECT value FROM json_each(?2))
                                 AND m.is_forgotten = 0 AND m.content = p.raw_text)
                      OR EXISTS (SELECT 1 FROM contexts c
                                  WHERE c.workspace_id = p.workspace_id
                                    AND (CASE WHEN json_valid(c.metadata) THEN json_extract(c.metadata, '$.source_package_id') END) = p.id))
              """,
-             [package, memory.id]
+             [package, chain_ids]
            ) do
       {:ok, rows != []}
     end
@@ -189,7 +246,7 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   end
 
   # Children before parents, each by key.
-  defp steps(memory, found) do
+  defp steps(memory, found, chain_ids, reason, forget_after) do
     pkgs = Jason.encode!(found.packages)
     claim_set = Jason.encode!(found.claims)
 
@@ -203,8 +260,16 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
         ]
 
     fts ++
+      chunk_step(memory, chain_ids) ++
       [
-        {:memories, "UPDATE memories SET content = '' WHERE id = ?1", [memory.id]},
+        {:memories,
+         """
+         UPDATE memories
+            SET is_forgotten = 1, forget_reason = ?2, forget_after = ?3,
+                content = '', content_hash = NULL, citation_uri = NULL, source_chunk_id = NULL,
+                metadata = ?4, updated_at = datetime('now')
+          WHERE id = ?1
+         """, [memory.id, reason, forget_after, governed_metadata(memory.metadata)]},
         {:memory_embeddings, "DELETE FROM memory_embeddings WHERE memory_id = ?1", [memory.id]},
         {:facts, "DELETE FROM facts WHERE id IN (SELECT value FROM json_each(?1))",
          [Jason.encode!(found.facts)]},
@@ -218,6 +283,36 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
          "DELETE FROM source_packages WHERE id IN (SELECT value FROM json_each(?1))", [pkgs]}
       ]
   end
+
+  # The chunk the memory was taken from goes, unless its context still exists
+  # or a live memory outside the chain names it.
+  defp chunk_step(%{source_chunk_id: chunk}, chain_ids) when is_binary(chunk) and chunk != "" do
+    [
+      {:chunks,
+       """
+       DELETE FROM chunks
+        WHERE id = ?1
+          AND NOT EXISTS (SELECT 1 FROM contexts c WHERE c.id = chunks.signal_id)
+          AND NOT EXISTS (SELECT 1 FROM memories m
+                           WHERE m.source_chunk_id = ?1 AND m.is_forgotten = 0
+                             AND m.id NOT IN (SELECT value FROM json_each(?2)))
+       """, [chunk, chain_ids]}
+    ]
+  end
+
+  defp chunk_step(_memory, _chain_ids), do: []
+
+  defp governed_metadata(metadata) when is_map(metadata),
+    do: metadata |> Map.take(@governed_keys) |> Jason.encode!()
+
+  defp governed_metadata(metadata) when is_binary(metadata) do
+    case Jason.decode(metadata) do
+      {:ok, map} when is_map(map) -> governed_metadata(map)
+      _ -> "{}"
+    end
+  end
+
+  defp governed_metadata(_metadata), do: "{}"
 
   defp query(txn, sql, params), do: Store.txn_query(txn, sql, params)
 

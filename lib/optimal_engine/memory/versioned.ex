@@ -283,11 +283,11 @@ defmodule OptimalEngine.Memory.Versioned do
   end
 
   @doc """
-  Forgets a memory. Sets `is_forgotten=1` with the reason and
-  `forget_after`, and erases its text from everywhere the Engine put or
-  derived it (`OptimalEngine.Memory.Versioned.Erasure`): the row keeps the
-  record of the forget, not the text. Hard delete via `delete/1` removes the
-  row too.
+  Forgets a memory: every version of its chain (`root_memory_id`). Sets
+  `is_forgotten=1` with the reason and `forget_after` on each, and erases
+  their text from everywhere the Engine put or derived it
+  (`OptimalEngine.Memory.Versioned.Erasure`): the rows keep the record of the
+  forget, not the text. Hard delete via `delete/1` removes the row too.
 
   Options:
     - `:reason` — string explanation stored in `forget_reason`
@@ -298,27 +298,19 @@ defmodule OptimalEngine.Memory.Versioned do
     reason = Keyword.get(opts, :reason)
     forget_after = Keyword.get(opts, :forget_after)
 
-    case held(id) do
-      # No such memory: the flag is all there is to write.
-      nil ->
-        with {:ok, _} <- VStore.mark_forgotten(id, reason, forget_after), do: :ok
+    # The chain is read inside the erasure's transaction; the copies it returns
+    # are the text as it was, from which the cached embeddings are found.
+    case Erasure.forget(id, reason, forget_after) do
+      {:ok, %{memories: memories}} ->
+        Enum.each(memories, &forget_cached_embedding/1)
+        :ok
 
-      memory ->
-        # The flag and the erasure commit together, or not at all.
-        case Erasure.forget(memory, reason, forget_after) do
-          {:ok, _removed} ->
-            # Found from the text, which the row no longer holds: the entry
-            # is removed from the copy read before the forget.
-            forget_cached_embedding(memory)
-            :ok
+      {:error, {:memory_erasure_failed, :fts_refresh, _} = reason, %{memories: memories}} ->
+        Enum.each(memories, &forget_cached_embedding/1)
+        {:error, reason}
 
-          {:error, {:memory_erasure_failed, :fts_refresh, _}} = error ->
-            forget_cached_embedding(memory)
-            error
-
-          {:error, _reason} = error ->
-            error
-        end
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -543,26 +535,27 @@ defmodule OptimalEngine.Memory.Versioned do
     }
   end
 
-  defp row_to_struct([
-         id,
-         tenant_id,
-         workspace_id,
-         content,
-         is_static,
-         is_forgotten,
-         forget_after,
-         forget_reason,
-         version,
-         parent_memory_id,
-         root_memory_id,
-         is_latest,
-         citation_uri,
-         source_chunk_id,
-         audience,
-         metadata_json,
-         created_at,
-         updated_at
-       ]) do
+  @doc false
+  def row_to_struct([
+        id,
+        tenant_id,
+        workspace_id,
+        content,
+        is_static,
+        is_forgotten,
+        forget_after,
+        forget_reason,
+        version,
+        parent_memory_id,
+        root_memory_id,
+        is_latest,
+        citation_uri,
+        source_chunk_id,
+        audience,
+        metadata_json,
+        created_at,
+        updated_at
+      ]) do
     %__MODULE__{
       id: id,
       tenant_id: tenant_id,
