@@ -517,7 +517,7 @@ Any of these variables may hold an OpenBao reference instead of the value itself
 
 ```text
 OPTIMAL_BACKUP_KEY             OPTIMAL_AUTHORITY_KEY          CONNECTOR_KEY
-OPTIMAL_S3_ACCESS_KEY_ID       OPTIMAL_S3_SECRET_ACCESS_KEY
+OPTIMAL_S3_ACCESS_KEY_ID       OPTIMAL_S3_SECRET_ACCESS_KEY   OPTIMAL_QDRANT_API_KEY
 ```
 
 A reference is `openbao:<path>#<field>`: the `<field>` of the KV version 2 secret at `<path>` under the mount.
@@ -530,7 +530,7 @@ export OPTIMAL_AUTHORITY_KEY=openbao:optimal/engine#authority_key
 
 A value read from OpenBao is kept in memory for a minute, so a rotated secret is read within the minute; a failure is never kept.
 A reference never falls back: OpenBao not configured, sealed, unreachable, refusing the token, or holding no such secret or field fails the caller with that reason, and the log line names the variable and the reason, never the value.
-A backup is then refused with `backup_key_unavailable`, an authority key is not created or opened (`authority_key_unavailable`, and never stored unwrapped, even on an open development Engine), connector envelopes are not sealed or opened, and the object store reports `credentials_unavailable`.
+A backup is then refused with `backup_key_unavailable`, an authority key is not created or opened (`authority_key_unavailable`, and never stored unwrapped, even on an open development Engine), connector envelopes are not sealed or opened, the object store reports `credentials_unavailable`, and a Qdrant request is not sent (`api_key_unavailable`).
 `OPTIMAL_OPENBAO_TOKEN` itself cannot be a reference.
 A renewable token is renewed (`auth/token/renew-self`) when half its remaining time has passed, for as long as the Engine runs; a token that expires and cannot be renewed is logged once, with when it runs out; a token with no expiry (a root token) needs nothing.
 
