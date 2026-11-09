@@ -207,27 +207,38 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   """
   @spec process_requests(GenServer.server(), String.t()) :: {:ok, map()}
   def process_requests(conn, namespace) do
-    {:ok, rows} =
-      Store.raw_query(
-        """
-        SELECT r.id, r.metadata FROM events r
-        WHERE r.kind = ?1
-          AND (CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.namespace') END) = ?2
-          AND NOT EXISTS (
-            SELECT 1 FROM events d
-            WHERE d.kind = 'nats_purge' AND d.target_uri = 'nats-intake-purge-request:' || CAST(r.id AS TEXT)
-          )
-        ORDER BY r.id
-        LIMIT 500
-        """,
-        [@request_kind, namespace]
-      )
+    expire_foreign(namespace)
+
+    rows =
+      case Store.raw_query(
+             """
+             SELECT r.id, r.tenant_id, r.metadata FROM events r
+             WHERE r.kind = ?1
+               AND (CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.namespace') END) = ?2
+               AND NOT EXISTS (
+                 SELECT 1 FROM events d
+                 WHERE d.kind = 'nats_purge' AND d.target_uri = 'nats-intake-purge-request:' || CAST(r.id AS TEXT)
+               )
+             ORDER BY r.id
+             LIMIT 500
+             """,
+             [@request_kind, namespace]
+           ) do
+        {:ok, rows} ->
+          rows
+
+        {:error, reason} ->
+          Logger.warning("[NATS] intake removals not read: #{inspect(reason)}")
+          []
+      end
 
     # Another namespace's requests are another Engine's: they are not read
-    # here, so they never fill this one's page.
+    # here, so they never fill this one's page. A request that cannot be read
+    # is set aside (recorded done, with why), so it never holds the page.
     done =
-      for [id, meta] <- rows,
-          request = Jason.decode!(meta),
+      for [id, row_tenant, meta] <- rows,
+          request <- [request_of(id, row_tenant, meta)],
+          request != :malformed,
           {:ok, counts} <- [purge(conn, namespace, request)],
           :ok <- [done(id, namespace, request, counts)],
           into: %{} do
@@ -235,6 +246,74 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
       end
 
     {:ok, done}
+  end
+
+  # A request's metadata as `purge/3` reads it, or `:malformed` (set aside).
+  defp request_of(id, row_tenant, meta) do
+    with {:ok, %{} = request} <- Jason.decode(meta || ""),
+         true <- optional_string?(request["tenant_id"]),
+         true <- optional_string?(request["workspace_id"]),
+         true <- is_nil(request["connector_ids"]) or strings?(request["connector_ids"]),
+         true <- is_binary(request["workspace_id"]) or is_list(request["connector_ids"]) do
+      request
+    else
+      _ ->
+        Logger.warning("[NATS] intake removal #{id} is malformed; set aside")
+        _ = set_aside(id, row_tenant, "malformed")
+        :malformed
+    end
+  end
+
+  defp optional_string?(value), do: is_nil(value) or is_binary(value)
+  defp strings?(values), do: is_list(values) and Enum.all?(values, &is_binary/1)
+
+  # Requests of another namespace that no Engine took within a week: that
+  # namespace is no longer configured anywhere this store serves. They are set
+  # aside, so the pending ones do not grow without end.
+  @expire_after_days 7
+
+  defp expire_foreign(namespace) do
+    case Store.raw_query(
+           """
+           SELECT r.id, r.tenant_id FROM events r
+           WHERE r.kind = ?1
+             AND COALESCE((CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.namespace') END), '') != ?2
+             AND r.ts < datetime('now', ?3)
+             AND NOT EXISTS (
+               SELECT 1 FROM events d
+               WHERE d.kind = 'nats_purge' AND d.target_uri = 'nats-intake-purge-request:' || CAST(r.id AS TEXT)
+             )
+           ORDER BY r.id
+           LIMIT 500
+           """,
+           [@request_kind, namespace, "-#{@expire_after_days} days"]
+         ) do
+      {:ok, []} ->
+        :ok
+
+      {:ok, rows} ->
+        Enum.each(rows, fn [id, tenant] -> set_aside(id, tenant, "expired") end)
+
+        Logger.warning(
+          "[NATS] #{length(rows)} intake removal(s) of a namespace no Engine took in #{@expire_after_days} days expired"
+        )
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp set_aside(id, tenant, why) do
+    Store.raw_query(
+      "INSERT INTO events (tenant_id, principal, kind, target_uri, metadata) VALUES (?1, 'system:nats', 'nats_purge', ?2, ?3)",
+      [
+        if(is_binary(tenant), do: tenant, else: Tenant.default_id()),
+        "nats-intake-purge-request:#{id}",
+        Jason.encode!(%{flow: "intake", set_aside: why})
+      ]
+    )
+  rescue
+    _ -> {:error, :not_recorded}
   end
 
   # The tenant's queued Signals and the intake dead letters this request names.
@@ -262,10 +341,7 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   # `{:ok, id}`, or why the request could not be written: then nothing would
   # retry it, so the caller is told.
   defp record_request(namespace, request, target) do
-    case Application.get_env(:optimal_engine, :intake_purge_record) do
-      nil -> {:ok, insert_request(namespace, request, target)}
-      record -> {:ok, record.(namespace, request, target)}
-    end
+    {:ok, insert_request(namespace, request, target)}
   rescue
     error -> {:error, Exception.message(error)}
   catch
@@ -295,7 +371,7 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
       Store.raw_query(
         "INSERT INTO events (tenant_id, principal, kind, target_uri, metadata) VALUES (?1, 'system:nats', 'nats_purge', ?2, ?3)",
         [
-          request["tenant_id"],
+          request["tenant_id"] || Tenant.default_id(),
           "nats-intake-purge-request:#{id}",
           Jason.encode!(
             Map.merge(counts, %{

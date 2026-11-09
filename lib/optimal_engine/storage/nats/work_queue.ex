@@ -184,9 +184,9 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
 
   # The task's monitor reference. Under the NATS task supervisor when it runs;
   # a queue started on its own (tests) monitors a process of its own instead.
-  defp start_periodic(fun) do
-    if Process.whereis(@task_supervisor) do
-      Task.Supervisor.async_nolink(@task_supervisor, fun).ref
+  defp start_periodic(supervisor, fun) do
+    if is_atom(supervisor) and Process.whereis(supervisor) do
+      Task.Supervisor.async_nolink(supervisor, fun).ref
     else
       {_pid, ref} = spawn_monitor(fun)
       ref
@@ -268,7 +268,8 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
 
   def handle_info(:periodic, state) do
     {callback, name, context} = {state.callback, self_name(state), state.context}
-    task = start_periodic(fn -> callback.periodic(name, context) end)
+    supervisor = Map.get(context, :task_supervisor, @task_supervisor)
+    task = start_periodic(supervisor, fn -> callback.periodic(name, context) end)
     schedule_periodic(state)
     {:noreply, %{state | periodic_task: task}}
   end
@@ -277,6 +278,10 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
     Process.demonitor(ref, [:flush])
     {:noreply, %{state | periodic_task: nil}}
   end
+
+  # A run under the fallback monitor (no task supervisor) ends `:normal`.
+  def handle_info({:DOWN, ref, :process, _pid, :normal}, %{periodic_task: ref} = state),
+    do: {:noreply, %{state | periodic_task: nil}}
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{periodic_task: ref} = state) do
     Logger.warning("[NATS] #{state.callback.flow()} periodic run failed: #{inspect(reason)}")

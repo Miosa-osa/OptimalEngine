@@ -197,6 +197,9 @@ defmodule OptimalEngine.Connectors.Routing do
         source_id: signal.id,
         source_uri: source_uri(signal.path),
         occurred_at: signal.created_at,
+        # The package names its connector, so removing the connector or its
+        # workspace finds a package no context holds (IngestFence).
+        source_system: connector_system(Map.get(scope, :connector_id)),
         # A queued Signal is checked again where it is written: its workspace
         # and its connector, under their row locks.
         fence: IngestFence.from_scope(tenant_id, placed.workspace_id, scope)
@@ -432,4 +435,7 @@ defmodule OptimalEngine.Connectors.Routing do
   defp value(map, key) when is_map(map) do
     Map.get(map, key) || Map.get(map, to_string(key))
   end
+
+  defp connector_system(id) when is_binary(id) and id != "", do: "connector:" <> id
+  defp connector_system(_id), do: nil
 end

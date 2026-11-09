@@ -2,9 +2,10 @@ defmodule OptimalEngine.Connectors.IngestFence do
   @moduledoc """
   The last check of a connector's ingest, made inside the transaction that
   writes it: the workspace is still the tenant's and active, and the connector
-  still exists. On PostgreSQL both rows are locked (`FOR UPDATE`) first, so an
-  archive, a move or a connector delete that commits before the write makes
-  the write refuse; on SQLite the store runs one writer at a time, so the
+  still exists. On PostgreSQL both rows are held (`FOR SHARE`) first, so the
+  ingests of one workspace run side by side, an archive, a move or a
+  connector delete waits for them, and one that commits before the write
+  makes the write refuse; on SQLite the store runs one writer at a time, so the
   check and the write cannot be split by another write.
 
   A queued Signal (`OptimalEngine.Storage.NATS.IntakeQueue`) is checked when
@@ -50,9 +51,9 @@ defmodule OptimalEngine.Connectors.IngestFence do
   end
 
   @doc """
-  Checks `fence` inside a `OptimalEngine.Store.transaction/2`, after locking
-  the workspace's and the connector's rows (`Store.txn_lock_row/4`, nothing on
-  SQLite).
+  Checks `fence` inside a `OptimalEngine.Store.transaction/2`, after holding
+  the workspace's and the connector's rows (`Store.txn_share_row/4`, nothing
+  on SQLite).
   """
   @spec check_in(term(), t() | nil) :: :ok | {:error, term()}
   def check_in(_txn, nil), do: :ok
@@ -60,8 +61,8 @@ defmodule OptimalEngine.Connectors.IngestFence do
   def check_in(txn, fence) do
     alias OptimalEngine.Store
 
-    with :ok <- Store.txn_lock_row(txn, "workspaces", "id", fence.workspace_id),
-         :ok <- Store.txn_lock_row(txn, "connectors", "id", fence.connector_id) do
+    with :ok <- Store.txn_share_row(txn, "workspaces", "id", fence.workspace_id),
+         :ok <- Store.txn_share_row(txn, "connectors", "id", fence.connector_id) do
       check(&Store.txn_query(txn, &1, &2), fence, :sqlite)
     end
   end
@@ -72,7 +73,7 @@ defmodule OptimalEngine.Connectors.IngestFence do
   end
 
   defp statements(:postgres) do
-    {"SELECT tenant_id, status FROM workspaces WHERE id = $1 FOR UPDATE",
-     "SELECT 1 FROM connectors WHERE id = $1 AND tenant_id = $2 FOR UPDATE"}
+    {"SELECT tenant_id, status FROM workspaces WHERE id = $1 FOR SHARE",
+     "SELECT 1 FROM connectors WHERE id = $1 AND tenant_id = $2 FOR SHARE"}
   end
 end

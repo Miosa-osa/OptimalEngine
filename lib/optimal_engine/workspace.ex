@@ -790,6 +790,7 @@ defmodule OptimalEngine.Workspace do
          ) do
       {:ok, _} ->
         forget_in_nats(id)
+        forget_unheld_connector_packages(id)
 
         cache =
           case Cache.purge_workspace(id, :archive) do
@@ -804,6 +805,17 @@ defmodule OptimalEngine.Workspace do
       other ->
         other
     end
+  end
+
+  # A source package a connector's fenced ingest left in the workspace (no
+  # context or claim holds it) goes with the archive. Never fails the archive.
+  defp forget_unheld_connector_packages(id) do
+    _ = OptimalEngine.MemoryCore.Store.delete_unheld_connector_packages(workspace_id: id)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # Its messages on the NATS ledger stream are purged (or the purge recorded

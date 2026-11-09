@@ -262,20 +262,6 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
       assert_received :ingested
     end
 
-    test "a removal whose request cannot be recorded is an error, not pending", ctx do
-      Application.put_env(:optimal_engine, :intake_purge_record, fn _ns, _req, _target ->
-        raise "events table unavailable"
-      end)
-
-      on_exit(fn -> Application.delete_env(:optimal_engine, :intake_purge_record) end)
-
-      assert {:error, {:request_not_recorded, _}} =
-               IntakeQueue.forget_workspace(ctx.tenant, ctx.ws, "archived",
-                 connection: ctx.conn,
-                 namespace: "optimal"
-               )
-    end
-
     test "a recorded removal is retried on a timer, not only on reprovision", ctx do
       fill(ctx)
       down = :"nats_ie_down2_#{ctx.n}"
@@ -529,6 +515,237 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
       assert Process.alive?(pid)
       assert :ets.lookup_element(probe, :max, 2) == 1
       assert :ets.lookup_element(probe, :runs, 2) >= 3
+    end
+  end
+
+  describe "review 3: what a fenced ingest leaves" do
+    defp packages(workspace) do
+      {:ok, rows} =
+        Store.raw_query(
+          "SELECT id, source_system FROM source_packages WHERE workspace_id = ?1",
+          [workspace]
+        )
+
+      rows
+    end
+
+    defp package!(ctx, workspace, id, source_system) do
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO source_packages (id, tenant_id, workspace_id, source_type, source_class, source_system, received_at, content_hash, raw_text, created_at, updated_at) VALUES (?1, ?2, ?3, 'manual', 'text', ?4, '2026-11-01', ?1, 'zqorphan', '2026-11-01', '2026-11-01')",
+          [id, ctx.tenant, workspace, source_system]
+        )
+    end
+
+    test "a queued Signal's package names its connector", ctx do
+      assert :ack = IntakeQueue.handle_message(race_message(ctx, ctx.other, "named"), %{})
+      connector = ctx.connectors[ctx.other]
+
+      assert Enum.any?(packages(ctx.other), fn [_id, system] ->
+               system == "connector:" <> connector
+             end)
+    end
+
+    # The package commits, then the workspace is archived (here by a trigger on
+    # the package insert itself), then the context's fence refuses: the
+    # package this ingest wrote goes too.
+    @tag :sqlite_store
+    test "a context write fenced after the package committed takes the package with it", ctx do
+      {:ok, _} =
+        Store.raw_query(
+          "CREATE TRIGGER fence_archive_after_package AFTER INSERT ON source_packages WHEN NEW.workspace_id = '#{ctx.ws}' BEGIN UPDATE workspaces SET status = 'archived' WHERE id = NEW.workspace_id; END",
+          []
+        )
+
+      on_exit(fn -> Store.raw_query("DROP TRIGGER IF EXISTS fence_archive_after_package", []) end)
+
+      assert :term = IntakeQueue.handle_message(race_message(ctx, ctx.ws, "orphan"), %{})
+      assert written(ctx.ws) == 0
+    end
+
+    test "archive removes its connectors' packages no context holds, and nothing else", ctx do
+      connector = ctx.connectors[ctx.ws]
+      package!(ctx, ctx.ws, "sp-orphan-#{ctx.n}", "connector:" <> connector)
+      package!(ctx, ctx.ws, "sp-manual-#{ctx.n}", "manual")
+      package!(ctx, ctx.ws, "sp-held-#{ctx.n}", "connector:" <> connector)
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO contexts (id, tenant_id, workspace_id, title, content, metadata, created_at) VALUES (?1, ?2, ?3, 't', 'c', ?4, '2026-01-01')",
+          [
+            "ctx-held-#{ctx.n}",
+            ctx.tenant,
+            ctx.ws,
+            Jason.encode!(%{"source_package_id" => "sp-held-#{ctx.n}"})
+          ]
+        )
+
+      assert :ok = Workspace.archive(ctx.ws)
+
+      ids = for [id, _] <- packages(ctx.ws), do: id
+      refute "sp-orphan-#{ctx.n}" in ids
+      assert "sp-manual-#{ctx.n}" in ids
+      assert "sp-held-#{ctx.n}" in ids
+    end
+
+    test "deleting a connector removes its packages no context holds", ctx do
+      connector = ctx.connectors[ctx.other]
+      package!(ctx, ctx.other, "sp-conn-orphan-#{ctx.n}", "connector:" <> connector)
+      package!(ctx, ctx.other, "sp-conn-other-#{ctx.n}", "connector:someone-else")
+
+      assert :ok = Rows.delete(ctx.tenant, connector)
+
+      ids = for [id, _] <- packages(ctx.other), do: id
+      refute "sp-conn-orphan-#{ctx.n}" in ids
+      assert "sp-conn-other-#{ctx.n}" in ids
+    end
+  end
+
+  describe "review 3: the removal requests" do
+    defp request!(ctx, metadata) do
+      {:ok, [[id]]} =
+        Store.raw_query(
+          "INSERT INTO events (tenant_id, principal, kind, target_uri, metadata) VALUES (?1, 'system:nats', 'nats_intake_purge_requested', ?2, ?3) RETURNING id",
+          [ctx.tenant, "bad-#{ctx.n}-#{System.unique_integer([:positive])}", metadata]
+        )
+
+      id
+    end
+
+    defp done?(id) do
+      {:ok, rows} =
+        Store.raw_query("SELECT 1 FROM events WHERE kind = 'nats_purge' AND target_uri = ?1", [
+          "nats-intake-purge-request:#{id}"
+        ])
+
+      rows != []
+    end
+
+    test "a malformed request is set aside with a warning, and the rest are done", ctx do
+      fill(ctx)
+      bad = request!(ctx, Jason.encode!(%{"namespace" => "optimal", "tenant_id" => 7}))
+      junk = request!(ctx, ~s({"namespace": "optimal", "connector_ids": "x"}))
+
+      down = :"nats_ie_down4_#{ctx.n}"
+      start_supervised!({Connection, name: down, url: nil}, id: down)
+
+      assert {:ok, %{pending: true}} =
+               IntakeQueue.forget_workspace(ctx.tenant, ctx.ws, "archived",
+                 connection: down,
+                 namespace: "optimal"
+               )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, done} = IntakeQueue.process_requests(ctx.conn, "optimal")
+          assert map_size(done) >= 1
+        end)
+
+      assert log =~ "malformed"
+      assert held(ctx, "gone") == []
+      assert done?(bad) and done?(junk)
+    end
+
+    test "a request of another namespace older than a week expires with a warning", ctx do
+      old =
+        request!(ctx, Jason.encode!(%{"namespace" => "gone#{ctx.n}", "tenant_id" => ctx.tenant}))
+
+      fresh =
+        request!(ctx, Jason.encode!(%{"namespace" => "live#{ctx.n}", "tenant_id" => ctx.tenant}))
+
+      {:ok, _} =
+        Store.raw_query("UPDATE events SET ts = '2020-01-01 00:00:00' WHERE id = ?1", [old])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, _} = IntakeQueue.process_requests(ctx.conn, "optimal")
+        end)
+
+      assert done?(old)
+      refute done?(fresh)
+      assert log =~ "expired"
+    end
+
+    @tag :sqlite_store
+    test "a removal whose request the store refuses to record is an error, not pending", ctx do
+      {:ok, _} =
+        Store.raw_query(
+          "CREATE TRIGGER refuse_purge_request BEFORE INSERT ON events WHEN NEW.kind = 'nats_intake_purge_requested' BEGIN SELECT RAISE(ABORT, 'events refused'); END",
+          []
+        )
+
+      on_exit(fn -> Store.raw_query("DROP TRIGGER IF EXISTS refuse_purge_request", []) end)
+
+      assert {:error, {:request_not_recorded, _}} =
+               IntakeQueue.forget_workspace(ctx.tenant, ctx.ws, "archived",
+                 connection: ctx.conn,
+                 namespace: "optimal"
+               )
+    end
+  end
+
+  describe "review 3: the fence's locks" do
+    @tag :postgres_engine
+    test "two ingests of one workspace hold the fence at once", ctx do
+      fence = %{
+        tenant_id: ctx.tenant,
+        workspace_id: ctx.other,
+        connector_id: ctx.connectors[ctx.other]
+      }
+
+      test = self()
+
+      holder =
+        Task.async(fn ->
+          Store.transaction(fn txn ->
+            :ok = OptimalEngine.Connectors.IngestFence.check_in(txn, fence)
+            send(test, :held)
+            Process.sleep(1_500)
+            {:ok, :done}
+          end)
+        end)
+
+      assert_receive :held, 5_000
+      started = System.monotonic_time(:millisecond)
+
+      assert {:ok, :second} =
+               Store.transaction(fn txn ->
+                 :ok = OptimalEngine.Connectors.IngestFence.check_in(txn, fence)
+                 {:ok, :second}
+               end)
+
+      assert System.monotonic_time(:millisecond) - started < 1_000
+      assert {:ok, :done} = Task.await(holder, 10_000)
+    end
+  end
+
+  describe "review 3: the periodic run's fallback" do
+    test "a run that ends normally is not logged as a failure", ctx do
+      probe = :ets.new(:periodic_probe2, [:public, :set])
+      :ets.insert(probe, [{:running, 0}, {:max, 0}, {:runs, 10}])
+      name = :"nats_slow_periodic_fb_#{ctx.n}"
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_supervised!(
+            {OptimalEngine.Storage.NATS.WorkQueue,
+             {__MODULE__.SlowPeriodic,
+              name: name,
+              connection: ctx.conn,
+              namespace: "optimal",
+              enabled: true,
+              interval_ms: 0,
+              probe: probe,
+              task_supervisor: :"no_such_supervisor_#{ctx.n}"}},
+            id: name
+          )
+
+          Process.sleep(400)
+          stop_supervised!(name)
+        end)
+
+      assert :ets.lookup_element(probe, :runs, 2) > 11
+      refute log =~ "periodic run failed"
     end
   end
 

@@ -281,12 +281,28 @@ defmodule OptimalEngine.Connectors.Rows do
 
           record(tenant_id, "connector.deleted", id, row.kind, row.workspace_id, opts, %{})
 
-          # What it queued on NATS and intake has not taken yet goes with it.
+          # What it queued on NATS and intake has not taken yet goes with it,
+          # and a package a fenced ingest of it left (no context or claim holds it).
           OptimalEngine.Storage.NATS.IntakeQueue.forget_connector(tenant_id, id)
+          forget_unheld_packages(tenant_id, id)
           :ok
         end
       end
     end
+  end
+
+  defp forget_unheld_packages(tenant_id, id) do
+    _ =
+      OptimalEngine.MemoryCore.Store.delete_unheld_connector_packages(
+        tenant_id: tenant_id,
+        connector_id: id
+      )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # Credentials removed by a change leave nothing behind in OpenBao. The row
