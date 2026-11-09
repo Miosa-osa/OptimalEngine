@@ -12,6 +12,7 @@ defmodule OptimalEngine.Analyses do
   | `storage_usage` | the tenant | usage against the size profile (`OptimalEngine.Sizing`) with the resize advice |
   | `retention_sweep` | the tenant | applies the tenant's retention policies; legal holds win |
   | `analytics_export` | each workspace, while `OPTIMAL_ANALYTICS_PATH` is set | rebuilds the workspace's analytics Parquet files (`OptimalEngine.Analytics.Export`) |
+  | `analytics_engine_export` | the whole Engine, once (on the Engine's default workspace), while `OPTIMAL_ANALYTICS_PATH` is set | rebuilds the Engine-wide metrics file (`Export.run_engine/1`) and removes the analytics of workspaces that are no longer active (`Analytics.prune_removed/0`) |
 
   `schedule/1` enqueues each day's analyses once (an idempotency key per
   kind, workspace, and day); the worker (`Analyses.Worker`) drains them.
@@ -39,7 +40,7 @@ defmodule OptimalEngine.Analyses do
   alias OptimalEngine.Workspace
 
   @kinds ~w(promises workspace_population meeting_archive file_audit storage_usage retention_sweep
-            analytics_export)
+            analytics_export analytics_engine_export)
   @tenant_kinds ~w(file_audit storage_usage retention_sweep)
   @meeting_connectors ~w(zoom teams fathom)
 
@@ -68,8 +69,18 @@ defmodule OptimalEngine.Analyses do
           [tenant_id]
       end
 
+    # The Engine-wide export runs once per Engine, on the Engine's default
+    # workspace, whatever workspaces any tenant has: with every tenant, or with
+    # the default workspace's own tenant.
+    engine =
+      if DuckDB.configured?() and
+           Keyword.get(opts, :tenant_id) in [nil, Workspace.tenant_of(Workspace.default_id())],
+         do: [{Workspace.default_id(), "analytics_engine_export"}],
+         else: []
+
     tenant_ids
     |> Enum.flat_map(&due/1)
+    |> Kernel.++(engine)
     |> Enum.count(fn {workspace_id, kind} ->
       match?(
         {:ok, _},
@@ -303,6 +314,24 @@ defmodule OptimalEngine.Analyses do
 
       {:ok, "Analytics exported at #{result.exported_at}: #{rows} rows.",
        json_safe(Map.delete(result, :path))}
+    end
+  end
+
+  # The prune runs first and on its own: an export that cannot run (no duckdb,
+  # a failed conversion) never keeps a removed workspace's files another day.
+  defp analyze("analytics_engine_export", _tenant_id, _workspace_id, _payload) do
+    pruned =
+      case OptimalEngine.Analytics.prune_removed() do
+        {:ok, counts} -> counts
+        {:error, reason} -> %{error: inspect(reason)}
+      end
+
+    with {:ok, result} <- AnalyticsExport.run_engine() do
+      rows = Enum.map_join(result.datasets, ", ", fn {name, %{rows: n}} -> "#{name} #{n}" end)
+
+      {:ok,
+       "Engine analytics exported at #{result.exported_at}: #{rows} rows; pruned #{inspect(pruned)}.",
+       json_safe(result |> Map.delete(:path) |> Map.put(:pruned, pruned))}
     end
   end
 

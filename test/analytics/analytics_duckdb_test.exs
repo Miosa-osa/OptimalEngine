@@ -182,4 +182,39 @@ defmodule OptimalEngine.AnalyticsDuckDBTest do
                "SELECT count(*) AS n FROM read_parquet(#{Analytics.literal(Path.join(dir, "metrics.parquet"))})"
              )
   end
+
+  test "the Engine-wide metrics are Parquet DuckDB reads, and neither side reads the other's",
+       ctx do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO metric_samples (tenant_id, workspace_id, metric_name, metric_kind, value, labels, recorded_at) VALUES ('default', 'engine', 'optimal_engine.search.query', 'counter', 7.0, '{}', '2026-11-03 10:00:00')",
+        []
+      )
+
+    {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+    assert {:ok, result} = Export.run_engine()
+    assert result.datasets["metrics"].rows >= 1
+
+    engine = Analytics.engine_dir(ctx.root)
+    assert File.read!(Path.join(engine, "metrics.parquet")) |> binary_part(0, 4) == "PAR1"
+
+    assert {:ok, %{rows: rows}} =
+             Analytics.query_engine(%{
+               "dataset" => "metrics",
+               "metric" => "optimal_engine.search.query",
+               "from" => "2026-11-03",
+               "to" => "2026-11-04"
+             })
+
+    assert [%{"metric_name" => "optimal_engine.search.query", "samples" => 1}] = rows
+
+    {:ok, config} = DuckDB.config()
+    workspace = Analytics.workspace_dir(ctx.root, ctx.workspace)
+
+    read =
+      &"SELECT count(*) AS n FROM read_parquet(#{Analytics.literal(Path.join(&1, "metrics.parquet"))})"
+
+    assert {:error, {:exit, _, _}} = Analytics.run_locked(config, engine, read.(workspace))
+    assert {:error, {:exit, _, _}} = Analytics.run_locked(config, workspace, read.(engine))
+  end
 end

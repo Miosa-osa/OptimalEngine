@@ -8,6 +8,12 @@ defmodule OptimalEngine.API.AnalyticsAPI do
   | --- | --- |
   | `GET /api/analytics?workspace=` | read |
   | `GET /api/analytics/query?workspace=&dataset=&bucket=&from=&to=&limit=&<filter>=` | read |
+  | `GET /api/analytics/engine` | admin, on a key not restricted to named workspaces |
+  | `GET /api/analytics/engine/query?dataset=metrics&bucket=&from=&to=&limit=&metric=` | admin, on a key not restricted to named workspaces |
+
+  The two Engine routes read the Engine-wide metrics (`Analytics.engine_status/0`,
+  `Analytics.query_engine/1`): the Engine's own samples, kept to the metric
+  names it declares, with no workspace or tenant in them.
 
   Rebuilding the files is the `analytics_export` analysis
   (`POST /api/analyses/run`, admin).
@@ -50,10 +56,44 @@ defmodule OptimalEngine.API.AnalyticsAPI do
     end
   end
 
+  @doc "`GET /api/analytics/engine`: what the Engine-wide metrics hold."
+  def engine_status(conn) do
+    if operator?(conn),
+      do: json(conn, 200, Map.put(Analytics.engine_status(), :scope, "engine")),
+      else: operator_only(conn)
+  end
+
+  @doc "`GET /api/analytics/engine/query`: the metrics question over the Engine-wide metrics."
+  def engine_query(conn) do
+    if operator?(conn) do
+      conn = fetch_query_params(conn)
+      reply(conn, Analytics.query_engine(conn.query_params), &Map.put(&1, :scope, "engine"))
+    else
+      operator_only(conn)
+    end
+  end
+
+  # The Engine-wide counters span every tenant: they are the Engine operator's
+  # (`OptimalEngine.API.Actor.engine_operator?/1`, an admin key of the default
+  # tenant whose workspace scope is `*`), not any tenant's admin.
+  defp operator?(conn), do: OptimalEngine.API.Actor.engine_operator?(conn)
+
+  defp operator_only(conn) do
+    json(conn, 403, %{
+      error: "operator_only",
+      message:
+        "the Engine-wide analytics need an admin key of the default tenant whose workspace scope is *"
+    })
+  end
+
   defp answer(conn, workspace) do
-    case Analytics.query(workspace, conn.query_params) do
+    reply(conn, Analytics.query(workspace, conn.query_params), &Map.put(&1, :workspace, workspace))
+  end
+
+  defp reply(conn, result, label) do
+    case result do
       {:ok, answer} ->
-        json(conn, 200, Map.put(answer, :workspace, workspace))
+        json(conn, 200, label.(answer))
 
       {:error, {:invalid_parameter, name, expected}} ->
         json(conn, 400, %{error: "invalid_parameter", parameter: name, expected: expected})

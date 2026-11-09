@@ -633,7 +633,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | `nats_jetstream` | Wired | The probe and the proof, a supervised JetStream client that reconnects with backoff, and with `OPTIMAL_NATS_FLOWS` the change ledger published as a stream per workspace subject, background jobs dispatched through a work queue, and connector intake queued | Replication between Engines does not use it (see "Replication over NATS: not implemented") |
 | `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
-| `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`), the proof (a Parquet file written and read back), the daily Parquet export of each workspace's metrics, sync runs, ledger and usage, and the read-only `GET /api/analytics/query` over them (see [DuckDB And Parquet Analytics](#duckdb-and-parquet-analytics)) | Arbitrary SQL; Engine-wide metrics; any dataset beyond the four |
+| `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`), the proof (a Parquet file written and read back), the daily Parquet export of each workspace's metrics, sync runs, ledger and usage, and the read-only `GET /api/analytics/query` over them, and the Engine-wide metrics behind admin-only routes (see [DuckDB And Parquet Analytics](#duckdb-and-parquet-analytics)) | Arbitrary SQL; any dataset beyond the four, and beyond `metrics` for the Engine |
 | `openbao` | Wired, in the data path | Secret references for the backup, authority, connector, S3, Qdrant, Valkey and NATS credentials; connector credentials kept in KV instead of the database (opt in, not in Engine backups); backup data keys wrapped by transit beside `OPTIMAL_BACKUP_KEY`; the probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` ([OpenBao](#openbao)) | PKI; the OpenBao token itself still comes from the environment; a peer key is a value sealed with `CONNECTOR_KEY` in the database, never a reference |
 | `fractal` | Declared, no adapter yet | | Everything |
 
@@ -661,7 +661,8 @@ The `analytics_export` analysis (`OptimalEngine.Analytics.Export`) writes one di
 No payload, entity id, run message, principal or target leaves the store: the ledger and usage files hold counts.
 Every export starts again from the store, a page at a time, into a staging directory beside the files; the files are moved into place only when every dataset converted, so a failed export leaves the previous files as they were.
 Deleting the directory loses nothing; the next export writes it again.
-Archiving a workspace removes its directory, and so does a data steward rename for the id the rows moved away from.
+Archiving a workspace removes its directory, and so do a data steward rename (for the id the rows moved away from), a finished move (`WorkspaceBundle.finalize_move/4`, reported as `analytics_purged`) and a discarded import that removes the workspace record.
+Whatever else takes a workspace out of the active set (a row deleted by hand, a purge that failed) is caught by the daily prune (`Analytics.prune_removed/1`, run by `analytics_engine_export` before, and whatever happens to, its export), which removes the directory of every workspace the store says is absent or not active; a lookup that fails is no answer, and its directory is kept for the next prune.
 
 The export runs once a day for every active workspace while `OPTIMAL_ANALYTICS_PATH` is set, through the analyses worker (`OPTIMAL_ANALYSES_INTERVAL_MS`, see [Operating layer](operating-layer.md)), and on demand:
 
@@ -670,6 +671,19 @@ curl -s -X POST "$URL/api/analyses/run" -H "authorization: Bearer $ADMIN_KEY" \
   -H 'content-type: application/json' -d '{"workspace": "acme:ops", "kind": "analytics_export"}'
 optimal analytics export acme:ops
 ```
+
+### Engine-wide metrics
+
+The `analytics_engine_export` analysis writes `<OPTIMAL_ANALYTICS_PATH>/engine/metrics.parquet`: the samples the Engine records about itself (`metric_samples` under the `engine` scope, `OptimalEngine.Telemetry.History`), in the same columns as a workspace's `metrics.parquet`.
+It runs once a day for the whole Engine (as a job of the Engine's default workspace, whatever workspaces the tenants have) while `OPTIMAL_ANALYTICS_PATH` is set, and prunes removed workspaces first.
+What it may hold is fixed in code, so no workspace's data can reach it:
+
+* rows of the `engine` scope only, never a workspace's samples;
+* only the metric names `OptimalEngine.Telemetry` declares (`Analytics.engine_metric_names/0`), so a sample written under the Engine scope with any other name is left out;
+* of the labels, only `quantile`.
+
+The directory sits beside `workspaces/`, never inside it: a workspace query is locked to its own directory and cannot read it, and an Engine query is locked to `engine/` and cannot read a workspace's.
+`GET /api/analytics/engine` (status) and `GET /api/analytics/engine/query?dataset=metrics` (the `metrics` question, with the parameters below) are the Engine operator's: the `admin` grant on a key of the default tenant whose workspace scope is `*` (or the local operator on an Engine that requires no key). A key restricted to named workspaces is `403 workspace_scope_denied`, another tenant's admin `403 operator_only`, and so is running `analytics_engine_export` through `POST /api/analyses/run`.
 
 ### The query
 

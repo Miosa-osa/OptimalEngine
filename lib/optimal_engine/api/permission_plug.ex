@@ -159,6 +159,7 @@ defmodule OptimalEngine.API.PermissionPlug do
         String.starts_with?(path, "/api/topology") or
         String.starts_with?(path, "/api/bundles") or
         String.starts_with?(path, "/api/federation/peers") or
+        match?(["api", "analytics", "engine" | _], path_info) or
         workspace_bundle_path?(path_info) or
           String.starts_with?(path, "/api/maintenance/") ->
         "admin"

@@ -69,6 +69,43 @@ defmodule OptimalEngine.Analytics.Export do
 
       try do
         export(config, tenant_id, workspace_id, dir, staging)
+      rescue
+        # A purge beside the export (an archive, a discarded import) removed
+        # the directory: the export has nothing to write into.
+        error in [File.Error, File.RenameError, File.CopyError] ->
+          Logger.warning(
+            "[Analytics] export of #{workspace_id} lost its directory: #{error.reason}"
+          )
+
+          {:error, {:export_failed, :directory_removed}}
+      after
+        File.rm_rf(staging)
+      end
+    end
+  end
+
+  @doc """
+  Exports the Engine-wide metrics: the samples the Engine records about itself
+  (`OptimalEngine.Telemetry.History`, scope `"engine"`), into
+  `OptimalEngine.Analytics.engine_dir/1`, a directory outside every
+  workspace's. Only the metric names `OptimalEngine.Telemetry` declares are
+  kept, and of their labels only `quantile`: a sample written under the
+  Engine scope with any other name or label is left out, so nothing a
+  workspace wrote can reach the file. Returns what `run/3` returns, or
+  `:not_configured` and `:not_installed`.
+  """
+  @spec run_engine(keyword()) :: {:ok, map()} | {:error, term()}
+  def run_engine(opts \\ []) do
+    with {:ok, config} <- DuckDB.config(opts),
+         true <- config.executable != nil || {:error, :not_installed} do
+      dir = Analytics.engine_dir(config.path)
+      staging = Path.join(dir, ".staging-" <> random())
+      File.mkdir_p!(staging)
+
+      try do
+        export(config, ["metrics"], dir, staging, %{scope: "engine"}, fn dataset, ndjson ->
+          write_engine_rows(dataset, ndjson)
+        end)
       after
         File.rm_rf(staging)
       end
@@ -78,9 +115,15 @@ defmodule OptimalEngine.Analytics.Export do
   defp export(config, tenant_id, workspace_id, dir, staging) do
     local = replica_id()
 
+    export(config, Analytics.datasets(), dir, staging, %{workspace_id: workspace_id}, fn
+      dataset, ndjson -> write_rows(dataset, tenant_id, workspace_id, local, ndjson)
+    end)
+  end
+
+  defp export(config, datasets, dir, staging, manifest_scope, write) do
     results =
-      Map.new(Analytics.datasets(), fn dataset ->
-        {dataset, stage(config, dataset, tenant_id, workspace_id, local, staging)}
+      Map.new(datasets, fn dataset ->
+        {dataset, stage(config, dataset, staging, write)}
       end)
 
     failed = for {dataset, {:error, reason}} <- results, into: %{}, do: {dataset, reason}
@@ -98,12 +141,23 @@ defmodule OptimalEngine.Analytics.Export do
           {dataset, %{rows: rows}}
         end)
 
-      manifest = %{workspace_id: workspace_id, exported_at: exported_at, datasets: datasets}
-      :ok = AtomicFile.write(Path.join(dir, Analytics.manifest_name()), Jason.encode!(manifest))
-      {:ok, %{path: dir, exported_at: exported_at, datasets: datasets}}
+      manifest = Map.merge(manifest_scope, %{exported_at: exported_at, datasets: datasets})
+
+      # A purge beside the export may have removed the directory by now.
+      case AtomicFile.write(Path.join(dir, Analytics.manifest_name()), Jason.encode!(manifest)) do
+        :ok ->
+          {:ok, %{path: dir, exported_at: exported_at, datasets: datasets}}
+
+        {:error, reason} ->
+          Logger.warning(
+            "[Analytics] export of #{manifest_scope[:workspace_id] || "the Engine"} could not write its manifest: #{inspect(reason)}"
+          )
+
+          {:error, {:export_failed, {:manifest, reason}}}
+      end
     else
       Logger.warning(
-        "[Analytics] export of #{workspace_id} failed for #{Enum.join(Map.keys(failed), ", ")}"
+        "[Analytics] export of #{manifest_scope[:workspace_id] || "the Engine"} failed for #{Enum.join(Map.keys(failed), ", ")}"
       )
 
       {:error, {:export_failed, failed}}
@@ -111,11 +165,11 @@ defmodule OptimalEngine.Analytics.Export do
   end
 
   # The dataset's rows into NDJSON, then DuckDB into Parquet. Returns the row count.
-  defp stage(config, dataset, tenant_id, workspace_id, local, staging) do
+  defp stage(config, dataset, staging, write) do
     ndjson = Path.join(staging, dataset <> ".ndjson")
     parquet = Path.join(staging, dataset <> ".parquet")
 
-    with :ok <- write_rows(dataset, tenant_id, workspace_id, local, ndjson),
+    with :ok <- write.(dataset, ndjson),
          {:ok, _} <-
            Analytics.run_locked(config, staging, convert(dataset, ndjson, parquet),
              timeout: @convert_timeout,
@@ -147,6 +201,53 @@ defmodule OptimalEngine.Analytics.Export do
         IO.binwrite(file, Enum.map(rows, &[Jason.encode!(row(dataset, &1, local)), ?\n]))
       end)
     end)
+  end
+
+  # The Engine's own samples, kept to the declared metric names and the
+  # quantile label (`run_engine/1`).
+  defp write_engine_rows("metrics", path) do
+    names = Analytics.engine_metric_names()
+
+    File.open!(path, [:write, :binary], fn file ->
+      engine_page(0, fn rows ->
+        lines =
+          for [_id, _at, name, _kind, _value, _labels] = row <- rows, name in names do
+            [Jason.encode!(row("metrics", engine_labels(row), nil)), ?\n]
+          end
+
+        IO.binwrite(file, lines)
+      end)
+    end)
+  end
+
+  defp engine_labels([id, at, name, kind, value, labels]) do
+    kept =
+      case Jason.decode(labels || "{}") do
+        {:ok, %{"quantile" => quantile}} when is_binary(quantile) -> %{"quantile" => quantile}
+        _ -> %{}
+      end
+
+    [id, at, name, kind, value, Jason.encode!(kept)]
+  end
+
+  defp engine_page(cursor, fun) do
+    case Store.raw_query(
+           """
+           SELECT id, recorded_at, metric_name, metric_kind, value, labels FROM metric_samples
+           WHERE workspace_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3
+           """,
+           [Analytics.engine_scope(), cursor, @page]
+         ) do
+      {:ok, []} ->
+        :ok
+
+      {:ok, rows} ->
+        fun.(rows)
+        if length(rows) < @page, do: :ok, else: engine_page(hd(List.last(rows)), fun)
+
+      {:error, reason} ->
+        {:error, {:source, reason}}
+    end
   end
 
   # Reads the dataset's source a page at a time after `cursor`, handing each page to `fun`.
