@@ -92,12 +92,9 @@ At 70 percent of any limit the recommendation is `resize` to the next profile, w
 
 The recommendation names a provider whether or not the Engine can use it, so check `GET /api/storage/providers` (`adapter_implemented`) before acting on it.
 
-A Postgres build gives up replication.
-Enabling sync is refused by name on it.
-Backups, offsite copies and restores work on it: a backup is a SQLite file holding one consistent snapshot of the store.
-Search, context assembly, and asking work on it, with FTS5's tokens and BM25 ranking.
-An existing Engine's data moves to Postgres with `mix optimal.postgres.migrate`, which commits only a copy it has verified.
-Choose it for write concurrency only when you can live without those features ([PostgreSQL Provider](postgres-provider.md)).
+A Postgres build runs every feature of the store: replication (with SQLite and PostgreSQL Engines alike), app data collections, backups, offsite copies and restores (a backup is a SQLite file holding one consistent snapshot of the store), and search, context assembly and asking, with FTS5's tokens and BM25 ranking.
+Only the ETS hot cache is off, because one Engine's cache cannot see another's writes.
+An existing Engine's data moves to Postgres with `mix optimal.postgres.migrate`, which commits only a copy it has verified ([PostgreSQL Provider](postgres-provider.md)).
 
 A platform reads the recommendation to show usage and to resize.
 

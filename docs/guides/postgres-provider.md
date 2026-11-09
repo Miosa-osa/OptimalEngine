@@ -393,7 +393,7 @@ What the migration does:
 6. After the commit, `contexts_fts` and `memories_fts` are rebuilt from the copied rows, so search ranks as FTS5 ranked on the source.
 
 A table or column this build does not know is refused (`{:unknown_tables, ...}`, `{:unknown_columns, ...}`) unless `--ignore-unknown`, which leaves it behind and lists it in the report.
-An Engine that uses replication or app data collections is refused (`{:unsupported_in_use, features}`), because the PostgreSQL store does not start with them.
+The copy takes an Engine that has not enabled replication or app data collections: both work on a PostgreSQL store, but their state (the replication ledger's capture, the collections' own tables) is not part of this copy, so an Engine using either is refused before anything is copied (`{:unsupported_in_use, features}`). Turn them on again on the PostgreSQL Engine after the move.
 The connection URL is never printed; the report names tables, row counts and checksums.
 
 Then switch:

@@ -12,9 +12,9 @@
 #   this file the stock image talks to.
 #
 # What it cannot use:
-#   PostgreSQL is the store of an engine started with OPTIMAL_STORE=postgres,
-#   which the stock image is not. Its service is behind the separate
-#   "postgres" profile.
+#   PostgreSQL is the store of an engine started with OPTIMAL_STORE=postgres
+#   (the stock image runs either store; it starts on SQLite). Its service is
+#   behind the separate "postgres" profile.
 #   NATS JetStream, Valkey, Qdrant and OpenBao have adapters that check and
 #   prove each service, and are commented out below. Configured, Valkey
 #   carries the rate limits and caches, OpenBao the secret references, NATS
@@ -58,9 +58,9 @@ services:
       - optimal_garage_meta:/var/lib/garage/meta
       - optimal_garage_data:/var/lib/garage/data
 
-  # PostgreSQL: for a custom engine build made with OPTIMAL_STORE=postgres.
-  # That build refuses full-text search, replication and app data collections
-  # (docs/guides/postgres-provider.md). Start it with --profile postgres.
+  # PostgreSQL: for an engine started with OPTIMAL_STORE=postgres, which runs
+  # every store feature but the ETS hot cache (docs/guides/postgres-provider.md).
+  # Start it with --profile postgres.
   postgres:
     profiles: ["postgres"]
     image: ${POSTGRES_IMAGE:-postgres:17-alpine}

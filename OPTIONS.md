@@ -71,7 +71,7 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OPTIMAL_STORE` | `sqlite` | Read when the Engine boots. `sqlite` or `postgres`: which canonical store the Engine runs; one build runs either. See `docs/guides/postgres-provider.md` for what a PostgreSQL store does not do yet. Any other value stops the boot. |
+| `OPTIMAL_STORE` | `sqlite` | Read when the Engine boots. `sqlite` or `postgres`: which canonical store the Engine runs; one build runs either. See `docs/guides/postgres-provider.md` for how a PostgreSQL store differs. Any other value stops the boot. |
 | `OPTIMAL_POSTGRES_URL` | none | Connection URL of a Postgres build, read when the store starts. Never logged or returned. |
 | `OPTIMAL_POSTGRES_SCHEMA` | `public` | Schema a Postgres build keeps its tables in; use one per Engine. |
 | `OPTIMAL_S3_ENDPOINT` | none | S3-compatible endpoint base URL. |
