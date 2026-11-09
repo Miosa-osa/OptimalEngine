@@ -35,6 +35,14 @@ defmodule OptimalEngine.Storage.NATS.JobQueue do
   once. So a job queued during an outage does not wait behind every older
   unfinished job to be announced.
 
+  What this does not cover: the kept announcements are in memory, so one the
+  list evicted (past 10,000) or that an Engine restart lost, for a job that is
+  not among the 5,000 oldest unfinished ones, is not announced until a later
+  sweep reaches it; its worker still runs it at its next poll of the `jobs`
+  table, as without NATS. An announcement the server refuses for good (larger
+  than its `max_payload`, or refused by the stream) is dropped with a warning
+  instead of kept, since it would fail the same way on every reconnect.
+
   Woken on their kind: `reindex` (`Reindex.Worker`), `import.*`
   (`Imports.Worker`), `analysis.*` (`Analyses.Worker`) and `maintenance.*`
   (`Maintenance.Worker`), each only while its own interval is above zero, so
