@@ -322,8 +322,12 @@ defmodule OptimalEngine.Analyses do
   defp analyze("analytics_engine_export", _tenant_id, _workspace_id, _payload) do
     pruned =
       case OptimalEngine.Analytics.prune_removed() do
-        {:ok, counts} -> counts
-        {:error, reason} -> %{error: inspect(reason)}
+        {:ok, counts} ->
+          counts
+
+        {:error, reason} ->
+          Logger.warning("[Analyses] analytics prune failed: #{inspect(reason)}")
+          %{error: inspect(reason)}
       end
 
     with {:ok, result} <- AnalyticsExport.run_engine() do
