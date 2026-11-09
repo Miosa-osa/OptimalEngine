@@ -122,6 +122,28 @@ jobs:
             _build
           key: ${{ runner.os }}-${{ steps.image.outputs.id }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
 
+      # The analytics lockdown tests (tagged :duckdb, test/analytics/
+      # analytics_duckdb_test.exs) run against the DuckDB release the Engine
+      # image and the MIOSA guest ship, pinned by the same SHA-256 as
+      # deploy/Dockerfile.engine. OPTIMAL_TEST_DUCKDB set to a missing or
+      # broken executable fails the run (test/test_helper.exs), so the tests
+      # can never be skipped here without the run saying so.
+      - name: Install DuckDB 1.3.2
+        env:
+          DUCKDB_VERSION: "1.3.2"
+          DUCKDB_SHA256_AMD64: 6156fb4e80828f04f0dde5c33d343ba230fddae0c4bc8f376e3590d255ffb999
+        run: |
+          set -euo pipefail
+          wget -q --tries=5 --waitretry=5 --retry-connrefused --retry-on-http-error=502,503,504 \
+            -O "$RUNNER_TEMP/duckdb.gz" \
+            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-linux-amd64.gz"
+          echo "${DUCKDB_SHA256_AMD64}  $RUNNER_TEMP/duckdb.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/duckdb"
+          gunzip -c "$RUNNER_TEMP/duckdb.gz" > "$RUNNER_TEMP/duckdb/duckdb"
+          chmod 0755 "$RUNNER_TEMP/duckdb/duckdb"
+          "$RUNNER_TEMP/duckdb/duckdb" --version
+          echo "OPTIMAL_TEST_DUCKDB=$RUNNER_TEMP/duckdb/duckdb" >> "$GITHUB_ENV"
+
       - name: Verify release version
         run: mix run --no-start scripts/check_release_version.exs
 
