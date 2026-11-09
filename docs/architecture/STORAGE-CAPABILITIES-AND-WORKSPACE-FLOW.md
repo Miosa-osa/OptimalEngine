@@ -81,7 +81,7 @@ This tier has no external service dependency and remains the preferred shape for
 
 A self-hosted team grows onto providers only when one Engine instance is no longer enough.
 Garage or another S3-compatible object store is wired for assets and offsite backups.
-PostgreSQL is wired but partial: a compile-time build that refuses replication and app data collections.
+PostgreSQL is wired but partial: a compile-time build that refuses replication.
 Valkey, NATS JetStream and OpenBao can be provisioned next to the Engine and each has an adapter: with `OPTIMAL_VALKEY_URL` set the inventory reports it `available` and the storage audit proves it with a round trip.
 
 These services are optional.
@@ -146,7 +146,7 @@ A provider has one of six lifecycle states.
 `adapter_missing` means the engine ships no adapter for the provider.
 It outranks configuration and probes: a reachable endpoint the engine cannot talk to is not available storage.
 Every provider reports `adapter_implemented`.
-The embedded local providers, `s3`, and `postgres` have adapters (`postgres` is partial: a compile-time build that refuses replication and app data collections).
+The embedded local providers, `s3`, and `postgres` have adapters (`postgres` is partial: a compile-time build that refuses replication).
 `qdrant`, `duckdb`, and `openbao` have adapters that check and prove the service, and no Engine feature uses them yet; `nats_jetstream` has one too and carries the flows named in `OPTIMAL_NATS_FLOWS`; `valkey` carries the shared rate limits and caches when it is configured; `fractal` has none.
 
 `active` means a default local provider is currently part of the running engine.

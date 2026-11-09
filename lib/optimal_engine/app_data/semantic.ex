@@ -243,7 +243,7 @@ defmodule OptimalEngine.AppData.Semantic do
         case embed(embedder, text, model, 15_000, cache_scope(c)) do
           {:ok, vector} ->
             Store.raw_execute(
-              "INSERT OR REPLACE INTO data_embeddings (collection_id, record_id, model, dimensions, embedding, content_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              embedding_write(),
               [
                 c.id,
                 record["id"],
@@ -308,6 +308,18 @@ defmodule OptimalEngine.AppData.Semantic do
     if Schema.semantic_fields(c.schema) == [],
       do: {:error, {:validation, ["collection #{c.name} has no semantic search fields"]}},
       else: :ok
+  end
+
+  # data_embeddings has one key and nothing points at it, so replacing the row
+  # by its key is the upsert PostgreSQL writes; SQLite keeps its own statement.
+  defp embedding_write do
+    if OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres) do
+      "INSERT INTO data_embeddings (collection_id, record_id, model, dimensions, embedding, content_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) " <>
+        "ON CONFLICT (collection_id, record_id) DO UPDATE SET model = excluded.model, dimensions = excluded.dimensions, " <>
+        "embedding = excluded.embedding, content_hash = excluded.content_hash, updated_at = excluded.updated_at"
+    else
+      "INSERT OR REPLACE INTO data_embeddings (collection_id, record_id, model, dimensions, embedding, content_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    end
   end
 
   defp rebuild_from(embedder, model, c, after_rowid, counts) do

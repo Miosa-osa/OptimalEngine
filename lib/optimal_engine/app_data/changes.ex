@@ -127,11 +127,11 @@ defmodule OptimalEngine.AppData.Changes do
   defp collection_allowed(scope, name), do: Scope.allow(scope, name, "read")
 
   defp collection_filter(_scope, name) when is_binary(name), do: {"collection = ?", [name]}
-  defp collection_filter(%Scope{collections: :all}, nil), do: {"1", []}
+  defp collection_filter(%Scope{collections: :all}, nil), do: {"(1 = 1)", []}
 
   defp collection_filter(%Scope{collections: names}, nil) do
     if "*" in names,
-      do: {"1", []},
+      do: {"(1 = 1)", []},
       else: {"collection IN (#{SQL.placeholders(length(names))})", names}
   end
 
@@ -145,7 +145,7 @@ defmodule OptimalEngine.AppData.Changes do
       {"(owner = ? OR op IN ('schema', 'drop') OR (owner IS NULL AND collection_id NOT IN (#{SQL.placeholders(length(owned))})))",
        [scope.owner | owned]}
     else
-      {"1", []}
+      {"(1 = 1)", []}
     end
   end
 

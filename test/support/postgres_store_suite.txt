@@ -73,3 +73,4 @@ test/memory/versioned_embeddings_test.exs
 test/retrieval/memory_ranking_test.exs
 test/topology/workspace_surface_spine_test.exs
 test/auth/api_key_test.exs
+test/app_data

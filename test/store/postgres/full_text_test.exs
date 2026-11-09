@@ -266,6 +266,87 @@ defmodule OptimalEngine.Store.Postgres.FullTextTest do
              )
   end
 
+  test "an index created at runtime ranks as an FTS5 external-content table, diacritics folded" do
+    rows = [
+      {1, "Crème brûlée recipe", "dessert"},
+      {2, "creme brulee, the classic", "dessert classic"},
+      {3, "Ǖber ǘmlaut ṏver", "accents stacked"},
+      {4, "plain text row", "nothing"},
+      {5, "recipe recipe recipe", "dessert"}
+    ]
+
+    {:ok, _} =
+      PgStore.transaction(fn txn ->
+        with {:ok, _} <-
+               PgStore.txn_execute_native(
+                 txn,
+                 ~s[CREATE TABLE "fts_probe" ("_rowid" BIGINT PRIMARY KEY, "f_a" TEXT, "f_b" TEXT)]
+               ),
+             :ok <-
+               OptimalEngine.Store.Postgres.FullText.create_index(txn, %{
+                 name: "fts_probe_fts",
+                 table: "fts_probe",
+                 key: "_rowid",
+                 key_type: "bigint",
+                 columns: ["f_a", "f_b"],
+                 tokenize: "unicode61 remove_diacritics 2"
+               }) do
+          {:ok, :created}
+        end
+      end)
+
+    for {rowid, a, b} <- rows do
+      :ok =
+        PgStore.raw_execute(
+          ~s[INSERT INTO "fts_probe" ("_rowid", "f_a", "f_b") VALUES (?1, ?2, ?3)],
+          [
+            rowid,
+            a,
+            b
+          ]
+        )
+    end
+
+    db =
+      sqlite_index(
+        "CREATE VIRTUAL TABLE t USING fts5(id UNINDEXED, a, b, tokenize='unicode61 remove_diacritics 2')",
+        Enum.map(rows, fn {rowid, a, b} -> [Integer.to_string(rowid), a, b] end)
+      )
+
+    for query <- [
+          ~s("creme"),
+          ~s("brulee" OR "recipe"),
+          ~s("uber" "umlaut"),
+          ~s("des"*),
+          ~s("over")
+        ] do
+      {:ok, param} = FullText.query_json("unicode61 remove_diacritics 2", query)
+
+      {:ok, found} =
+        PgStore.raw_query("SELECT doc_key, score FROM optimal_fts_match('fts_probe_fts', ?1)", [
+          param
+        ])
+
+      assert_same_scores(sqlite_scores(db, query), Map.new(found, &List.to_tuple/1), query)
+    end
+
+    # Dropped with its table, it leaves nothing behind.
+    {:ok, _} =
+      PgStore.transaction(fn txn ->
+        with :ok <-
+               OptimalEngine.Store.Postgres.FullText.drop_index(txn, "fts_probe_fts", "fts_probe"),
+             {:ok, _} <- PgStore.txn_execute_native(txn, ~s[DROP TABLE "fts_probe"]) do
+          {:ok, :dropped}
+        end
+      end)
+
+    assert {:ok, [[0]]} =
+             PgStore.raw_query(
+               "SELECT COUNT(*) FROM optimal_fts_postings WHERE index_name = 'fts_probe_fts'",
+               []
+             )
+  end
+
   describe "query syntax" do
     test "the forms the engine builds parse" do
       assert {:ok, %{any: true, phrases: [%{text: "a"}, %{text: "b c"}]}} =

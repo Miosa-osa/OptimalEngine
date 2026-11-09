@@ -33,13 +33,13 @@ defmodule OptimalEngine.Store.Postgres do
 
   ## Features not on PostgreSQL
 
-  Replication, app data collections and the statements that use SQLite's
-  catalog or `rowid` are not on PostgreSQL yet; SQLite's JSON, date and text
-  functions run as PostgreSQL functions
+  Replication and the statements that use SQLite's catalog or `rowid` outside
+  their ported call sites are not on PostgreSQL yet; SQLite's JSON, date and
+  text functions run as PostgreSQL functions
   (`OptimalEngine.Store.Postgres.SQLiteFunctions`)
   (`OptimalEngine.Storage.Postgres.unavailable/0`). Each is refused by name
-  when used. A database that holds replication or app data collection data
-  stops the store from starting, rather than letting it run without them.
+  when used. A database that holds replication data stops the store from
+  starting, rather than letting it run without replicating.
 
   ## Differences from the SQLite store
 
@@ -171,12 +171,11 @@ defmodule OptimalEngine.Store.Postgres do
   end
 
   # Data of a feature this store cannot run (`Storage.Postgres.unavailable/0`)
-  # means an engine moved here would silently stop replicating, or stop
-  # serving a collection; such an engine does not start.
+  # means an engine moved here would silently stop replicating; such an engine
+  # does not start.
   @in_use [
     {"replication",
-     "SELECT 1 FROM sync_workspaces UNION ALL SELECT 1 FROM sync_peers WHERE status <> 'disabled'"},
-    {"app_data_collections", "SELECT 1 FROM data_collections"}
+     "SELECT 1 FROM sync_workspaces UNION ALL SELECT 1 FROM sync_peers WHERE status <> 'disabled'"}
   ]
 
   defp nothing_unsupported_in_use do
@@ -202,7 +201,7 @@ defmodule OptimalEngine.Store.Postgres do
   def handle_info(:full_text, state) do
     # Background indexing only shortens the refresh a search makes itself;
     # a failure here is retried on the next tick.
-    _ = FullText.refresh(@pool, Map.keys(OptimalEngine.Store.FullText.indexes()))
+    with {:ok, names} <- FullText.names(@pool), do: FullText.refresh(@pool, names)
     schedule_full_text(state.opts)
     {:noreply, state}
   end
@@ -524,19 +523,35 @@ defmodule OptimalEngine.Store.Postgres do
 
   @index_names Map.keys(OptimalEngine.Store.FullText.indexes())
   @index_reference Regex.compile!("\\b(" <> Enum.join(@index_names, "|") <> ")\\b")
+  @match_reference ~r/\boptimal_fts_match\(\s*'([^']+)'/
 
+  # The engine's own indexes by name, and any index a statement matches with
+  # optimal_fts_match('<name>', ...), such as an app data collection's; a
+  # statement that names its index through a parameter refreshes them all.
   defp refresh_read_indexes(sql) do
-    case Regex.scan(@index_reference, sql, capture: :all_but_first) do
-      [] ->
-        if String.contains?(sql, "optimal_fts_match(") do
-          refresh_full_text(@index_names)
-        else
-          :ok
-        end
+    named = Regex.scan(@match_reference, sql, capture: :all_but_first)
 
-      found ->
-        found |> List.flatten() |> Enum.uniq() |> refresh_full_text()
+    cond do
+      named == [] and String.contains?(sql, "optimal_fts_match(") ->
+        with {:ok, names} <- FullText.names(@pool), do: refresh_full_text(names)
+
+      true ->
+        case Regex.scan(@index_reference, sql, capture: :all_but_first) ++ named do
+          [] -> :ok
+          found -> found |> List.flatten() |> Enum.uniq() |> refresh_full_text()
+        end
     end
+  end
+
+  @doc """
+  Runs a statement written for PostgreSQL inside a transaction, such as the
+  schema of an app data collection, which the store creates at runtime and
+  the SQLite migrations do not define.
+  """
+  @spec txn_execute_native(term(), String.t(), [term()]) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def txn_execute_native(txn, sql, params \\ []) do
+    with {:ok, %{num_rows: count}} <- txn_native(txn, sql, params), do: {:ok, count}
   end
 
   # ---------------------------------------------------------------------------

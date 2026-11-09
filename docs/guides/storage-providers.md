@@ -512,7 +512,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | SQLite, FTS5, embedded vectors, filesystem, ETS | Wired, the default | Everything the Engine stores | |
 | RocksDB | Wired, opt in | A persistent triple-store mirror of `graph_edges` (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`) | Falls back to ETS when the native library is missing |
 | `s3` (S3-compatible: Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Asset bytes, offsite backups, the probe and the placement reconciler | |
-| `postgres` | Wired, partial | The canonical relational store of a compile-time `OPTIMAL_STORE=postgres` build | Full-text search, replication, app data collections, and the engine's backup routes; moving an existing Engine to it |
+| `postgres` | Wired, partial | The canonical relational store of a compile-time `OPTIMAL_STORE=postgres` build | Replication and the engine's backup routes; moving an existing Engine to it |
 | `nats_jetstream` | Wired | The probe and the proof, a supervised JetStream client that reconnects with backoff, and with `OPTIMAL_NATS_FLOWS` the change ledger published as a stream per workspace subject, background jobs dispatched through a work queue, and connector intake queued | Replication between Engines does not use it (see "Replication over NATS: not implemented") |
 | `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
@@ -672,7 +672,7 @@ The scripts need a standalone Valkey (or Redis 7 or later); Valkey Cluster is no
 
 The Engine has no adapter for Fractal, and the provider inventory says so; NATS JetStream, Qdrant, OpenBao and DuckDB are reached and proved, but no Engine feature is served from them yet.
 Valkey carries the rate limits and caches listed under [Valkey](#valkey) and nothing durable.
-PostgreSQL holds the canonical relational store but not replication or app data collections, and moving an existing Engine's data to it (stage 4 of [PostgreSQL Provider](postgres-provider.md)) is not implemented.
+PostgreSQL holds the canonical relational store but not replication, and moving an existing Engine's data to it (stage 4 of [PostgreSQL Provider](postgres-provider.md)) is not implemented.
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.
 
 ## Related

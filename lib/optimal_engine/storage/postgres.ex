@@ -136,6 +136,15 @@ defmodule OptimalEngine.Storage.Postgres do
           "UPDATE with a conflict clause",
           "INSERT OR IGNORE with an explicit ON CONFLICT clause"
         ]
+      },
+      %{
+        feature: "app_data_collections",
+        how:
+          "a collection's table, indexes and columns are created and altered at runtime in " <>
+            "PostgreSQL DDL inside the collection's transaction, and its full-text index is a " <>
+            "posting list created at runtime and ranked as FTS5 ranks; the SQLite statements " <>
+            "(FTS5 tables, triggers, STRICT tables) stay refused as schema changes",
+        refused_as: ["schema change outside the migrations"]
       }
     ]
   end
@@ -156,16 +165,6 @@ defmodule OptimalEngine.Storage.Postgres do
           "change capture is SQLite triggers and applying reads SQLite's catalog; " <>
             "enabling, serving and applying sync are refused",
         refused_as: ["replication is not available on the PostgreSQL store"]
-      },
-      %{
-        feature: "app_data_collections",
-        reason:
-          "a collection creates a table, a full-text index and triggers at runtime; " <>
-            "creating one is refused",
-        refused_as: [
-          "app data collections are not available on the PostgreSQL store",
-          "schema change outside the migrations"
-        ]
       },
       %{
         feature: "runtime_schema_and_transactions",
