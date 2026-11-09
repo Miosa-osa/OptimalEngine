@@ -36,7 +36,7 @@ defmodule Mix.Tasks.Optimal.Connector do
   use Mix.Task
 
   alias OptimalEngine.Connectors
-  alias OptimalEngine.Connectors.{PullScheduler, Registry, Rows}
+  alias OptimalEngine.Connectors.{Credential, PullScheduler, Registry, Rows}
 
   @impl Mix.Task
   def run(args) do
@@ -192,6 +192,9 @@ defmodule Mix.Tasks.Optimal.Connector do
 
       {:error, :connector_key_missing} ->
         Mix.raise("Connector credentials require CONNECTOR_KEY (hex-encoded 32 bytes).")
+
+      {:error, reason} when reason in [:connector_key_invalid, :connector_key_unavailable] ->
+        Mix.raise("Connector credentials refused: #{Credential.describe(reason)}.")
 
       {:error, reason} ->
         Mix.raise("Connector registration failed: #{inspect(reason)}")

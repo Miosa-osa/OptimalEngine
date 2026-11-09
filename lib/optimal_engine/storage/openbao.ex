@@ -162,6 +162,55 @@ defmodule OptimalEngine.Storage.OpenBao do
   end
 
   @doc """
+  What OpenBao's `sys/health` says now, asked once on its own (never through
+  the outage window): `%{reachable:, initialized:, sealed:}`, each `nil` when
+  the answer did not say. A server that did not answer is `reachable: false`.
+  Carries no token, address or body. Never raises.
+  """
+  @spec server_state(keyword()) :: %{
+          reachable: boolean(),
+          initialized: boolean() | nil,
+          sealed: boolean() | nil
+        }
+  def server_state(opts \\ []) do
+    with {:ok, config} <- config(opts),
+         {:ok, status, body} when is_integer(status) <-
+           call(config, :get, "/v1/sys/health?standbyok=true", nil, opts) do
+      body = if is_map(body), do: body, else: %{}
+
+      %{
+        reachable: true,
+        initialized: boolean(body["initialized"], if(status == 501, do: false)),
+        sealed: boolean(body["sealed"], if(status == 503, do: true))
+      }
+    else
+      _ -> %{reachable: false, initialized: nil, sealed: nil}
+    end
+  end
+
+  defp boolean(value, _default) when is_boolean(value), do: value
+  defp boolean(_value, default), do: default
+
+  @doc """
+  What the last data-path call found, if it found OpenBao down and the
+  outage window (`OPTIMAL_OPENBAO_RETRY_AFTER_MS`) is still open for the
+  configured address: `:openbao_sealed` or `:openbao_unreachable`; `nil`
+  otherwise. Asks OpenBao nothing.
+  """
+  @spec last_outage() :: :openbao_sealed | :openbao_unreachable | nil
+  def last_outage do
+    now = System.monotonic_time(:millisecond)
+
+    with {:ok, config} <- config(),
+         {base_url, until, reason} when base_url == config.base_url and until > now <-
+           :persistent_term.get(@breaker_key, nil) do
+      reason
+    else
+      _ -> nil
+    end
+  end
+
+  @doc """
   What OpenBao says about the configured token: `{:ok, %{ttl: seconds,
   renewable: boolean}}`; a `ttl` of 0 never expires (a root token).
   """

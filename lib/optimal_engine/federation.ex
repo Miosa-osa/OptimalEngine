@@ -42,6 +42,12 @@ defmodule OptimalEngine.Federation do
       not is_binary(attrs["api_key"]) ->
         {:error, :api_key_required}
 
+      # The key arrives through the API and is stored: it is never an OpenBao
+      # reference, or its sender could have the Engine read any secret its
+      # token can and send it to the URL they chose.
+      OptimalEngine.Secrets.reference?(String.trim(attrs["api_key"])) ->
+        {:error, :api_key_reference_refused}
+
       share_up not in ["read", "none"] ->
         {:error, :invalid_share_up}
 
@@ -213,6 +219,9 @@ defmodule OptimalEngine.Federation do
   defp public_reason({:invalid_as_of, _value}), do: "invalid as_of"
   defp public_reason({:http_status, status}) when is_integer(status), do: "http status #{status}"
   defp public_reason(:peer_credential_unreadable), do: "peer credential unreadable"
+  defp public_reason(:connector_key_missing), do: "connector key missing"
+  defp public_reason(:connector_key_invalid), do: "connector key invalid"
+  defp public_reason(:connector_key_unavailable), do: "connector key unavailable"
   defp public_reason(_other), do: "unavailable"
 
   defp remote_search(peer, query, limit, as_of) do
@@ -249,10 +258,22 @@ defmodule OptimalEngine.Federation do
     end
   end
 
+  # The stored key is the key, a literal: a value stored from the API is never
+  # resolved as an OpenBao reference (one stored by an older build included).
+  # A master key that cannot be used is named as such, not as an unreadable
+  # credential.
   defp peer_key(%{credential: envelope}) do
     case Credential.decrypt(envelope) do
-      {:ok, %{"api_key" => key}} -> {:ok, key}
-      _ -> {:error, :peer_credential_unreadable}
+      {:ok, %{"api_key" => key}} when is_binary(key) ->
+        {:ok, key}
+
+      {:error, reason} ->
+        if Credential.key_error?(reason),
+          do: {:error, Credential.reason(reason)},
+          else: {:error, :peer_credential_unreadable}
+
+      _unreadable ->
+        {:error, :peer_credential_unreadable}
     end
   end
 
@@ -279,8 +300,8 @@ defmodule OptimalEngine.Federation do
 
         {:ok, %{workspace_id: attrs["workspace_id"], url: attrs["url"], share_up: share_up}}
 
-      {:error, _} ->
-        {:error, :connector_key_missing}
+      {:error, reason} ->
+        {:error, Credential.refusal(reason, "Federation peer refused")}
     end
   end
 end

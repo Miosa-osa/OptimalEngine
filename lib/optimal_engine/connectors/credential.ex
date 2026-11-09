@@ -11,9 +11,14 @@ defmodule OptimalEngine.Connectors.Credential do
 
   Phase 9 uses an `AES-256-GCM` key loaded from the `CONNECTOR_KEY`
   env var (hex-encoded 32 bytes), or from OpenBao when the variable is a
-  reference (`openbao:<path>#<field>`, `OptimalEngine.Secrets`). A reference
-  OpenBao cannot answer is treated as no key: every encrypt and decrypt is
-  refused (`:key_missing`) and the reason is logged, never a plaintext write.
+  reference (`openbao:<path>#<field>`, `OptimalEngine.Secrets`). Without a
+  usable key every encrypt and decrypt is refused, never a plaintext write,
+  and the reason says which way the key is unusable: `:key_missing` (not
+  set), `:key_invalid` (not 64 hex characters) or `:key_unavailable` (an
+  OpenBao reference OpenBao could not answer; `OptimalEngine.Secrets` logs
+  why). `refusal/1` turns each into the reason a caller returns
+  (`:connector_key_missing`, `:connector_key_invalid`,
+  `:connector_key_unavailable`) and logs it.
   With `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`, connector credentials themselves are kept in
   OpenBao rather than in this envelope (`OptimalEngine.Connectors.CredentialVault`). In production the master key should
   come from a KMS / HSM — this module exposes `encrypt/1` + `decrypt/1`
@@ -29,22 +34,27 @@ defmodule OptimalEngine.Connectors.Credential do
   `version = 1` today; any change bumps it and triggers rotation.
   """
 
+  require Logger
+
   @version 1
   @iv_size 12
   @tag_size 16
 
   @type plaintext :: map()
   @type envelope :: String.t()
+  @type key_error :: :key_missing | :key_invalid | :key_unavailable
+
+  @key_errors [:key_missing, :key_invalid, :key_unavailable]
 
   @doc """
-  Encrypt a credentials map. Returns a Base64-encoded envelope or
-  `{:error, :key_missing}` when the master key isn't configured.
+  Encrypt a credentials map. Returns a Base64-encoded envelope, or the
+  `t:key_error/0` that says why the master key cannot be used.
 
   `aad` is associated data the envelope is bound to: it is not stored, and the
   envelope opens only when the same data is given to `decrypt/2`. Binding it to
   the row it belongs to keeps a copy of the envelope from opening elsewhere.
   """
-  @spec encrypt(plaintext(), binary()) :: {:ok, envelope()} | {:error, :key_missing}
+  @spec encrypt(plaintext(), binary()) :: {:ok, envelope()} | {:error, key_error()}
   def encrypt(creds, aad \\ "") when is_map(creds) and is_binary(aad) do
     with {:ok, key} <- master_key() do
       iv = :crypto.strong_rand_bytes(@iv_size)
@@ -64,7 +74,7 @@ defmodule OptimalEngine.Connectors.Credential do
   """
   @spec decrypt(envelope(), binary()) ::
           {:ok, plaintext()}
-          | {:error, :key_missing | :bad_envelope | :unsupported_version | :auth_failed}
+          | {:error, key_error() | :bad_envelope | :unsupported_version | :auth_failed}
   def decrypt(envelope, aad \\ "") when is_binary(envelope) and is_binary(aad) do
     with {:ok, key} <- master_key(),
          {:ok, raw} <- Base.decode64(envelope) |> wrap_bad(),
@@ -84,25 +94,79 @@ defmodule OptimalEngine.Connectors.Credential do
     match?({:ok, _}, master_key())
   end
 
+  @doc """
+  Whether the master key can be used now: `:ok`, or the reason a caller
+  returns when it cannot (`:connector_key_missing`, `:connector_key_invalid`,
+  `:connector_key_unavailable`). Logs nothing beyond what
+  `OptimalEngine.Secrets` logs for a reference.
+  """
+  @spec key_status() ::
+          :ok
+          | {:error, :connector_key_missing | :connector_key_invalid | :connector_key_unavailable}
+  def key_status do
+    case master_key() do
+      {:ok, _key} -> :ok
+      {:error, reason} -> {:error, connector_reason(reason)}
+    end
+  end
+
+  @doc "True for the errors that mean the master key itself is unusable."
+  @spec key_error?(term()) :: boolean()
+  def key_error?(reason), do: reason in @key_errors
+
+  @doc """
+  The reason a caller returns when `encrypt/2` or `decrypt/2` failed with a
+  `t:key_error/0`, after logging which way the key is unusable. `what` says
+  what was refused ("Connector credentials refused", ...).
+  """
+  @spec refusal(key_error(), String.t()) ::
+          :connector_key_missing | :connector_key_invalid | :connector_key_unavailable
+  def refusal(reason, what) when reason in @key_errors do
+    Logger.error("#{what}: #{describe(reason)}.")
+    connector_reason(reason)
+  end
+
+  @doc """
+  The reason a caller returns for a `t:key_error/0`, without logging: for a
+  path that runs on a timer (a peer's sync cycle), whose status already
+  carries the reason.
+  """
+  @spec reason(key_error()) ::
+          :connector_key_missing | :connector_key_invalid | :connector_key_unavailable
+  def reason(reason) when reason in @key_errors, do: connector_reason(reason)
+
+  @doc "A sentence naming why the master key cannot be used. Never carries the key."
+  @spec describe(key_error() | atom()) :: String.t()
+  def describe(reason) when reason in [:key_missing, :connector_key_missing],
+    do: "CONNECTOR_KEY is not configured"
+
+  def describe(reason) when reason in [:key_invalid, :connector_key_invalid],
+    do: "CONNECTOR_KEY is not 64 hex characters (32 bytes)"
+
+  def describe(reason) when reason in [:key_unavailable, :connector_key_unavailable],
+    do:
+      "CONNECTOR_KEY is an OpenBao reference that could not be read (the log line before names why)"
+
   # ─── private ─────────────────────────────────────────────────────────────
+
+  defp connector_reason(:key_missing), do: :connector_key_missing
+  defp connector_reason(:key_invalid), do: :connector_key_invalid
+  defp connector_reason(:key_unavailable), do: :connector_key_unavailable
 
   defp master_key do
     case OptimalEngine.Secrets.fetch("CONNECTOR_KEY") do
       {:ok, hex} -> decode_master_key(hex)
-      {:error, _not_set_or_unavailable} -> {:error, :key_missing}
+      {:error, :not_set} -> {:error, :key_missing}
+      {:error, {:secret_unavailable, _name, _reason}} -> {:error, :key_unavailable}
     end
   end
 
   defp decode_master_key(hex) do
-    case hex do
-      hex when byte_size(hex) == 64 ->
-        case Base.decode16(hex, case: :mixed) do
-          {:ok, key} when byte_size(key) == 32 -> {:ok, key}
-          _ -> {:error, :key_missing}
-        end
-
-      _ ->
-        {:error, :key_missing}
+    with true <- byte_size(hex) == 64,
+         {:ok, key} when byte_size(key) == 32 <- Base.decode16(hex, case: :mixed) do
+      {:ok, key}
+    else
+      _invalid -> {:error, :key_invalid}
     end
   end
 

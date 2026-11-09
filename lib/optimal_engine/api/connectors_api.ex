@@ -59,6 +59,8 @@ defmodule OptimalEngine.API.ConnectorsAPI do
     workspace_scope_denied: 403,
     no_intake_workspace: 422,
     connector_key_missing: 503,
+    connector_key_invalid: 503,
+    connector_key_unavailable: 503,
     openbao_not_configured: 503,
     openbao_invalid_config: 503,
     openbao_unreachable: 503,

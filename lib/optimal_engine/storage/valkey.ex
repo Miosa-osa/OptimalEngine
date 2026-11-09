@@ -11,7 +11,10 @@ defmodule OptimalEngine.Storage.Valkey do
   `open/2`, `pipeline/3` and `close/1` here. `OPTIMAL_VALKEY_URL` is `redis://[user:password@]host[:port][/db]`
   (`rediss://` for TLS, `valkey://` accepted as an alias). The URL carries the
   credential, so it is never logged, described or returned by the API;
-  `safe_config/1` is the shape a route may show.
+  `safe_config/1` is the shape a route may show. `OPTIMAL_VALKEY_PASSWORD`,
+  when set, is the password instead of the URL's; it is read through
+  `OptimalEngine.Secrets`, so it may be an `openbao:<path>#<field>` reference
+  (`credentials/1`).
 
   Health is a `PING` answered `PONG`; the proof is a `SET`, a `GET` that reads
   the same value back, and a `DEL`, under a key of its own
@@ -19,7 +22,10 @@ defmodule OptimalEngine.Storage.Valkey do
   read from, not merely connected to.
   """
 
+  alias OptimalEngine.Secrets
+
   @env "OPTIMAL_VALKEY_URL"
+  @password_env "OPTIMAL_VALKEY_PASSWORD"
   @default_port 6379
   @default_timeout 2_000
   @proof_prefix "optimal:proof:"
@@ -29,6 +35,10 @@ defmodule OptimalEngine.Storage.Valkey do
   @doc "The environment variable the provider is configured by."
   @spec env_name() :: String.t()
   def env_name, do: @env
+
+  @doc "The environment variable the password may be read from instead of the URL."
+  @spec password_env_name() :: String.t()
+  def password_env_name, do: @password_env
 
   @doc "Whether `OPTIMAL_VALKEY_URL` is set and parses."
   @spec configured?() :: boolean()
@@ -155,6 +165,28 @@ defmodule OptimalEngine.Storage.Valkey do
   """
   @spec open(map(), timeout()) :: {:ok, term()} | {:error, term()}
   def open(config, timeout \\ @default_timeout) do
+    with {:ok, config} <- credentials(config) do
+      open_authenticated(config, timeout)
+    end
+  end
+
+  @doc """
+  `config` with the password from `OPTIMAL_VALKEY_PASSWORD` when that is set,
+  read through `OptimalEngine.Secrets` (so it may be an
+  `openbao:<path>#<field>` reference), in place of any password in the URL.
+  Unset, the URL's own password stands. A reference OpenBao cannot answer is
+  `{:error, {:password_unavailable, reason}}`, and nothing connects.
+  """
+  @spec credentials(map()) :: {:ok, map()} | {:error, {:password_unavailable, term()}}
+  def credentials(config) do
+    case Secrets.fetch(@password_env) do
+      {:ok, password} -> {:ok, %{config | password: password}}
+      {:error, :not_set} -> {:ok, config}
+      {:error, {:secret_unavailable, _name, reason}} -> {:error, {:password_unavailable, reason}}
+    end
+  end
+
+  defp open_authenticated(config, timeout) do
     case connect(config, timeout) do
       {:ok, socket} ->
         with :ok <- authenticate(socket, config, timeout),

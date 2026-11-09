@@ -17,6 +17,8 @@ defmodule OptimalEngine.Application do
 
   @impl true
   def start(_type, _args) do
+    # Owned by the application: the fields read from OpenBao, kept a minute.
+    OptimalEngine.Secrets.init_cache()
     OptimalEngine.Sizing.boot_started()
     sweep_bundle_leftovers()
 

@@ -4,8 +4,9 @@ defmodule OptimalEngine.Secrets do
 
   A secret the Engine reads by name (`OPTIMAL_BACKUP_KEY`,
   `OPTIMAL_AUTHORITY_KEY`, `CONNECTOR_KEY`, `OPTIMAL_S3_ACCESS_KEY_ID`,
-  `OPTIMAL_S3_SECRET_ACCESS_KEY`, `OPTIMAL_QDRANT_API_KEY`) is resolved by
-  `fetch/1`:
+  `OPTIMAL_S3_SECRET_ACCESS_KEY`, `OPTIMAL_QDRANT_API_KEY`,
+  `OPTIMAL_VALKEY_PASSWORD`, `OPTIMAL_NATS_TOKEN`, `OPTIMAL_NATS_PASSWORD`) is
+  resolved by `fetch/1`:
 
     * a plain value in the environment is the secret, exactly as before;
     * a value of the form `openbao:<path>#<field>` is a reference: the secret
@@ -24,7 +25,8 @@ defmodule OptimalEngine.Secrets do
   it rather than running without the secret. Without OpenBao, plain values
   work as they always have.
 
-  A value read from OpenBao is kept in memory for `@ttl_ms` (a minute), so a
+  The field read from OpenBao (only that field) is kept in an ETS table for
+  `@ttl_ms` (a minute), so a
   multipart upload or a burst of connector runs does not ask OpenBao for the
   same secret on every call. A sealed or unreachable OpenBao is not asked again
   for a few seconds (`OPTIMAL_OPENBAO_RETRY_AFTER_MS`, see
@@ -44,11 +46,12 @@ defmodule OptimalEngine.Secrets do
 
   @prefix "openbao:"
   @ttl_ms 60_000
-  @cache_key {__MODULE__, :cache}
+  @cache_table :optimal_engine_secrets_cache
   @not_references ~w(OPTIMAL_OPENBAO_ADDR OPTIMAL_OPENBAO_TOKEN)
   @engine_secrets ~w(OPTIMAL_BACKUP_KEY OPTIMAL_AUTHORITY_KEY CONNECTOR_KEY
                      OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY
-                     OPTIMAL_QDRANT_API_KEY)
+                     OPTIMAL_QDRANT_API_KEY
+                     OPTIMAL_VALKEY_PASSWORD OPTIMAL_NATS_TOKEN OPTIMAL_NATS_PASSWORD)
 
   @type reason ::
           :openbao_not_configured
@@ -67,9 +70,21 @@ defmodule OptimalEngine.Secrets do
   `{:ok, value}` (trimmed), `{:error, :not_set}` when the variable is unset or
   blank, or `{:error, {:secret_unavailable, name, reason}}` when it is an
   OpenBao reference that could not be read.
+
+  Only the operator's own settings are resolved: `name` must be one of
+  `engine_secrets/0` (`{:error, :not_an_engine_secret}` otherwise), and there
+  is no entry point that resolves a value handed to it. A value that arrives
+  through the API or is stored in the database (a sync or federation peer's
+  api_key) is never a reference: resolving one would let whoever set it have
+  the Engine read any secret its OpenBao token can and send it where they
+  chose.
   """
   @spec fetch(String.t()) ::
-          {:ok, String.t()} | {:error, :not_set | {:secret_unavailable, String.t(), reason()}}
+          {:ok, String.t()}
+          | {:error, :not_set | :not_an_engine_secret | {:secret_unavailable, String.t(), reason()}}
+  def fetch(name) when is_binary(name) and name not in @engine_secrets,
+    do: {:error, :not_an_engine_secret}
+
   def fetch(name) when is_binary(name) do
     case env(name) do
       nil ->
@@ -141,8 +156,31 @@ defmodule OptimalEngine.Secrets do
   """
   @spec flush_cache() :: :ok
   def flush_cache do
-    :persistent_term.erase(@cache_key)
+    if :ets.whereis(@cache_table) != :undefined, do: :ets.delete_all_objects(@cache_table)
     OpenBao.reset_outages()
+  end
+
+  @doc """
+  Creates the table values read from OpenBao are kept in, owned by the
+  calling process (the application, at start). A fetch before it exists, or
+  after its owner went, reads OpenBao and keeps nothing.
+  """
+  @spec init_cache() :: :ok
+  def init_cache do
+    if :ets.whereis(@cache_table) == :undefined do
+      :ets.new(@cache_table, [:named_table, :public, :set, read_concurrency: true])
+    end
+
+    :ok
+  rescue
+    # Created by another process in between.
+    ArgumentError -> :ok
+  end
+
+  @doc false
+  # What the cache holds, for tests: `{{scope, path, field}, expires, value}`.
+  def cache_entries do
+    if :ets.whereis(@cache_table) == :undefined, do: [], else: :ets.tab2list(@cache_table)
   end
 
   @doc "A sentence naming what went wrong, for a log line or an operator. Never carries a secret."
@@ -186,16 +224,19 @@ defmodule OptimalEngine.Secrets do
   defp resolve(reference) do
     with {:ok, path, field} <- parse_reference(reference),
          {:ok, scope} <- cache_scope() do
-      key = {scope, path}
+      key = {scope, path, field}
 
-      # A kept copy that lacks the field is read again: the operator may have
-      # just added it.
-      with {:ok, data} <- cached(key),
-           {:ok, value} <- field(data, field) do
-        {:ok, value}
-      else
-        _miss_or_absent ->
-          with {:ok, data} <- read(key, path), do: field(data, field)
+      # Only the field asked for is kept, never the rest of the secret.
+      case cached(key) do
+        {:ok, value} ->
+          {:ok, value}
+
+        :miss ->
+          with {:ok, data} <- read(path),
+               {:ok, value} <- field(data, field) do
+            remember(key, value)
+            {:ok, value}
+          end
       end
     end
   end
@@ -212,11 +253,10 @@ defmodule OptimalEngine.Secrets do
     end
   end
 
-  # One read per secret path per minute, whichever fields of it are asked for.
-  defp read(key, path) do
+  # One read per field per minute.
+  defp read(path) do
     case OpenBao.kv_read(path) do
       {:ok, data} ->
-        remember(key, data)
         {:ok, data}
 
       {:error, :not_found} ->
@@ -238,25 +278,23 @@ defmodule OptimalEngine.Secrets do
     end
   end
 
+  # ETS, not persistent_term: a write there is a global garbage collection.
   defp cached(key) do
     now = System.monotonic_time(:millisecond)
 
-    case :persistent_term.get(@cache_key, %{}) do
-      %{^key => {expires, data}} when expires > now -> {:ok, data}
+    case :ets.lookup(@cache_table, key) do
+      [{^key, expires, value}] when expires > now -> {:ok, value}
       _missing_or_stale -> :miss
     end
+  rescue
+    ArgumentError -> :miss
   end
 
-  defp remember(key, data) do
-    now = System.monotonic_time(:millisecond)
-
-    cache =
-      @cache_key
-      |> :persistent_term.get(%{})
-      |> Map.reject(fn {_key, {expires, _data}} -> expires <= now end)
-      |> Map.put(key, {now + @ttl_ms, data})
-
-    :persistent_term.put(@cache_key, cache)
+  defp remember(key, value) do
+    :ets.insert(@cache_table, {key, System.monotonic_time(:millisecond) + @ttl_ms, value})
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   defp env(name) do
