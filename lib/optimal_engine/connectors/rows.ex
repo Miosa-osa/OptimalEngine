@@ -280,6 +280,9 @@ defmodule OptimalEngine.Connectors.Rows do
             ])
 
           record(tenant_id, "connector.deleted", id, row.kind, row.workspace_id, opts, %{})
+
+          # What it queued on NATS and intake has not taken yet goes with it.
+          OptimalEngine.Storage.NATS.IntakeQueue.forget_connector(tenant_id, id)
           :ok
         end
       end

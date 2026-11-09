@@ -118,6 +118,7 @@ NATS JetStream is reached the same way, and runs the flows it is given:
 | `OPTIMAL_NATS_FLOWS` | none | What runs through JetStream, comma-separated: `ledger` (the change ledger as a stream), `jobs` (background job dispatch), `intake` (connector intake queue), or `all`. Without it nothing the Engine holds is sent to NATS. |
 | `OPTIMAL_NATS_NAMESPACE` | `optimal` | Prefix of every subject and stream (`OPTIMAL_LEDGER`); one per Engine on a shared NATS account. |
 | `OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS` | `168` | How long the ledger stream keeps a change; `0` keeps it forever. |
+| `OPTIMAL_NATS_DEAD_LETTER_MAX_AGE_HOURS` | `720` | How long a dead letter is kept before JetStream purges it (the dead-letter stream's `max_age`); `0` keeps letters until they are requeued. |
 
 `OPTIMAL_FRACTAL_ENDPOINT` with `OPTIMAL_FRACTAL_CREDENTIAL_REF` is declared with no adapter, and the inventory reports it `adapter_missing` whatever is set.
 See [Storage providers](docs/guides/storage-providers.md) and [Installation and deployment](docs/guides/installation-and-deployment.md).

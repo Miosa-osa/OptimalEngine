@@ -28,6 +28,19 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   Refusals at consumption are not in the pull's `connector_runs` row (the
   pull has finished by then); they are in this queue's `terminated` count
   and the log.
+
+  ## What is erased leaves the queue
+
+  A queued Signal and a dead letter hold connector content that was taken in
+  and not ingested. When its workspace is archived or moved away
+  (`forget_workspace/4`) or its connector deleted (`forget_connector/3`),
+  every such item goes: the queued ones of the tenant on `<NAMESPACE>_INTAKE`
+  and the intake dead letters, each matched by the workspace and connector it
+  was queued for. The request is written first as an `events` row (`kind =
+  'nats_intake_purge_requested'`) and done at once when NATS is reachable,
+  otherwise when the queue is next provisioned (`process_requests/2`), so a
+  removal asked for during an outage, or across a restart, is not lost; each
+  one done is a `nats_purge` event.
   """
 
   @behaviour OptimalEngine.Storage.NATS.WorkQueue
@@ -36,7 +49,10 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
 
   alias OptimalEngine.Connectors.{PullScheduler, Rows}
   alias OptimalEngine.{Signal, Store}
-  alias OptimalEngine.Storage.NATS.{Protocol, WorkQueue}
+  alias OptimalEngine.Storage.NATS
+  alias OptimalEngine.Storage.NATS.{Connection, DeadLetters, Protocol, WorkQueue}
+
+  @request_kind "nats_intake_purge_requested"
 
   @doc false
   def child_spec(opts), do: WorkQueue.child_spec({__MODULE__, opts})
@@ -97,6 +113,186 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
     "#{connector}:sha256:" <> Base.encode16(hash, case: :lower)
   end
 
+  @doc """
+  Removes what the workspace's connectors queued and did not ingest: queued
+  Signals and intake dead letters queued for `workspace_id` (or by one of its
+  connectors). `{:ok, %{queued_purged:, dead_letters_removed:}}` when done,
+  `{:ok, %{pending: true}}` when NATS is not reachable now (done on the next
+  provisioning), `{:ok, %{state: "off"}}` without the intake flow. Options:
+  `:connection`, `:namespace` (tests). Never raises.
+  """
+  @spec forget_workspace(String.t(), String.t(), String.t(), keyword()) :: {:ok, map()}
+  def forget_workspace(tenant_id, workspace_id, reason, opts \\ []) do
+    connectors =
+      case Store.raw_query(
+             "SELECT id FROM connectors WHERE tenant_id = ?1 AND workspace_id = ?2",
+             [tenant_id, workspace_id]
+           ) do
+        {:ok, rows} -> List.flatten(rows)
+        _ -> []
+      end
+
+    forget(
+      %{
+        "tenant_id" => tenant_id,
+        "workspace_id" => workspace_id,
+        "connector_ids" => connectors,
+        "reason" => reason
+      },
+      "workspace:" <> workspace_id,
+      opts
+    )
+  end
+
+  @doc "Removes what one connector queued and did not ingest, as `forget_workspace/4` does."
+  @spec forget_connector(String.t(), String.t(), keyword()) :: {:ok, map()}
+  def forget_connector(tenant_id, connector_id, opts \\ []) do
+    forget(
+      %{
+        "tenant_id" => tenant_id,
+        "workspace_id" => nil,
+        "connector_ids" => [connector_id],
+        "reason" => "connector_deleted"
+      },
+      "connector:" <> connector_id,
+      opts
+    )
+  end
+
+  defp forget(request, target, opts) do
+    with {:ok, namespace} <- namespace(opts),
+         true <- Keyword.has_key?(opts, :connection) or NATS.flow?("intake") do
+      conn = Keyword.get(opts, :connection, default_conn())
+      id = record_request(namespace, request, target)
+
+      if Connection.connected?(conn) do
+        case purge(conn, namespace, request) do
+          {:ok, counts} ->
+            done(id, namespace, request, counts)
+            {:ok, counts}
+
+          {:error, reason} ->
+            Logger.warning("[NATS] intake removal #{id} not done yet: #{inspect(reason)}")
+            {:ok, %{pending: true}}
+        end
+      else
+        {:ok, %{pending: true}}
+      end
+    else
+      _off -> {:ok, %{state: "off"}}
+    end
+  rescue
+    error ->
+      Logger.warning("[NATS] intake removal failed: #{Exception.message(error)}")
+      {:ok, %{pending: true}}
+  catch
+    :exit, _ -> {:ok, %{pending: true}}
+  end
+
+  @doc """
+  Does every intake removal still pending in `namespace`; the result is the
+  counts of each done, by request id. One that fails stays pending.
+  """
+  @spec process_requests(GenServer.server(), String.t()) :: {:ok, map()}
+  def process_requests(conn, namespace) do
+    {:ok, rows} =
+      Store.raw_query(
+        """
+        SELECT r.id, r.metadata FROM events r
+        WHERE r.kind = ?1
+          AND NOT EXISTS (
+            SELECT 1 FROM events d
+            WHERE d.kind = 'nats_purge' AND d.target_uri = 'nats-intake-purge-request:' || CAST(r.id AS TEXT)
+          )
+        ORDER BY r.id
+        LIMIT 500
+        """,
+        [@request_kind]
+      )
+
+    done =
+      for [id, meta] <- rows,
+          request = Jason.decode!(meta),
+          request["namespace"] == namespace,
+          {:ok, counts} <- [purge(conn, namespace, request)],
+          into: %{} do
+        done(id, namespace, request, counts)
+        {id, counts}
+      end
+
+    {:ok, done}
+  end
+
+  # The tenant's queued Signals and the intake dead letters this request names.
+  defp purge(conn, namespace, request) do
+    tenant = request["tenant_id"]
+    connectors = request["connector_ids"] || []
+    workspace = request["workspace_id"]
+
+    match? = fn payload ->
+      payload["tenant_id"] == tenant and
+        ((is_binary(workspace) and payload["workspace_id"] == workspace) or
+           payload["connector_id"] in connectors)
+    end
+
+    stream = NATS.stream_name(namespace, "INTAKE")
+    subject = "#{namespace}.intake.#{Protocol.token(tenant || "")}.>"
+
+    with {:ok, queued} <- DeadLetters.scan(conn, stream, subject, 1, match?, 0),
+         {:ok, letters} <- DeadLetters.forget(conn, namespace, "intake", match?) do
+      {:ok, %{queued_purged: queued, dead_letters_removed: letters}}
+    end
+  end
+
+  defp record_request(namespace, request, target) do
+    {:ok, [[id]]} =
+      Store.raw_query(
+        """
+        INSERT INTO events (tenant_id, principal, kind, target_uri, metadata)
+        VALUES (?1, 'system:nats', ?2, ?3, ?4) RETURNING id
+        """,
+        [
+          request["tenant_id"],
+          @request_kind,
+          target,
+          Jason.encode!(Map.merge(request, %{"flow" => "intake", "namespace" => namespace}))
+        ]
+      )
+
+    id
+  end
+
+  defp done(id, namespace, request, counts) do
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO events (tenant_id, principal, kind, target_uri, metadata) VALUES (?1, 'system:nats', 'nats_purge', ?2, ?3)",
+        [
+          request["tenant_id"],
+          "nats-intake-purge-request:#{id}",
+          Jason.encode!(
+            Map.merge(counts, %{
+              flow: "intake",
+              stream: NATS.stream_name(namespace, "INTAKE"),
+              workspace_id: request["workspace_id"],
+              connector_ids: request["connector_ids"],
+              reason: request["reason"]
+            })
+          )
+        ]
+      )
+
+    :ok
+  end
+
+  defp namespace(opts) do
+    case Keyword.fetch(opts, :namespace) do
+      {:ok, namespace} -> {:ok, namespace}
+      :error -> NATS.namespace()
+    end
+  end
+
+  defp default_conn, do: Application.get_env(:optimal_engine, :nats_connection, Connection)
+
   @doc "One pull now (tests, operators)."
   @spec drain_now(GenServer.server()) :: {:ok, map()} | {:error, term()}
   def drain_now(server \\ __MODULE__), do: WorkQueue.drain_now(server)
@@ -120,6 +316,18 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
 
   @impl WorkQueue
   def stream_options, do: %{}
+
+  # Removals asked for while NATS was down are done once the queue is up.
+  @impl WorkQueue
+  def on_provisioned(_server, context) do
+    with {:ok, namespace} <- namespace(Map.to_list(Map.take(context, [:namespace]))) do
+      process_requests(Map.get(context, :connection, default_conn()), namespace)
+    end
+
+    :ok
+  rescue
+    error -> Logger.warning("[NATS] pending intake removals: #{Exception.message(error)}")
+  end
 
   # Intake of one Signal can take a while (entity resolution, loops); the
   # consumer has ten minutes before an unanswered one is delivered again.

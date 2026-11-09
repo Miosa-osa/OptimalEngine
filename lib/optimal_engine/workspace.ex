@@ -820,6 +820,9 @@ defmodule OptimalEngine.Workspace do
         )
 
       OptimalEngine.Storage.NATS.LedgerPublisher.forget_workspace(publisher, tenant, id, "archived")
+
+      # What its connectors queued and intake has not taken yet, and their dead letters.
+      OptimalEngine.Storage.NATS.IntakeQueue.forget_workspace(tenant, id, "archived")
     end
 
     :ok

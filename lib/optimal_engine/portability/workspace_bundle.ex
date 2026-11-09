@@ -1021,6 +1021,10 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           {:error, cause} -> inspect(cause)
         end
 
+      # Signals its connectors queued on NATS and intake has not taken, and
+      # their dead letters, are this workspace's content too.
+      OptimalEngine.Storage.NATS.IntakeQueue.forget_workspace(tenant_id, workspace_id, "moved")
+
       {:ok,
        %{
          workspace_id: workspace_id,

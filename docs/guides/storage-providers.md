@@ -429,7 +429,7 @@ An erasure (`Compliance.Erasure.erase/2`) runs a pass over the erased workspaces
 `runtime.flows.ledger` counts `messages_purged` and the workspace purges still pending (`purges_pending`).
 
 A forgotten memory's source package and claims are deleted with its text (see [Erasure And Retention](erasure-and-retention.md)), so their deletes purge their subjects too.
-What this does not cover: a subscriber's own copy of what it already read; and the intake queue, whose items carry connector content until they are ingested, dead-lettered or requeued.
+What this does not cover: a subscriber's own copy of what it already read. The intake queue and its dead letters are covered below ([Connector intake](#connector-intake)).
 
 ### Background jobs
 
@@ -468,9 +468,14 @@ A refusal at consumption, and a dead letter, are counted in the `connector_runs`
 The row is written when the pull ends, so a refusal that comes while the pull still runs waits for it: the message comes back two seconds later instead of the count being lost.
 The Signal's content is in the stream until it is ingested, so the NATS account holds connector content in the meantime.
 
+What was taken in and not ingested goes when its workspace or connector does: archiving a workspace or finishing its move removes the tenant's queued Signals and intake dead letters queued for that workspace or by one of its connectors, and deleting a connector removes the ones it queued (`IntakeQueue.forget_workspace/4`, `forget_connector/3`).
+The request is written first as an `events` row (`kind = 'nats_intake_purge_requested'`), done at once when NATS is reachable and otherwise when the intake queue is next provisioned, and each one done is a `nats_purge` event (`target_uri` `nats-intake-purge-request:<id>`, with `queued_purged` and `dead_letters_removed`).
+A rename keeps them: its connectors move with the rows, and the queued Signals are ingested into the new id.
+
 ### Dead letters
 
-An item a work queue gave up on is kept in stream `<NAMESPACE>_DEAD_LETTERS` (limits retention, file storage, kept until requeued or purged), on `<namespace>.dead.<flow>`, with its payload as it was queued and headers saying why: `Optimal-Flow`, `Optimal-Subject` (where it was queued), `Optimal-Delivered`, `Optimal-Error` (the last failure, one line, at most 500 bytes), `Optimal-Stream-Seq`.
+An item a work queue gave up on is kept in stream `<NAMESPACE>_DEAD_LETTERS` (limits retention, file storage), on `<namespace>.dead.<flow>`, with its payload as it was queued and headers saying why: `Optimal-Flow`, `Optimal-Subject` (where it was queued), `Optimal-Delivered`, `Optimal-Error` (the last failure, one line, at most 500 bytes), `Optimal-Stream-Seq`.
+A letter is kept until it is requeued or until it is older than `OPTIMAL_NATS_DEAD_LETTER_MAX_AGE_HOURS` (720, 30 days; `0` keeps letters until requeued): that is the stream's `max_age`, so JetStream purges an expired letter itself, and an existing stream takes a changed limit the next time a work queue is provisioned (on each new connection).
 Intake is the flow that dead-letters; a job is never dead-lettered here, because the `jobs` table already dead-letters a job that runs out of attempts (`dead_letter_jobs`), and a job's message comes back for as long as the job is not finished.
 
 The inventory counts them (`runtime.dead_letters`: `total` and per flow).
