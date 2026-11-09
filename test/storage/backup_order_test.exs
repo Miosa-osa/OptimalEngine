@@ -70,12 +70,14 @@ defmodule OptimalEngine.Storage.BackupOrderTest do
     assert ids == Enum.sort(ids)
     assert ids == Enum.uniq(ids)
 
+    # On either store, a tie on the second ordered by id is the order the rows
+    # were made in, as SQLite's rowid gives it.
     infos = backups_in_one_second(3)
     assert Enum.map(infos, & &1.id) == Enum.sort(Enum.map(infos, & &1.id))
 
     {:ok, rows} =
       Store.raw_query(
-        "SELECT id FROM backup_records WHERE created_at = ?1 ORDER BY created_at DESC, #{Backup.newest_first()}",
+        "SELECT id FROM backup_records WHERE created_at = ?1 ORDER BY created_at DESC, id DESC",
         [@same_second]
       )
 
