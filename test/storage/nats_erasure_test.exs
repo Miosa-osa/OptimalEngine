@@ -98,6 +98,9 @@ defmodule OptimalEngine.Storage.NATSErasureTest do
     Enum.map(rows, fn [uri, meta] -> {uri, Jason.decode!(meta)} end)
   end
 
+  # The ledger publisher reads SQLite's ledger and refuses another store
+  # (`{:error, :unsupported_store}`), so this runs with the Engine on SQLite.
+  @tag :sqlite_store
   test "each row has a subject of its own under its workspace", ctx do
     insert_context(ctx, "row-#{ctx.n}", "kept text")
     assert {:ok, _} = LedgerPublisher.publish_now(ctx.pub)
@@ -115,6 +118,9 @@ defmodule OptimalEngine.Storage.NATSErasureTest do
            )
   end
 
+  # The ledger publisher reads SQLite's ledger and refuses another store
+  # (`{:error, :unsupported_store}`), so this runs with the Engine on SQLite.
+  @tag :sqlite_store
   test "a deleted row's earlier messages are purged and only its key's tombstone stays", ctx do
     insert_context(ctx, "gone-#{ctx.n}", "secret words #{ctx.n}")
     insert_context(ctx, "stays-#{ctx.n}", "public words #{ctx.n}")
@@ -145,6 +151,9 @@ defmodule OptimalEngine.Storage.NATSErasureTest do
     assert n >= 1
   end
 
+  # The ledger publisher reads SQLite's ledger and refuses another store
+  # (`{:error, :unsupported_store}`), so this runs with the Engine on SQLite.
+  @tag :sqlite_store
   test "a republish never sends a row a later change forgot", ctx do
     insert_context(ctx, "late-#{ctx.n}", "forgotten words #{ctx.n}")
     {:ok, _} = Store.raw_query("DELETE FROM contexts WHERE id = ?1", ["late-#{ctx.n}"])
@@ -158,6 +167,9 @@ defmodule OptimalEngine.Storage.NATSErasureTest do
   # Memory.forget soft-forgets the memory row. The source package and claim its
   # creation wrote keep their text in the Engine, and so on the stream: NATS
   # holds what the Engine holds, no more.
+  # The ledger publisher reads SQLite's ledger and refuses another store
+  # (`{:error, :unsupported_store}`), so this runs with the Engine on SQLite.
+  @tag :sqlite_store
   test "a forgotten memory's messages are purged and its tombstone carries no text", ctx do
     {:ok, mem} =
       Memory.create(%{
@@ -187,6 +199,9 @@ defmodule OptimalEngine.Storage.NATSErasureTest do
     assert %{"payload" => %{"row" => %{"is_forgotten" => 1}}} = Jason.decode!(tombstone.data)
   end
 
+  # The ledger publisher reads SQLite's ledger and refuses another store
+  # (`{:error, :unsupported_store}`), so this runs with the Engine on SQLite.
+  @tag :sqlite_store
   test "an erasure reaches NATS and its report and audit event say what went", ctx do
     principal = "user:natsera-#{ctx.n}@test"
     {:ok, _} = Principal.upsert(%{id: principal, kind: :user, display_name: "Erased #{ctx.n}"})
@@ -217,6 +232,9 @@ defmodule OptimalEngine.Storage.NATSErasureTest do
     assert %{"nats_ledger" => %{"messages_purged" => ^purged}} = Jason.decode!(meta)
   end
 
+  # The ledger publisher reads SQLite's ledger and refuses another store
+  # (`{:error, :unsupported_store}`), so this runs with the Engine on SQLite.
+  @tag :sqlite_store
   test "an archived workspace has its whole subject tree purged, and the purge is recorded", ctx do
     insert_context(ctx, "arch-#{ctx.n}", "archived words #{ctx.n}")
     assert {:ok, _} = LedgerPublisher.publish_now(ctx.pub)
@@ -233,6 +251,9 @@ defmodule OptimalEngine.Storage.NATSErasureTest do
            end)
   end
 
+  # The ledger publisher reads SQLite's ledger and refuses another store
+  # (`{:error, :unsupported_store}`), so this runs with the Engine on SQLite.
+  @tag :sqlite_store
   test "a workspace forgotten while NATS is down is purged once NATS is back", ctx do
     insert_context(ctx, "down-#{ctx.n}", "words before the outage #{ctx.n}")
     assert {:ok, _} = LedgerPublisher.publish_now(ctx.pub)
