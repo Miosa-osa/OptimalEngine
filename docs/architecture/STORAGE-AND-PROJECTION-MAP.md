@@ -255,7 +255,7 @@ Each moves one concern off the single disk without changing what the Engine stor
 | --- | --- | --- |
 | Assets and offsite backups | S3-compatible storage: Garage, AWS S3, R2, MinIO, a MIOSA bucket | Wired. |
 | Canonical relational store | PostgreSQL, a compile-time `OPTIMAL_STORE=postgres` build | Wired, partial. It refuses full-text search, replication, and app data collections. |
-| Replayable events and jobs | NATS JetStream | Adapter wired; `available` when `OPTIMAL_NATS_URL` answers with JetStream. The change ledger is published to it with `OPTIMAL_NATS_FLOWS=ledger`; jobs are not. |
+| Replayable events and jobs | NATS JetStream | Adapter wired; `available` when `OPTIMAL_NATS_URL` answers with JetStream. The change ledger is published to it with `OPTIMAL_NATS_FLOWS=ledger`, background jobs are dispatched through it with `jobs` (the `jobs` table stays the record), connector intake is queued on it with `intake`. |
 | Distributed cache and locks | Valkey | In the data path when `OPTIMAL_VALKEY_URL` is set: shared rate limits and caches, ETS while it is down. |
 | High-scale vectors | Qdrant | Adapter wired; `available` when `OPTIMAL_QDRANT_URL` lists collections. |
 | Analytics | DuckDB and Parquet | Adapter wired; `available` when the executable answers against a writable `OPTIMAL_ANALYTICS_PATH`. |

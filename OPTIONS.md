@@ -107,7 +107,7 @@ NATS JetStream is reached the same way, and runs the flows it is given:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OPTIMAL_NATS_URL` | unset | `nats://[user:password@\|token@]host[:port]`, `tls://` for TLS. The Engine's JetStream client, the probe and the proof. |
-| `OPTIMAL_NATS_FLOWS` | none | What runs through JetStream: `ledger` (the change ledger as a stream), or `all`. Without it nothing the Engine holds is sent to NATS. |
+| `OPTIMAL_NATS_FLOWS` | none | What runs through JetStream, comma-separated: `ledger` (the change ledger as a stream), `jobs` (background job dispatch), `intake` (connector intake queue), or `all`. Without it nothing the Engine holds is sent to NATS. |
 | `OPTIMAL_NATS_NAMESPACE` | `optimal` | Prefix of every subject and stream (`OPTIMAL_LEDGER`); one per Engine on a shared NATS account. |
 | `OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS` | `168` | How long the ledger stream keeps a change; `0` keeps it forever. |
 

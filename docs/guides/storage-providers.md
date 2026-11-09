@@ -365,11 +365,13 @@ Setting `OPTIMAL_NATS_URL` alone checks and proves the server; nothing the Engin
 | Flow | What runs through JetStream | Without NATS, or while it is down |
 | --- | --- | --- |
 | `ledger` | The change ledger of every workspace enabled for replication, as stream `<NAMESPACE>_LEDGER` | The ledger stays in SQLite (`sync_mutations`), as it always does; the backlog goes out when NATS is back |
+| `jobs` | The dispatch of background jobs: every queued job announced on `<NAMESPACE>_JOBS`, its worker woken when it is due | Workers poll the `jobs` table as they always have; jobs queued meanwhile are announced when NATS is back |
+| `intake` | Connector pulls: each pulled Signal queued on `<NAMESPACE>_INTAKE` and ingested by the queue's consumer | The pull ingests its Signals in process, as it always has |
 
 Every subject and stream starts with `OPTIMAL_NATS_NAMESPACE` (default `optimal`, stream names upper-cased: `OPTIMAL_LEDGER`).
 Two Engines on one NATS account need two namespaces.
 No flow makes an Engine write wait on NATS or fail because NATS is down: each one reads what the Engine has already stored durably, and sends it afterwards.
-The provider's `serves` names the flows that are on (`change_ledger_stream`).
+The provider's `serves` names the flows that are on (`change_ledger_stream`, `background_job_dispatch`, `connector_intake_queue`).
 
 ### The change ledger stream
 
@@ -392,6 +394,54 @@ Where to resume is read from the stream (the `Optimal-Ledger-Seq` of the last me
 The stream is a copy for subscribers, not a replication transport: Engines still replicate over HTTP or the MIOSA relay (see [Replication](replication.md)), and a peer's conflict detection, gates and version checks do not apply to a reader of the stream.
 A workspace erasure removes rows from the Engine and the ledger, not from the stream: the stream's age limit is what removes a change from NATS, so keep it as short as subscribers allow.
 The stream holds workspace content up to the serve ceiling, so the NATS account needs the same care as a replication peer.
+
+### Background jobs
+
+With `jobs` on, `OptimalEngine.Storage.NATS.JobQueue` dispatches background jobs through stream `<NAMESPACE>_JOBS` (work-queue retention, one durable consumer).
+The `jobs` table stays the record of every job: its lease, attempts, backoff and dead letters work exactly as without NATS.
+
+* A job queued by `Jobs.enqueue/4`, `enqueue_exclusive/5`, `enqueue_coalesced/4`, `complete_and_enqueue/4` or `replay_dead_letter/3` is announced on `<namespace>.jobs.<kind>`, with the job's id as the message id, after its row is committed.
+  Announcing is a message to a local process: it never fails or delays the enqueue.
+* Each time the job's message is delivered, the consumer reads the job's row.
+  Finished (`completed`, `dead`) or gone: the message is acknowledged and leaves the queue.
+  Due (`available` past its `run_at`, or `running` with an expired lease): the worker for its kind is woken at once, and the message comes back five seconds later to see it finished.
+  Not due yet: it comes back when the job will be due, at most an hour later.
+* Woken by kind: `reindex`, `import.*`, `analysis.*` and `maintenance.*`, each only while its worker's own interval is above zero, so a worker an operator turned off stays off.
+  Bundle jobs and offsite backups are announced and followed to completion, and run when their worker next polls.
+* Every new connection starts by announcing every job still queued or running (oldest first, up to 5000); the stream's duplicate window is an hour, so a job announced twice is stored once.
+
+So the stream holds one message for every unfinished job, a worker starts a job when it is queued instead of at its next poll, and no job is lost to a restart of the Engine or of NATS: the row is committed before the announcement, and the message is acknowledged only when the row says the job is finished.
+The workers still poll the `jobs` table: that is the in-process path, and the one jobs take while NATS is down.
+
+### Connector intake
+
+With `intake` on, a connector pull hands its Signals to `OptimalEngine.Storage.NATS.IntakeQueue`, which queues each one on stream `<NAMESPACE>_INTAKE` at `<namespace>.intake.<tenant>.<connector>` and waits for the stream's acknowledgement before the Runner moves the connector's cursor.
+A Signal is therefore either stored in the stream or ingested in the pull, never neither: what could not be queued (NATS down, or gone mid-way) is ingested in process, as without NATS.
+
+The queue's durable consumer ingests each Signal through the same intake as the in-process path, with the connector's current routing config read from its row.
+A stored Signal is acknowledged and leaves the queue.
+One intake refuses is terminated and logged, as the in-process path logs it; one whose connector was deleted since is terminated.
+One whose intake raised is delivered again after a backoff (one second, doubling to ten minutes) for as long as it keeps failing, so a Signal is never dropped because its intake failed.
+One the Engine stopped in the middle of is delivered again after ten minutes.
+The message id is `<connector>:<signal id>`: a pull that runs again over items it already queued queues each once inside the stream's duplicate window (two minutes), and intake stores a source item once whatever arrives.
+
+Refusals at consumption are not counted in the pull's `connector_runs` row, which is written when the pull ends; they are in the queue's `terminated` count and the log.
+The Signal's content is in the stream until it is ingested, so the NATS account holds connector content in the meantime.
+
+### Replication over NATS: not implemented
+
+Engines replicate over HTTP or the MIOSA relay (see [Replication](replication.md)); NATS is not a sync transport, and the ledger stream is not one either.
+The ledger stream is a one-way copy at the Engine's own serve ceiling.
+A replication transport would have to carry what each HTTP exchange carries today, and none of it maps onto a stream subscription:
+
+* Identity and grants: a peer authenticates with a replica key that holds the `sync` scope, and the receiving Engine binds the tenant and the workspace to it. A NATS account's publish and subscribe permissions are not that key, and the Engine cannot verify a NATS subscriber.
+* The per-peer data-class gate: each peer has its own `max_class`, applied on send and on receive. One stream at the serve ceiling cannot hold a lower ceiling per peer.
+* Conflict detection: a push carries the sender's `base_seq` and `base_replica_id`, a pull keeps the `local_floor` of the last complete cycle, and the receiver answers `base_rejected` when it does not trust the base. These are per-exchange request and reply, not fire-and-forget messages.
+* Version safety: every page carries the sender's schema migration, and a mismatch pauses sync with a message. A stream message carries no migration.
+* Bookkeeping keyed by the peer: cursors, push sequences, run history and labels in `sync_peers`, `sync_cursors` and `sync_runs`.
+
+Doing it means a transport behaviour in `OptimalEngine.Sync` (today the HTTP and relay calls are chosen by the peer URL inside `Sync.run_peer/1`), a NATS request and reply pair on per-Engine subjects that carries the replica key and is checked like the HTTP bearer, and a responder that serves `changes/3` and `apply_changes/4` to it.
+That is a change to the replication engine's core, not to the provider, and it is not in this release.
 
 `GET /api/storage/providers` shows the client under the provider's `runtime.client`: `state` (`connected`, `connecting`, `disconnected`, `not_configured`), `reconnects` (connections lost since the Engine started), `last_error`, `connected_since`, `server` (`version`, `jetstream`) and `pending` (requests waiting on an answer).
 
@@ -419,7 +469,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | RocksDB | Wired, opt in | A persistent triple-store mirror of `graph_edges` (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`) | Falls back to ETS when the native library is missing |
 | `s3` (S3-compatible: Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Asset bytes, offsite backups, the probe and the placement reconciler | |
 | `postgres` | Wired, partial | The canonical relational store of a compile-time `OPTIMAL_STORE=postgres` build | Full-text search, replication, app data collections, and the engine's backup routes; moving an existing Engine to it |
-| `nats_jetstream` | Wired | The probe and the proof, a supervised JetStream client that reconnects with backoff, and with `OPTIMAL_NATS_FLOWS=ledger` the change ledger published as a stream per workspace subject | Jobs and connector intake do not run through it; replication between Engines does not use it |
+| `nats_jetstream` | Wired | The probe and the proof, a supervised JetStream client that reconnects with backoff, and with `OPTIMAL_NATS_FLOWS` the change ledger published as a stream per workspace subject, background jobs dispatched through a work queue, and connector intake queued | Replication between Engines does not use it (see "Replication over NATS: not implemented") |
 | `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
 | `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`) and the proof (a Parquet file written and read back) | No Engine projection is written to it yet |

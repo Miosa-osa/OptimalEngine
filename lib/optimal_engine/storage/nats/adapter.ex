@@ -12,7 +12,7 @@ defmodule OptimalEngine.Storage.NATS.Adapter do
   @behaviour OptimalEngine.Storage.Provider
 
   alias OptimalEngine.Storage.NATS
-  alias OptimalEngine.Storage.NATS.{Connection, LedgerPublisher}
+  alias OptimalEngine.Storage.NATS.{Connection, IntakeQueue, JobQueue, LedgerPublisher}
 
   @capabilities ~w(event_stream jobs replication coordination)a
 
@@ -65,13 +65,18 @@ defmodule OptimalEngine.Storage.NATS.Adapter do
   (`OptimalEngine.Storage.NATS.Connection.status/1`): its state, how often the
   connection was lost, the last error and the server's version; and each flow
   that runs on it (`flows.ledger`: `off`, `buffering` with each workspace's
-  backlog, `publishing`, `caught_up`). Never the URL or its credential.
+  backlog, `publishing`, `caught_up`; `flows.jobs` and `flows.intake`: `off`,
+  `buffering`, `running`, with their counts). Never the URL or its credential.
   """
   @spec runtime() :: map()
   def runtime do
     %{
       client: Connection.status(),
-      flows: %{ledger: LedgerPublisher.status()}
+      flows: %{
+        ledger: LedgerPublisher.status(),
+        jobs: JobQueue.status(),
+        intake: IntakeQueue.status()
+      }
     }
   end
 
@@ -84,6 +89,8 @@ defmodule OptimalEngine.Storage.NATS.Adapter do
   def serves do
     Enum.flat_map(NATS.flows(), fn
       "ledger" -> ["change_ledger_stream"]
+      "jobs" -> ["background_job_dispatch"]
+      "intake" -> ["connector_intake_queue"]
       _other -> []
     end)
   end

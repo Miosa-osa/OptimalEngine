@@ -82,6 +82,7 @@ defmodule OptimalEngine.Jobs do
         nil -> get(id, workspace_id)
         key -> get_by_idempotency_key(tenant_id, workspace_id, key)
       end
+      |> announced()
     end
   end
 
@@ -108,7 +109,7 @@ defmodule OptimalEngine.Jobs do
            Store.transaction(fn txn ->
              txn_enqueue_exclusive(txn, workspace_id, kinds, kind, payload, opts)
            end) do
-      {:ok, job, state}
+      announced({:ok, job, state})
     end
   end
 
@@ -546,7 +547,7 @@ defmodule OptimalEngine.Jobs do
                txn_coalesce(txn, tenant_id, workspace_id, kind, payload, opts)
              end
            end) do
-      {:ok, job, state}
+      announced({:ok, job, state})
     end
   end
 
@@ -577,6 +578,7 @@ defmodule OptimalEngine.Jobs do
           {:ok, %{completed: completed, next: next, state: state}}
         end
       end)
+      |> announced()
     end
   end
 
@@ -663,6 +665,7 @@ defmodule OptimalEngine.Jobs do
           txn_get(txn, job_id)
         end
       end)
+      |> announced()
     end
   end
 
@@ -671,6 +674,27 @@ defmodule OptimalEngine.Jobs do
   defp replay_claimed({:error, reason}), do: {:error, reason}
 
   # ─── private ─────────────────────────────────────────────────────────────
+
+  # A job newly queued is announced to the NATS job queue once its row is
+  # committed (`OptimalEngine.Storage.NATS.JobQueue`): a message to a local
+  # process that returns at once, and nothing at all unless the `jobs` flow is
+  # on. The row is the record; the announcement only dispatches it sooner.
+  defp announced({:ok, %{id: _} = job} = result) do
+    OptimalEngine.Storage.NATS.JobQueue.announce(job)
+    result
+  end
+
+  defp announced({:ok, %{next: next, state: :queued}} = result) do
+    OptimalEngine.Storage.NATS.JobQueue.announce(next)
+    result
+  end
+
+  defp announced({:ok, job, :queued} = result) do
+    OptimalEngine.Storage.NATS.JobQueue.announce(job)
+    result
+  end
+
+  defp announced(result), do: result
 
   defp invoke(handler, job) do
     case handler.(job) do

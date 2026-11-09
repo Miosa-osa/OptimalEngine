@@ -32,7 +32,7 @@ A replay is answered only with a storage entry: a change of a row that holds the
 The Engine gives every entry its id.
 
 A workspace's ledger can also be published to NATS JetStream for subscribers that follow its changes without being a peer (`OPTIMAL_NATS_FLOWS=ledger`, see [Storage providers](storage-providers.md#the-change-ledger-stream)).
-That stream carries what `GET /api/sync/changes` serves, behind the same data-class gate; it is not a transport between Engines, which still replicate as described here.
+That stream carries what `GET /api/sync/changes` serves, behind the same data-class gate; it is not a transport between Engines, which still replicate as described here (why: [Replication over NATS](storage-providers.md#replication-over-nats-not-implemented)).
 
 ## What replicates, and what a peer can write
 
