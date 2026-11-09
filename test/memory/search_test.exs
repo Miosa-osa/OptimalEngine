@@ -169,7 +169,9 @@ defmodule OptimalEngine.Memory.SearchTest do
       refute forgotten.id in ids
     end
 
-    test "include_forgotten: true includes forgotten memories in search" do
+    # A forgotten memory's text is erased (Memory.Versioned.Erasure): the row is
+    # still listed with include_forgotten, but no search matches what it said.
+    test "include_forgotten: true lists forgotten memories, and no search finds their text" do
       ws = ws()
 
       live = create!(%{content: "pricing model overview", workspace_id: ws})
@@ -179,11 +181,14 @@ defmodule OptimalEngine.Memory.SearchTest do
 
       :ok = Memory.forget(forgotten.id)
 
+      {:ok, listed} = Memory.list(workspace_id: ws, include_forgotten: true)
+      assert forgotten.id in Enum.map(listed, & &1.id)
+
       {:ok, results} = Memory.list(workspace_id: ws, q: "pricing", include_forgotten: true)
 
       ids = Enum.map(results, & &1.id)
       assert live.id in ids
-      assert forgotten.id in ids
+      refute forgotten.id in ids
     end
   end
 

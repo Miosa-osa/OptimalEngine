@@ -42,6 +42,7 @@ defmodule OptimalEngine.Memory.Versioned do
   readability in logs.
   """
 
+  alias OptimalEngine.Memory.Versioned.Erasure
   alias OptimalEngine.Memory.Versioned.Embeddings, as: MemoryEmbeddings
   alias OptimalEngine.Memory.Versioned.Store, as: VStore
   alias OptimalEngine.Memory.Surfacer
@@ -282,8 +283,11 @@ defmodule OptimalEngine.Memory.Versioned do
   end
 
   @doc """
-  Soft-forgets a memory. Sets `is_forgotten=1`. The row is never touched
-  otherwise — hard delete via `delete/1` if needed.
+  Forgets a memory. Sets `is_forgotten=1` with the reason and
+  `forget_after`, and erases its text from everywhere the Engine put or
+  derived it (`OptimalEngine.Memory.Versioned.Erasure`): the row keeps the
+  record of the forget, not the text. Hard delete via `delete/1` removes the
+  row too.
 
   Options:
     - `:reason` — string explanation stored in `forget_reason`
@@ -297,11 +301,21 @@ defmodule OptimalEngine.Memory.Versioned do
 
     case VStore.mark_forgotten(id, reason, forget_after) do
       {:ok, _} ->
+        # The cache entry is found from the text, so it goes before the text does.
         forget_cached_embedding(memory)
-        :ok
+        erase_text(memory)
 
       other ->
         other
+    end
+  end
+
+  defp erase_text(nil), do: :ok
+
+  defp erase_text(memory) do
+    case Erasure.erase(memory) do
+      {:ok, _removed} -> :ok
+      {:error, _reason} = error -> error
     end
   end
 
