@@ -22,7 +22,8 @@ defmodule OptimalEngine.Storage.Shared do
 
   A namespace is an atom, which is also the name of the local ETS table its
   owner creates with `Shared.Local.new_table/1`. On Valkey a key lives at
-  `optimal:shared:<namespace>:<generation>:<key>`: a binary key as it is (when
+  `<prefix>:shared:<namespace>:<generation>:<key>`, with this Engine's prefix
+  (`key_prefix/0`): a binary key as it is (when
   short and printable), any other term as the SHA-256 of its external form.
   `clear/1` moves the namespace's generation, so a clear is one command
   however many keys the namespace holds; the old keys expire on their own.
@@ -55,7 +56,8 @@ defmodule OptimalEngine.Storage.Shared do
   alias OptimalEngine.Storage.Shared.Local
   alias OptimalEngine.Storage.Valkey.Pool
 
-  @prefix "optimal:shared:"
+  @prefix_env "OPTIMAL_VALKEY_KEY_PREFIX"
+  @prefix_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9:_.\-]{0,63}\z/
   @signing_key_retry_ms 60_000
   @max_plain_key 200
 
@@ -359,8 +361,96 @@ defmodule OptimalEngine.Storage.Shared do
 
   defp limited(_tokens, _elapsed), do: :unavailable
 
-  defp namespace_prefix(ns), do: @prefix <> Atom.to_string(ns) <> ":"
-  defp generation_key(ns), do: @prefix <> Atom.to_string(ns) <> ":gen"
+  defp namespace_prefix(ns), do: key_prefix() <> ":shared:" <> Atom.to_string(ns) <> ":"
+  defp generation_key(ns), do: key_prefix() <> ":shared:" <> Atom.to_string(ns) <> ":gen"
+
+  @doc """
+  The prefix every key this Engine writes to Valkey starts with (the keys are
+  `<prefix>:shared:<namespace>:...`). `OPTIMAL_VALKEY_KEY_PREFIX` sets it (1
+  to 64 of `A-Z a-z 0-9 : _ . -`, starting with a letter or digit); otherwise
+  it is `optimal:` and 16 hex characters of a hash of this Engine's replica id,
+  so the processes on one store share their keys and Engines with stores of
+  their own never collide on one Valkey. Read once per process.
+  """
+  @spec key_prefix() :: String.t()
+  def key_prefix do
+    case :persistent_term.get({__MODULE__, :key_prefix}, nil) do
+      nil ->
+        prefix = configured_prefix() || default_prefix()
+        :persistent_term.put({__MODULE__, :key_prefix}, prefix)
+        prefix
+
+      prefix ->
+        prefix
+    end
+  end
+
+  @doc false
+  # Tests: read the prefix again, as a fresh process would.
+  @spec reset_key_prefix() :: :ok
+  def reset_key_prefix do
+    :persistent_term.erase({__MODULE__, :key_prefix})
+    :ok
+  end
+
+  defp configured_prefix do
+    case System.get_env(@prefix_env) do
+      nil ->
+        nil
+
+      value ->
+        value = String.trim(value)
+
+        cond do
+          value == "" ->
+            nil
+
+          Regex.match?(@prefix_pattern, value) ->
+            value
+
+          true ->
+            Logger.warning(
+              "[Valkey] #{@prefix_env} is not 1 to 64 of A-Z a-z 0-9 : _ . - " <>
+                "(starting with a letter or digit); using the default prefix"
+            )
+
+            nil
+        end
+    end
+  end
+
+  # The replica id is this Engine's identity; a store without one is named by
+  # where it lives, which is as stable for that Engine.
+  defp default_prefix do
+    identity =
+      case replica_id() do
+        id when is_binary(id) ->
+          id
+
+        nil ->
+          "store:" <>
+            inspect(
+              {Application.get_env(:optimal_engine, :db_path),
+               Application.get_env(:optimal_engine, :root_path)}
+            )
+      end
+
+    "optimal:" <>
+      (:crypto.hash(:sha256, "optimal-engine valkey prefix:" <> identity)
+       |> Base.encode16(case: :lower)
+       |> binary_part(0, 16))
+  end
+
+  defp replica_id do
+    case OptimalEngine.Store.raw_query("SELECT replica_id FROM sync_identity WHERE id = 1", []) do
+      {:ok, [[id]]} when is_binary(id) -> id
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
 
   defp encode_key(key) when is_binary(key) and byte_size(key) <= @max_plain_key do
     if String.printable?(key) and not String.contains?(key, ["\r", "\n"]),

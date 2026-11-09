@@ -854,6 +854,7 @@ Nothing durable lives in Valkey, and every key it holds has a TTL.
 | `OPTIMAL_VALKEY_URL` | unset | Unset: no pool, everything on ETS, as before. |
 | `OPTIMAL_VALKEY_POOL_SIZE` | 4 | Connections per Engine process (1 to 32). |
 | `OPTIMAL_VALKEY_TIMEOUT_MS` | 500 | How long a command waits for its reply before the call is answered from ETS. |
+| `OPTIMAL_VALKEY_KEY_PREFIX` | `optimal:` and 16 hex characters of a hash of the Engine's replica id | What every key this Engine writes starts with: 1 to 64 of `A-Z a-z 0-9 : _ . -`, starting with a letter or digit (an invalid value is logged and the default used). The default is the same for every process on one store and differs between Engines with stores of their own, so Engines sharing a Valkey never collide. Set the same value on processes that must share buckets and caches but not a store. |
 
 Valkey being down never fails a request.
 A connection that cannot open, or fails mid-command, is closed and opened again with a backoff of 100 ms doubling to 5 seconds; while no connection is up every call runs on ETS at once, and a server that stops answering costs one timeout per connection before that.
@@ -865,7 +866,7 @@ When Valkey answers again, the first step on a bucket the process spent during t
 
 What is stored, and how:
 
-* Keys are `optimal:shared:<namespace>:<generation>:<key>`; clearing a namespace moves its generation in one command, and the old keys expire.
+* Keys are `<prefix>:shared:<namespace>:<generation>:<key>`, with the prefix above; clearing a namespace moves its generation in one command, and the old keys expire.
 * Cached values are signed with an HMAC: a value this Engine did not write reads as a miss. The key comes from `CONNECTOR_KEY`; give every process that shares a Valkey the same `CONNECTOR_KEY` and they share cache entries, otherwise each reads only its own (the rate limits are shared either way). An `openbao:` reference in `CONNECTOR_KEY` is resolved through the Engine's secret resolver, never used as the key; while it cannot be read the process signs with a key of its own and logs why.
 * The key cache stores the SHA-256 of the stored bcrypt hash and the secret, never either of them.
 * A gate cache entry is keyed by the Engine's replica id, so Engines with stores of their own never share one; a store without a replica id keeps its gate cache entries in the process's ETS table.
