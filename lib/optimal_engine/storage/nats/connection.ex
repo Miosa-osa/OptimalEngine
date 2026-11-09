@@ -427,7 +427,8 @@ defmodule OptimalEngine.Storage.NATS.Connection do
   # `tls://`, CONNECT, then a PING whose PONG proves the server took the
   # CONNECT (it answers -ERR and closes for a refused credential).
   defp open(config, timeout) do
-    with {:ok, tcp} <-
+    with {:ok, config} <- NATS.credentials(config),
+         {:ok, tcp} <-
            :gen_tcp.connect(
              String.to_charlist(config.hostname),
              config.port,

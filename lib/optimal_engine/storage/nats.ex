@@ -11,6 +11,9 @@ defmodule OptimalEngine.Storage.NATS do
   closes. `OPTIMAL_NATS_URL` is `nats://[user:password@|token@]host[:port]`
   (`tls://` for TLS). The URL carries the credential, so it is never logged,
   described or returned by the API; `safe_config/1` is the shape a route may show.
+  `OPTIMAL_NATS_TOKEN` or `OPTIMAL_NATS_PASSWORD`, when set, is the credential
+  instead of the URL's; each is read through `OptimalEngine.Secrets`, so it may
+  be an `openbao:<path>#<field>` reference (`credentials/1`).
 
   Health is a `PING` the server answered `PONG` and a `$JS.API.INFO` request
   JetStream answered, so a core NATS server without JetStream reports
@@ -20,7 +23,11 @@ defmodule OptimalEngine.Storage.NATS do
   a healthy provider has stored and replayed a message, not merely connected.
   """
 
+  alias OptimalEngine.Secrets
+
   @env "OPTIMAL_NATS_URL"
+  @token_env "OPTIMAL_NATS_TOKEN"
+  @password_env "OPTIMAL_NATS_PASSWORD"
   @default_port 4222
   @default_timeout 2_000
   @js_api "$JS.API"
@@ -205,7 +212,8 @@ defmodule OptimalEngine.Storage.NATS do
   # The socket is closed on every path, a refused or failed handshake
   # included: a server that answers -ERR, or is not NATS, used to keep it open.
   defp with_connection(config, timeout, fun) do
-    with {:ok, socket} <- connect(config, timeout) do
+    with {:ok, config} <- credentials(config),
+         {:ok, socket} <- connect(config, timeout) do
       conn = %{socket: socket, buffer: "", inbox: "_INBOX.#{random()}", sid: 1}
 
       case safe_handshake(conn, config, timeout) do
@@ -279,6 +287,35 @@ defmodule OptimalEngine.Storage.NATS do
       {:ok, conn}
     else
       {:error, reason} -> {:error, reason, conn}
+    end
+  end
+
+  @doc """
+  `config` with the credential from `OPTIMAL_NATS_TOKEN` or
+  `OPTIMAL_NATS_PASSWORD` when one is set, each read through
+  `OptimalEngine.Secrets` (so it may be an `openbao:<path>#<field>`
+  reference), in place of the URL's. A token wins over a password; a password
+  goes with the URL's user. Unset, the URL's own credential stands. A
+  reference OpenBao cannot answer is `{:error, {:token_unavailable, reason}}`
+  or `{:error, {:password_unavailable, reason}}`, and nothing connects.
+  """
+  @spec credentials(map()) :: {:ok, map()} | {:error, {atom(), term()}}
+  def credentials(config) do
+    with {:ok, token} <- credential(@token_env, :token_unavailable),
+         {:ok, password} <- credential(@password_env, :password_unavailable) do
+      cond do
+        is_binary(token) -> {:ok, %{config | token: token, password: nil}}
+        is_binary(password) -> {:ok, %{config | password: password, token: nil}}
+        true -> {:ok, config}
+      end
+    end
+  end
+
+  defp credential(name, unavailable) do
+    case Secrets.fetch(name) do
+      {:ok, value} -> {:ok, value}
+      {:error, :not_set} -> {:ok, nil}
+      {:error, {:secret_unavailable, _name, reason}} -> {:error, {unavailable, reason}}
     end
   end
 

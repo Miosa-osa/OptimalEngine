@@ -87,6 +87,37 @@ defmodule OptimalEngine.Storage.OpenBao.Adapter do
     }
   end
 
+  @doc """
+  Whether OpenBao is reachable, initialized and sealed, for the provider
+  inventory (`runtime`). With `probe: true` it asks `sys/health` once
+  (`checked: "live"`); otherwise it reports what the last data-path call found
+  while its outage window is open (`checked: "last_call"`) or nothing
+  (`checked: "not_checked"`), and asks OpenBao nothing. Never the token or the
+  address.
+  """
+  @spec runtime(keyword()) :: map()
+  def runtime(opts \\ []) do
+    cond do
+      not OpenBao.configured?() ->
+        %{reachable: nil, initialized: nil, sealed: nil, checked: "not_configured"}
+
+      Keyword.get(opts, :probe, false) ->
+        opts |> OpenBao.server_state() |> Map.put(:checked, "live")
+
+      true ->
+        case OpenBao.last_outage() do
+          :openbao_sealed ->
+            %{reachable: true, initialized: nil, sealed: true, checked: "last_call"}
+
+          :openbao_unreachable ->
+            %{reachable: false, initialized: nil, sealed: nil, checked: "last_call"}
+
+          nil ->
+            %{reachable: nil, initialized: nil, sealed: nil, checked: "not_checked"}
+        end
+    end
+  end
+
   @doc "Provider health: initialized, unsealed, token accepted. Never raises."
   @spec health(keyword()) :: OptimalEngine.Storage.Provider.health()
   def health(opts \\ []) do

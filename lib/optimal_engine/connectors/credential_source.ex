@@ -257,9 +257,8 @@ defmodule OptimalEngine.Connectors.CredentialSource do
           {:ok, envelope} ->
             {:ok, Map.put(config, @sealed_reference, envelope)}
 
-          {:error, :key_missing} ->
-            Logger.error("Broker reference refused: CONNECTOR_KEY is not configured.")
-            {:error, :connector_key_missing}
+          {:error, reason} ->
+            {:error, Credential.refusal(reason, "Broker reference refused")}
         end
 
       _other ->
@@ -353,6 +352,7 @@ defmodule OptimalEngine.Connectors.CredentialSource do
     case {Map.get(config, @sealed_reference), value(scope, :id)} do
       {envelope, id} when is_binary(envelope) and is_binary(id) and id != "" ->
         case open(envelope, aad(%{id: id})) do
+          {:error, _reason} = error -> error
           nil -> {:error, :broker_reference_unreadable}
           reference -> {:ok, reference}
         end
@@ -367,8 +367,16 @@ defmodule OptimalEngine.Connectors.CredentialSource do
 
   defp open(envelope, aad) do
     case Credential.decrypt(envelope, aad) do
-      {:ok, %{@reference => reference}} when is_binary(reference) -> reference
-      _unreadable -> nil
+      {:ok, %{@reference => reference}} when is_binary(reference) ->
+        reference
+
+      {:error, reason} ->
+        if Credential.key_error?(reason),
+          do: {:error, Credential.refusal(reason, "Broker reference not opened")},
+          else: nil
+
+      _unreadable ->
+        nil
     end
   end
 

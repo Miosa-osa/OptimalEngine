@@ -251,8 +251,8 @@ defmodule OptimalEngine.Secrets.OpenBaoSecretsTest do
 
       log =
         capture_log(fn ->
-          assert Credential.decrypt(envelope) == {:error, :key_missing}
-          assert Credential.encrypt(%{"api_key" => "k"}) == {:error, :key_missing}
+          assert Credential.decrypt(envelope) == {:error, :key_unavailable}
+          assert Credential.encrypt(%{"api_key" => "k"}) == {:error, :key_unavailable}
         end)
 
       assert log =~ "CONNECTOR_KEY"

@@ -166,7 +166,8 @@ defmodule OptimalEngine.Storage.Providers do
       probe: :nats,
       serves: [],
       required_env: ["OPTIMAL_NATS_URL"],
-      optional_env: ~w(OPTIMAL_NATS_FLOWS OPTIMAL_NATS_NAMESPACE OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS)
+      optional_env:
+        ~w(OPTIMAL_NATS_FLOWS OPTIMAL_NATS_NAMESPACE OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS OPTIMAL_NATS_TOKEN OPTIMAL_NATS_PASSWORD)
     },
     %{
       id: "valkey",
@@ -179,7 +180,7 @@ defmodule OptimalEngine.Storage.Providers do
       probe: :valkey,
       serves: [],
       required_env: ["OPTIMAL_VALKEY_URL"],
-      optional_env: []
+      optional_env: ["OPTIMAL_VALKEY_PASSWORD"]
     },
     %{
       id: "qdrant",
@@ -367,18 +368,26 @@ defmodule OptimalEngine.Storage.Providers do
     |> Map.put(:required_environment, provider.required_env)
     |> Map.put(:optional_environment, provider.optional_env)
     |> Map.put(:missing_environment, missing)
-    |> put_runtime(provider.adapter, adapter_implemented)
+    |> put_runtime(provider.adapter, adapter_implemented, probe?)
   end
 
   # An adapter that keeps a live client (the NATS connection) reports it as it
-  # is now: connected, reconnecting, or idle without configuration.
-  defp put_runtime(inspected, adapter, true) do
-    if function_exported?(adapter, :runtime, 0),
-      do: Map.put(inspected, :runtime, adapter.runtime()),
-      else: inspected
+  # is now: connected, reconnecting, or idle without configuration. One whose
+  # state needs a request (OpenBao's seal) asks only for a probed inventory.
+  defp put_runtime(inspected, adapter, true, probe?) do
+    cond do
+      function_exported?(adapter, :runtime, 1) ->
+        Map.put(inspected, :runtime, adapter.runtime(probe: probe?))
+
+      function_exported?(adapter, :runtime, 0) ->
+        Map.put(inspected, :runtime, adapter.runtime())
+
+      true ->
+        inspected
+    end
   end
 
-  defp put_runtime(inspected, _adapter, _implemented), do: inspected
+  defp put_runtime(inspected, _adapter, _implemented, _probe?), do: inspected
 
   defp put_selected(inspected, %{id: "postgres", store: store}) do
     inspected

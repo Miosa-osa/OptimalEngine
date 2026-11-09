@@ -1406,8 +1406,15 @@ defmodule Mix.Tasks.Optimal.RealityCheck do
       governed_connector_probes(state)
     else
       probe(state, "Connectors.credentials_ready?", fn ->
-        {:error, "CONNECTOR_KEY is not configured; connector credentials cannot be stored"}
+        {:error, "connector credentials cannot be stored: " <> key_problem()}
       end)
+    end
+  end
+
+  defp key_problem do
+    case OptimalEngine.Connectors.Credential.key_status() do
+      :ok -> "the key became usable after the check"
+      {:error, reason} -> OptimalEngine.Connectors.Credential.describe(reason)
     end
   end
 

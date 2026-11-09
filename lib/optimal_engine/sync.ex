@@ -2980,8 +2980,8 @@ defmodule OptimalEngine.Sync do
            max_class: max_class
          }}
 
-      {:error, _} ->
-        {:error, :connector_key_missing}
+      {:error, reason} ->
+        {:error, Credential.refusal(reason, "Sync peer refused")}
     end
   end
 
@@ -2996,10 +2996,27 @@ defmodule OptimalEngine.Sync do
     end
   end
 
+  # The stored key may be an `openbao:<path>#<field>` reference, resolved for
+  # each use (`OptimalEngine.Secrets.resolve_value/2`). A master key that
+  # cannot be used is named as such, not as an unreadable credential.
   defp peer_key(%{credential: envelope}) do
     case Credential.decrypt(envelope) do
-      {:ok, %{"api_key" => key}} -> {:ok, key}
-      _ -> {:error, :peer_credential_unreadable}
+      {:ok, %{"api_key" => key}} when is_binary(key) ->
+        case OptimalEngine.Secrets.resolve_value("Sync peer key", key) do
+          {:ok, key} ->
+            {:ok, key}
+
+          {:error, {:secret_unavailable, _label, reason}} ->
+            {:error, {:peer_key_unavailable, reason}}
+        end
+
+      {:error, reason} ->
+        if Credential.key_error?(reason),
+          do: {:error, Credential.refusal(reason, "Sync peer key not opened")},
+          else: {:error, :peer_credential_unreadable}
+
+      _unreadable ->
+        {:error, :peer_credential_unreadable}
     end
   end
 

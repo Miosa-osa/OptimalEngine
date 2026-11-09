@@ -213,6 +213,10 @@ defmodule OptimalEngine.Federation do
   defp public_reason({:invalid_as_of, _value}), do: "invalid as_of"
   defp public_reason({:http_status, status}) when is_integer(status), do: "http status #{status}"
   defp public_reason(:peer_credential_unreadable), do: "peer credential unreadable"
+  defp public_reason({:peer_key_unavailable, _reason}), do: "peer key unavailable"
+  defp public_reason(:connector_key_missing), do: "connector key missing"
+  defp public_reason(:connector_key_invalid), do: "connector key invalid"
+  defp public_reason(:connector_key_unavailable), do: "connector key unavailable"
   defp public_reason(_other), do: "unavailable"
 
   defp remote_search(peer, query, limit, as_of) do
@@ -249,10 +253,27 @@ defmodule OptimalEngine.Federation do
     end
   end
 
+  # The stored key may be an `openbao:<path>#<field>` reference, resolved for
+  # each use (`OptimalEngine.Secrets.resolve_value/2`). A master key that
+  # cannot be used is named as such, not as an unreadable credential.
   defp peer_key(%{credential: envelope}) do
     case Credential.decrypt(envelope) do
-      {:ok, %{"api_key" => key}} -> {:ok, key}
-      _ -> {:error, :peer_credential_unreadable}
+      {:ok, %{"api_key" => key}} when is_binary(key) ->
+        case OptimalEngine.Secrets.resolve_value("Federation peer key", key) do
+          {:ok, key} ->
+            {:ok, key}
+
+          {:error, {:secret_unavailable, _label, reason}} ->
+            {:error, {:peer_key_unavailable, reason}}
+        end
+
+      {:error, reason} ->
+        if Credential.key_error?(reason),
+          do: {:error, Credential.refusal(reason, "Federation peer key not opened")},
+          else: {:error, :peer_credential_unreadable}
+
+      _unreadable ->
+        {:error, :peer_credential_unreadable}
     end
   end
 
@@ -279,8 +300,8 @@ defmodule OptimalEngine.Federation do
 
         {:ok, %{workspace_id: attrs["workspace_id"], url: attrs["url"], share_up: share_up}}
 
-      {:error, _} ->
-        {:error, :connector_key_missing}
+      {:error, reason} ->
+        {:error, Credential.refusal(reason, "Federation peer refused")}
     end
   end
 end

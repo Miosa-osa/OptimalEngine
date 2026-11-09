@@ -97,6 +97,7 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 | `OPTIMAL_OFFSITE_BACKUP_INTERVAL_MS`, `OPTIMAL_OFFSITE_BACKUP_KEEP`, `OPTIMAL_OFFSITE_BACKUP_KEEP_LOCAL` | off, `14`, `3` | Scheduled offsite backups and how many copies are kept. |
 | `CONNECTOR_KEY` | none | 64 hex characters, or `openbao:<path>#<field>`; seals connector and peer credentials in the database. |
 | `OPTIMAL_AUTHORITY_KEY` | none | 64 hex characters, or `openbao:<path>#<field>`; wraps the authority signing keys. |
+| `OPTIMAL_VALKEY_PASSWORD`, `OPTIMAL_NATS_TOKEN`, `OPTIMAL_NATS_PASSWORD`, `OPTIMAL_QDRANT_API_KEY` | none | Service credentials, each a value or `openbao:<path>#<field>`; the Valkey and NATS ones take the place of a credential in `OPTIMAL_VALKEY_URL` or `OPTIMAL_NATS_URL`. |
 | `OPTIMAL_OPENBAO_ADDR`, `OPTIMAL_OPENBAO_TOKEN` | none | OpenBao address and token. With both set the secret references above resolve; connector credentials stay in the Engine unless `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`. |
 | `OPTIMAL_OPENBAO_RETRY_AFTER_MS` | `5000` | After OpenBao is found sealed or not answering, how long every call fails at once with that reason before OpenBao is asked again. `0` asks every time. |
 | `OPTIMAL_OPENBAO_KV_MOUNT` | `secret` | KV version 2 mount for references and connector credentials; enabled on first write when the token may. |

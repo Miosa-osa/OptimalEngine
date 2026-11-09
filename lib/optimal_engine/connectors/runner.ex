@@ -609,18 +609,29 @@ defmodule OptimalEngine.Connectors.Runner do
         {:error, reason} -> {:error, {:credentials_unavailable, reason}}
       end
     else
-      {:ok, maybe_decrypt_credentials(row.config)}
+      maybe_decrypt_credentials(row.config)
     end
   end
 
+  # A key that cannot be used fails the run with the key's own reason: the
+  # adapter would otherwise start without its credentials and report them
+  # missing, which sends the operator to the wrong place.
   defp maybe_decrypt_credentials(%{"credentials_ciphertext" => envelope} = config) do
     case Credential.decrypt(envelope) do
-      {:ok, creds} -> Map.merge(config, creds)
-      _ -> config
+      {:ok, creds} ->
+        {:ok, Map.merge(config, creds)}
+
+      {:error, reason} ->
+        if Credential.key_error?(reason),
+          do:
+            {:error,
+             {:credentials_unavailable,
+              Credential.refusal(reason, "Connector credentials not opened")}},
+          else: {:ok, config}
     end
   end
 
-  defp maybe_decrypt_credentials(config), do: config
+  defp maybe_decrypt_credentials(config), do: {:ok, config}
 
   defp decode_config(nil), do: %{}
   defp decode_config(""), do: %{}
@@ -1012,9 +1023,8 @@ defmodule OptimalEngine.Connectors.Runner do
       {:ok, envelope} ->
         {:ok, Map.put(config, "credentials_ciphertext", envelope)}
 
-      {:error, :key_missing} ->
-        Logger.error("Connector credentials refused: CONNECTOR_KEY is not configured.")
-        {:error, :connector_key_missing}
+      {:error, reason} ->
+        {:error, Credential.refusal(reason, "Connector credentials refused")}
     end
   end
 

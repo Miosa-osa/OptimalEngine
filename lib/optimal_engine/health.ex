@@ -165,8 +165,9 @@ defmodule OptimalEngine.Health do
       Secrets.source("CONNECTOR_KEY") == "openbao" ->
         {:warn, :connector_key_unavailable}
 
+      # Set but not a key, or not set: the check names which.
       connectors_configured?() ->
-        {:error, :connector_key_missing}
+        Credential.key_status()
 
       true ->
         # No connectors registered yet + no key set — that's the default

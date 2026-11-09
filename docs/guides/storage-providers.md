@@ -521,6 +521,9 @@ It is configured by `OPTIMAL_OPENBAO_ADDR` and `OPTIMAL_OPENBAO_TOKEN` (sent as 
 A managed MIOSA Engine runs OpenBao in its guest at `http://127.0.0.1:8200` and sets both variables.
 Without OpenBao every secret below comes from the environment exactly as before.
 
+In `GET /api/storage/providers`, `openbao` reports `serves` (`secret_references`, `connector_credentials`, `backup_key_wrapping`, whichever the configuration routes through it) and `data_path` like every provider, and a `runtime` block with what only OpenBao has: `reachable`, `initialized` and `sealed`.
+With `?probe=true` they are what `sys/health` answers now (`checked: "live"`); without it, what the last call that needed a secret found while its outage window is open (`checked: "last_call"`), or `null` (`checked: "not_checked"`), and OpenBao is not asked.
+
 ### Secret References
 
 Any of these variables may hold an OpenBao reference instead of the value itself:
@@ -528,7 +531,11 @@ Any of these variables may hold an OpenBao reference instead of the value itself
 ```text
 OPTIMAL_BACKUP_KEY             OPTIMAL_AUTHORITY_KEY          CONNECTOR_KEY
 OPTIMAL_S3_ACCESS_KEY_ID       OPTIMAL_S3_SECRET_ACCESS_KEY   OPTIMAL_QDRANT_API_KEY
+OPTIMAL_VALKEY_PASSWORD        OPTIMAL_NATS_TOKEN             OPTIMAL_NATS_PASSWORD
 ```
+
+`OPTIMAL_VALKEY_PASSWORD` is sent with `AUTH` instead of a password in `OPTIMAL_VALKEY_URL`, and `OPTIMAL_NATS_TOKEN` or `OPTIMAL_NATS_PASSWORD` (with the URL's user) is sent in `CONNECT` instead of the URL's credential, so the URL can name the server alone.
+The API key a sync or federation peer is added with (`POST /api/sync/peers`, `api_key`) may be a reference too: it is sealed with `CONNECTOR_KEY` as written and resolved each time the peer is called.
 
 A reference is `openbao:<path>#<field>`: the `<field>` of the KV version 2 secret at `<path>` under the mount.
 
@@ -540,7 +547,8 @@ export OPTIMAL_AUTHORITY_KEY=openbao:optimal/engine#authority_key
 
 A value read from OpenBao is kept in memory for a minute, so a rotated secret is read within the minute; a failure is never kept.
 A reference never falls back: OpenBao not configured, sealed, unreachable, refusing the token, or holding no such secret or field fails the caller with that reason, and the log line names the variable and the reason, never the value.
-A backup is then refused with `backup_key_unavailable`, an authority key is not created or opened (`authority_key_unavailable`, and never stored unwrapped, even on an open development Engine), connector envelopes are not sealed or opened, the object store reports `credentials_unavailable`, and a Qdrant request is not sent (`api_key_unavailable`).
+A backup is then refused with `backup_key_unavailable`, an authority key is not created or opened (`authority_key_unavailable`, and never stored unwrapped, even on an open development Engine), connector envelopes are not sealed or opened, the object store reports `credentials_unavailable`, a Qdrant request is not sent (`api_key_unavailable`), Valkey and NATS do not connect (`password_unavailable`, `token_unavailable`), and a peer is not called (`peer_key_unavailable`).
+When `CONNECTOR_KEY` itself cannot be used the reason says which way: `connector_key_missing` (not set), `connector_key_invalid` (not 64 hex characters) or `connector_key_unavailable` (a reference OpenBao could not answer).
 `OPTIMAL_OPENBAO_TOKEN` itself cannot be a reference.
 A renewable token is renewed (`auth/token/renew-self`) when half its remaining time has passed, for as long as the Engine runs; a token that expires and cannot be renewed is logged once, with when it runs out; a token with no expiry (a root token) needs nothing.
 
@@ -626,7 +634,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
 | `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`), the proof (a Parquet file written and read back), the daily Parquet export of each workspace's metrics, sync runs, ledger and usage, and the read-only `GET /api/analytics/query` over them (see [DuckDB And Parquet Analytics](#duckdb-and-parquet-analytics)) | Arbitrary SQL; Engine-wide metrics; any dataset beyond the four |
-| `openbao` | Wired, in the data path | Secret references for the backup, authority, connector and S3 keys; connector credentials kept in KV instead of the database (opt in, not in Engine backups); backup data keys wrapped by transit beside `OPTIMAL_BACKUP_KEY`; the probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` ([OpenBao](#openbao)) | PKI; the OpenBao token itself still comes from the environment; peer sync credentials are still sealed with `CONNECTOR_KEY` |
+| `openbao` | Wired, in the data path | Secret references for the backup, authority, connector, S3, Qdrant, Valkey and NATS credentials and for sync and federation peer keys; connector credentials kept in KV instead of the database (opt in, not in Engine backups); backup data keys wrapped by transit beside `OPTIMAL_BACKUP_KEY`; the probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` ([OpenBao](#openbao)) | PKI; the OpenBao token itself still comes from the environment; a peer key is kept sealed with `CONNECTOR_KEY` in the database (as written: a value, or a reference resolved on each call) |
 | `fractal` | Declared, no adapter yet | | Everything |
 
 `GET /api/storage/providers` reports `adapter_implemented` for each entry and `adapter_missing` as the lifecycle state of the declared ones, whatever is configured.

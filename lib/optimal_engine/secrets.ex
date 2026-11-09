@@ -4,8 +4,9 @@ defmodule OptimalEngine.Secrets do
 
   A secret the Engine reads by name (`OPTIMAL_BACKUP_KEY`,
   `OPTIMAL_AUTHORITY_KEY`, `CONNECTOR_KEY`, `OPTIMAL_S3_ACCESS_KEY_ID`,
-  `OPTIMAL_S3_SECRET_ACCESS_KEY`, `OPTIMAL_QDRANT_API_KEY`) is resolved by
-  `fetch/1`:
+  `OPTIMAL_S3_SECRET_ACCESS_KEY`, `OPTIMAL_QDRANT_API_KEY`,
+  `OPTIMAL_VALKEY_PASSWORD`, `OPTIMAL_NATS_TOKEN`, `OPTIMAL_NATS_PASSWORD`) is
+  resolved by `fetch/1`:
 
     * a plain value in the environment is the secret, exactly as before;
     * a value of the form `openbao:<path>#<field>` is a reference: the secret
@@ -48,7 +49,8 @@ defmodule OptimalEngine.Secrets do
   @not_references ~w(OPTIMAL_OPENBAO_ADDR OPTIMAL_OPENBAO_TOKEN)
   @engine_secrets ~w(OPTIMAL_BACKUP_KEY OPTIMAL_AUTHORITY_KEY CONNECTOR_KEY
                      OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY
-                     OPTIMAL_QDRANT_API_KEY)
+                     OPTIMAL_QDRANT_API_KEY
+                     OPTIMAL_VALKEY_PASSWORD OPTIMAL_NATS_TOKEN OPTIMAL_NATS_PASSWORD)
 
   @type reason ::
           :openbao_not_configured
@@ -89,6 +91,27 @@ defmodule OptimalEngine.Secrets do
         {:ok, value}
     end
   end
+
+  @doc """
+  A secret given as a value rather than by a variable, such as the API key a
+  sync or federation peer was added with: a plain value is the secret, and an
+  `openbao:<path>#<field>` reference is resolved as `fetch/1` resolves one.
+  `label` names it in the error and the log line, never the value.
+  """
+  @spec resolve_value(String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, {:secret_unavailable, String.t(), reason()}}
+  def resolve_value(label, @prefix <> reference) when is_binary(label) do
+    case resolve(reference) do
+      {:ok, value} ->
+        {:ok, value}
+
+      {:error, reason} ->
+        Logger.error("Secret #{label} could not be read from OpenBao: #{describe(reason)}.")
+        {:error, {:secret_unavailable, label, reason}}
+    end
+  end
+
+  def resolve_value(label, value) when is_binary(label) and is_binary(value), do: {:ok, value}
 
   @doc """
   Where `name` is read from, without reading it: `"env"`, `"openbao"` (a
