@@ -31,7 +31,8 @@ Providers are things a deployment grows onto, not the default shape:
 | PostgreSQL | Wired but partial: an `OPTIMAL_STORE=postgres` Engine that refuses replication | The canonical relational store for engines that share one database |
 | NATS JetStream | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS`, each sent after the Engine stored it in SQLite; nothing without them |
 | Valkey | Adapter, health-checked and proved, in the data path | Shared rate limits, the verified API key cache and the sync gate cache, with ETS as the fallback ([Valkey](storage-providers.md#valkey)) |
-| Qdrant, DuckDB and Parquet, OpenBao | Adapter, health-checked and proved | Nothing yet: no Engine feature reads or writes them |
+| Qdrant, DuckDB and Parquet | Adapter, health-checked and proved | Nothing yet: no Engine feature reads or writes them |
+| OpenBao | Adapter, health-checked, proved, and in the data path when configured | Secret references for the backup, authority, connector and S3 keys, connector credentials (opt in), backup transit keys ([Storage providers](storage-providers.md#openbao)) |
 | Fractal | Declared, no adapter yet | Nothing: the Engine cannot use it |
 
 ## Choosing A Mode
@@ -221,7 +222,8 @@ Only two providers are usable today.
 | PostgreSQL | Wired but partial | The canonical relational store of a Postgres build |
 | NATS JetStream | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS`; nothing without them |
 | Valkey | Adapter, health-checked and proved, in the data path | Shared rate limits and caches, ETS as the fallback |
-| Qdrant, DuckDB and Parquet, OpenBao | Adapter, health-checked and proved | Nothing yet; no Engine feature uses them |
+| Qdrant, DuckDB and Parquet | Adapter, health-checked and proved | Nothing yet; no Engine feature uses them |
+| OpenBao | Adapter, health-checked, proved, and in the data path when configured | Secret references, connector credentials (opt in), backup transit keys |
 | Fractal | Not wired yet | Nothing; declared with no adapter |
 
 ### S3 with Garage

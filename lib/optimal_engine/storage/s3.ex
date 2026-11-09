@@ -30,6 +30,11 @@ defmodule OptimalEngine.Storage.S3 do
   `export`, and surrounding quotes are allowed. A value set in the environment
   always wins over the file.
 
+  The access key id and the secret may also be OpenBao references
+  (`OPTIMAL_S3_SECRET_ACCESS_KEY=openbao:optimal/engine#s3_secret`, see
+  `OptimalEngine.Secrets`). A reference OpenBao cannot answer is
+  `{:error, :credentials_unavailable}`, never an unsigned request.
+
   Credentials are read on every call, so replacing the file rotates them
   without a restart. They are never returned by any public function, logged,
   or placed in an error value.
@@ -93,7 +98,8 @@ defmodule OptimalEngine.Storage.S3 do
              :not_configured
              | :invalid_endpoint
              | :credentials_file_unreadable
-             | :credentials_file_invalid}
+             | :credentials_file_invalid
+             | :credentials_unavailable}
   def config do
     with {:ok, endpoint} <- endpoint(),
          {:ok, bucket} <- required("OPTIMAL_S3_BUCKET"),
@@ -937,11 +943,23 @@ defmodule OptimalEngine.Storage.S3 do
   # The environment wins value by value; the credentials file is read only when
   # the environment leaves a credential unset.
   defp credentials do
-    from_env = %{
-      access_key_id: optional("OPTIMAL_S3_ACCESS_KEY_ID", ""),
-      secret_access_key: optional("OPTIMAL_S3_SECRET_ACCESS_KEY", "")
-    }
+    with {:ok, key_id} <- secret("OPTIMAL_S3_ACCESS_KEY_ID"),
+         {:ok, secret} <- secret("OPTIMAL_S3_SECRET_ACCESS_KEY") do
+      credentials(%{access_key_id: key_id, secret_access_key: secret})
+    end
+  end
 
+  # A plain value or an OpenBao reference; a reference that cannot be read is
+  # an error of its own, not an unset credential the file might fill.
+  defp secret(name) do
+    case OptimalEngine.Secrets.fetch(name) do
+      {:ok, value} -> {:ok, value}
+      {:error, :not_set} -> {:ok, ""}
+      {:error, {:secret_unavailable, _name, _reason}} -> {:error, :credentials_unavailable}
+    end
+  end
+
+  defp credentials(from_env) do
     if from_env.access_key_id != "" and from_env.secret_access_key != "" do
       {:ok, from_env.access_key_id, from_env.secret_access_key}
     else

@@ -34,6 +34,21 @@ defmodule OptimalEngine.Backup.Envelope do
 
   Losing the backup key means losing every copy sealed with it: there is no
   recovery path, by design.
+
+  ## OpenBao transit, and why the backup key stays
+
+  With `OPTIMAL_OPENBAO_TRANSIT_KEY` set, each data key is made by OpenBao
+  transit and wrapped twice: by transit (`transit_key_id`,
+  `transit_wrapped_key` in the header) and by `OPTIMAL_BACKUP_KEY` (`key_id`,
+  `wrapped_key`). The OpenBao that holds the transit key usually runs on the
+  same machine as the Engine, so it is lost with the machine; the copy is
+  named by the backup key and opens with `OPTIMAL_BACKUP_KEY` alone, with no
+  OpenBao at all. Keep that key off the machine.
+
+  A transit key without `OPTIMAL_BACKUP_KEY` is refused
+  (`:backup_recovery_key_missing`) unless `OPTIMAL_BACKUP_TRANSIT_ONLY=true`
+  says otherwise. A copy sealed that way opens only through that transit key:
+  losing that OpenBao (its storage, or its unseal keys) loses every such copy.
   """
 
   @magic "OEBACKUP"
@@ -46,6 +61,22 @@ defmodule OptimalEngine.Backup.Envelope do
   @tag_bytes 16
   @iv_bytes 12
   @key_wrap_aad "optimal-engine-backup-key/1:"
+  @key_env "OPTIMAL_BACKUP_KEY"
+  @transit_prefix "transit:"
+  @transit_wrap "openbao-transit"
+  @transit_only_env "OPTIMAL_BACKUP_TRANSIT_ONLY"
+
+  require Logger
+
+  alias OptimalEngine.Secrets
+  alias OptimalEngine.Storage.OpenBao
+
+  @typedoc """
+  A local 32-byte backup key; an OpenBao transit key together with the local
+  key (each data key wrapped by both); or, opted into, a transit key alone.
+  """
+  @type transit :: %{mount: String.t(), name: String.t()}
+  @type key :: binary() | %{transit: transit()} | %{transit: transit(), local: binary()}
 
   @type seal_result :: %{
           format: String.t(),
@@ -67,23 +98,24 @@ defmodule OptimalEngine.Backup.Envelope do
   def format, do: @format
 
   @doc """
-  The backup key from `OPTIMAL_BACKUP_KEY`.
+  The backup key from `OPTIMAL_BACKUP_KEY`: 64 hex characters in the
+  environment, or an OpenBao reference to them (`openbao:<path>#<field>`,
+  `OptimalEngine.Secrets`).
 
-  Returns `{:error, :backup_key_missing}` when the variable is unset or blank
-  and `{:error, :backup_key_invalid}` when it is not 64 hex characters. The
+  Returns `{:error, :backup_key_missing}` when the variable is unset or blank,
+  `{:error, :backup_key_invalid}` when it is not 64 hex characters, and
+  `{:error, {:backup_key_unavailable, reason}}` when it names an OpenBao
+  secret that could not be read (sealed, unreachable, refused, absent). The
   value itself never appears in an error.
   """
-  @spec backup_key() :: {:ok, binary()} | {:error, :backup_key_missing | :backup_key_invalid}
+  @spec backup_key() ::
+          {:ok, binary()}
+          | {:error, :backup_key_missing | :backup_key_invalid | {:backup_key_unavailable, term()}}
   def backup_key do
-    case System.get_env("OPTIMAL_BACKUP_KEY") do
-      nil ->
-        {:error, :backup_key_missing}
-
-      value ->
-        case String.trim(value) do
-          "" -> {:error, :backup_key_missing}
-          hex -> decode_key(hex)
-        end
+    case Secrets.fetch(@key_env) do
+      {:ok, hex} -> decode_key(hex)
+      {:error, :not_set} -> {:error, :backup_key_missing}
+      {:error, {:secret_unavailable, _name, reason}} -> {:error, {:backup_key_unavailable, reason}}
     end
   end
 
@@ -97,11 +129,132 @@ defmodule OptimalEngine.Backup.Envelope do
   defp decode_key(_hex), do: {:error, :backup_key_invalid}
 
   @doc """
+  The key new copies are sealed under.
+
+  With `OPTIMAL_OPENBAO_TRANSIT_KEY` set it is
+  `%{transit: %{mount:, name:}, local: backup_key}`: each data key is made by
+  OpenBao transit and wrapped both by it and by `OPTIMAL_BACKUP_KEY`, so a copy
+  survives the loss of the OpenBao beside the Engine. Without
+  `OPTIMAL_BACKUP_KEY` that is `{:error, :backup_recovery_key_missing}`,
+  unless `OPTIMAL_BACKUP_TRANSIT_ONLY=true` accepts copies only that OpenBao
+  can open (`%{transit: ...}`). Without a transit key it is `backup_key/0`.
+
+  A transit key without OpenBao configured is
+  `{:error, {:backup_key_unavailable, :openbao_not_configured}}`, never a quiet
+  fall back to the local key alone.
+  """
+  @spec sealing_key() :: {:ok, key()} | {:error, term()}
+  def sealing_key do
+    case OpenBao.transit_key() do
+      nil ->
+        backup_key()
+
+      transit ->
+        if OpenBao.configured?(),
+          do: transit_sealing_key(transit),
+          else: {:error, {:backup_key_unavailable, :openbao_not_configured}}
+    end
+  end
+
+  defp transit_sealing_key(transit) do
+    case backup_key() do
+      {:ok, local} ->
+        if Secrets.source(@key_env) == "openbao" do
+          Logger.warning(
+            "#{@key_env} is read from OpenBao while OpenBao transit also wraps backups: a copy is recoverable without that OpenBao only if #{@key_env} is also kept somewhere else."
+          )
+        end
+
+        {:ok, %{transit: transit, local: local}}
+
+      {:error, :backup_key_missing} ->
+        if transit_only?(),
+          do: {:ok, %{transit: transit}},
+          else: {:error, :backup_recovery_key_missing}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  True when `OPTIMAL_BACKUP_TRANSIT_ONLY` is `true` (or `1`, `yes`): the
+  operator accepts copies wrapped only by OpenBao transit, which are lost with
+  that OpenBao.
+  """
+  @spec transit_only?() :: boolean()
+  def transit_only? do
+    value = (System.get_env(@transit_only_env) || "") |> String.trim() |> String.downcase()
+    value in ~w(true 1 yes)
+  end
+
+  @doc """
+  True when copies sealed under `key` open without OpenBao: a local key, alone
+  or beside a transit key.
+  """
+  @spec recoverable_without_openbao?(key()) :: boolean()
+  def recoverable_without_openbao?(%{local: local}) when byte_size(local) == 32, do: true
+  def recoverable_without_openbao?(%{transit: _}), do: false
+  def recoverable_without_openbao?(key) when byte_size(key) == 32, do: true
+
+  @doc """
+  A key that can open copies, for a restore: `OPTIMAL_BACKUP_KEY` when it is
+  set (no OpenBao needed), else the configured transit key. Unlike
+  `sealing_key/0` it never needs both, so a new machine with only
+  `OPTIMAL_BACKUP_KEY` restores.
+  """
+  @spec opening_key() :: {:ok, key()} | {:error, term()}
+  def opening_key do
+    case {backup_key(), OpenBao.transit_key()} do
+      {{:ok, local}, _transit} -> {:ok, local}
+      {{:error, :backup_key_missing}, nil} -> {:error, :backup_key_missing}
+      {{:error, :backup_key_missing}, transit} -> transit_opening_key(transit)
+      {error, _transit} -> error
+    end
+  end
+
+  defp transit_opening_key(transit) do
+    if OpenBao.configured?(),
+      do: {:ok, %{transit: transit}},
+      else: {:error, :backup_key_missing}
+  end
+
+  @doc """
+  The configured key whose id is `key_id`: the transit key or the backup key.
+  `{:error, {:backup_key_mismatch, key_id}}` when neither is that key, so a
+  copy sealed before a switch to transit (or back) still opens while its key
+  is configured.
+  """
+  @spec key_for(String.t()) :: {:ok, key()} | {:error, term()}
+  def key_for(key_id) when is_binary(key_id) do
+    transit = OpenBao.transit_key()
+
+    cond do
+      transit != nil and key_id(%{transit: transit}) == key_id ->
+        if OpenBao.configured?(),
+          do: {:ok, %{transit: transit}},
+          else: {:error, {:backup_key_unavailable, :openbao_not_configured}}
+
+      String.starts_with?(key_id, @transit_prefix) ->
+        {:error, {:backup_key_mismatch, key_id}}
+
+      true ->
+        with {:ok, key} <- backup_key() do
+          if key_id(key) == key_id, do: {:ok, key}, else: {:error, {:backup_key_mismatch, key_id}}
+        end
+    end
+  end
+
+  @doc """
   A short, stable identifier for a backup key: the first 16 hex characters of
   a domain-separated SHA-256. It names which key sealed a copy without
-  revealing anything usable about the key.
+  revealing anything usable about the key. A transit key's id is
+  `transit:<mount>/<name>`: OpenBao holds the key, so its name is not secret.
   """
-  @spec key_id(binary()) :: String.t()
+  @spec key_id(key()) :: String.t()
+  def key_id(%{local: local}) when byte_size(local) == 32, do: key_id(local)
+  def key_id(%{transit: %{mount: mount, name: name}}), do: @transit_prefix <> mount <> "/" <> name
+
   def key_id(key) when byte_size(key) == 32 do
     :crypto.hash(:sha256, "optimal-engine-backup-key-id:" <> key)
     |> Base.encode16(case: :lower)
@@ -131,27 +284,27 @@ defmodule OptimalEngine.Backup.Envelope do
 
   `dest` must not exist. On any failure it is removed.
   """
-  @spec seal_file(String.t(), String.t(), binary(), keyword()) ::
+  @spec seal_file(String.t(), String.t(), key(), keyword()) ::
           {:ok, seal_result()} | {:error, term()}
-  def seal_file(source, dest, key, opts \\ []) when byte_size(key) == 32 do
+  def seal_file(source, dest, key, opts \\ []) when is_map(key) or byte_size(key) == 32 do
     chunk_bytes = Keyword.get(opts, :chunk_bytes, @default_chunk_bytes)
 
     with :ok <- valid_chunk_bytes(chunk_bytes),
          {:ok, %{size: size}} <- regular_file(source),
-         {:ok, expected} <- expected_plaintext_checksum(source, opts) do
-      data_key = :crypto.strong_rand_bytes(32)
-
-      header = %{
-        "format" => @format,
-        "cipher" => @cipher,
-        "chunk_bytes" => chunk_bytes,
-        "key_id" => key_id(key),
-        "wrapped_key" => Base.encode64(wrap(key, data_key)),
-        "plaintext_bytes" => size,
-        "plaintext_sha256" => expected,
-        "backup_id" => Keyword.get(opts, :backup_id),
-        "sealed_at" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-      }
+         {:ok, expected} <- expected_plaintext_checksum(source, opts),
+         {:ok, data_key, wrapped, wrap_fields} <- new_data_key(key) do
+      header =
+        Map.merge(wrap_fields, %{
+          "format" => @format,
+          "cipher" => @cipher,
+          "chunk_bytes" => chunk_bytes,
+          "key_id" => key_id(key),
+          "wrapped_key" => wrapped,
+          "plaintext_bytes" => size,
+          "plaintext_sha256" => expected,
+          "backup_id" => Keyword.get(opts, :backup_id),
+          "sealed_at" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+        })
 
       with {:ok, sealed} <-
              with_files(source, dest, &seal_stream(&1, &2, header, data_key)) do
@@ -173,11 +326,16 @@ defmodule OptimalEngine.Backup.Envelope do
   plaintext checksum must match the header. A wrong key is reported as
   `{:backup_key_mismatch, key_id}` with the id of the key that sealed the file;
   any other failure removes `dest`, so a partial plaintext is never left behind.
+
+  With `key` left out (or `:configured`), the key is the configured one whose
+  id the header names (`key_for/1`): the transit key or the backup key.
   """
-  @spec open_file(String.t(), String.t(), binary()) :: {:ok, map()} | {:error, term()}
-  def open_file(source, dest, key) when byte_size(key) == 32 do
+  @spec open_file(String.t(), String.t(), key() | :configured) :: {:ok, map()} | {:error, term()}
+  def open_file(source, dest, key \\ :configured)
+      when key == :configured or is_map(key) or byte_size(key) == 32 do
     with_files(source, dest, fn input, output ->
       with {:ok, header, digest} <- read_prefix(input),
+           {:ok, key} <- header_key(key, header),
            {:ok, data_key} <- unwrap(key, header) do
         open_stream(input, output, header, digest, data_key)
       end
@@ -257,6 +415,37 @@ defmodule OptimalEngine.Backup.Envelope do
     end)
   end
 
+  # A local key wraps a fresh random data key itself; a transit key asks
+  # OpenBao for a data key and the wrapped copy of it, so the wrapping key
+  # never leaves OpenBao.
+  # With the local key beside it, the same data key is wrapped by the local
+  # key too, and the copy is named by the local key: it opens without OpenBao.
+  defp new_data_key(%{transit: transit, local: local}) do
+    case OpenBao.transit_data_key(transit) do
+      {:ok, data_key, transit_wrapped} ->
+        {:ok, data_key, Base.encode64(wrap(local, data_key)),
+         %{
+           "transit_key_id" => key_id(%{transit: transit}),
+           "transit_wrapped_key" => transit_wrapped
+         }}
+
+      {:error, reason} ->
+        {:error, {:backup_key_unavailable, reason}}
+    end
+  end
+
+  defp new_data_key(%{transit: transit}) do
+    case OpenBao.transit_data_key(transit) do
+      {:ok, data_key, wrapped} -> {:ok, data_key, wrapped, %{"key_wrap" => @transit_wrap}}
+      {:error, reason} -> {:error, {:backup_key_unavailable, reason}}
+    end
+  end
+
+  defp new_data_key(key) when byte_size(key) == 32 do
+    data_key = :crypto.strong_rand_bytes(32)
+    {:ok, data_key, Base.encode64(wrap(key, data_key)), %{}}
+  end
+
   defp wrap(key, data_key) do
     iv = :crypto.strong_rand_bytes(@iv_bytes)
 
@@ -269,6 +458,47 @@ defmodule OptimalEngine.Backup.Envelope do
   defp wrap_aad(key), do: @key_wrap_aad <> key_id(key)
 
   # ─── opening ─────────────────────────────────────────────────────────────
+
+  # A dual-wrapped copy opens with the local key when it is configured, and
+  # through its transit key otherwise.
+  defp header_key(:configured, %{"key_id" => key_id} = header) do
+    case {key_for(key_id), header} do
+      {{:ok, key}, _header} ->
+        {:ok, key}
+
+      {{:error, reason}, %{"transit_key_id" => transit_id}} when is_binary(transit_id) ->
+        case key_for(transit_id) do
+          {:ok, key} -> {:ok, key}
+          {:error, _transit_reason} -> {:error, reason}
+        end
+
+      {error, _header} ->
+        error
+    end
+  end
+
+  defp header_key(%{local: local}, _header), do: {:ok, local}
+  defp header_key(key, _header), do: {:ok, key}
+
+  defp unwrap(
+         %{transit: transit} = key,
+         %{"transit_key_id" => sealed_with, "transit_wrapped_key" => wrapped}
+       )
+       when is_binary(wrapped) do
+    with :ok <- same_key(key, sealed_with) do
+      transit_unwrap(transit, wrapped)
+    end
+  end
+
+  defp unwrap(%{transit: transit} = key, %{"key_id" => sealed_with} = header) do
+    with :ok <- same_key(key, sealed_with),
+         @transit_wrap <- Map.get(header, "key_wrap", :not_transit) do
+      transit_unwrap(transit, header["wrapped_key"])
+    else
+      {:error, {:backup_key_mismatch, _} = reason} -> {:error, reason}
+      _not_transit -> {:error, {:backup_decrypt_failed, :wrapped_key}}
+    end
+  end
 
   defp unwrap(key, %{"key_id" => sealed_with} = header) do
     with :ok <- same_key(key, sealed_with),
@@ -289,6 +519,15 @@ defmodule OptimalEngine.Backup.Envelope do
     else
       {:error, {:backup_key_mismatch, _} = reason} -> {:error, reason}
       _ -> {:error, {:backup_decrypt_failed, :wrapped_key}}
+    end
+  end
+
+  defp transit_unwrap(transit, wrapped) do
+    case OpenBao.transit_decrypt(transit, wrapped) do
+      {:ok, data_key} when byte_size(data_key) == 32 -> {:ok, data_key}
+      {:ok, _other} -> {:error, {:backup_decrypt_failed, :wrapped_key}}
+      {:error, :openbao_decrypt_failed} -> {:error, {:backup_decrypt_failed, :wrapped_key}}
+      {:error, reason} -> {:error, {:backup_key_unavailable, reason}}
     end
   end
 

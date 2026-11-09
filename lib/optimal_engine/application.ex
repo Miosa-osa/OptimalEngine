@@ -147,6 +147,9 @@ defmodule OptimalEngine.Application do
       # ── NATS JetStream client and its flows (idle without OPTIMAL_NATS_URL) ─
       OptimalEngine.Storage.NATS.Supervisor,
 
+      # ── OpenBao token renewal (only with OpenBao configured; :ignore without) ─
+      OptimalEngine.Storage.OpenBao.TokenRenewer,
+
       # ── HTTP API rate limiter (owns the local ETS bucket table) ──────────
       OptimalEngine.API.RateLimiter,
 

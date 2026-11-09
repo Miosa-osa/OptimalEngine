@@ -205,6 +205,8 @@ Generate the key once and store it the way `OPTIMAL_AUTHORITY_KEY` and `CONNECTO
 openssl rand -hex 32
 ```
 
+`OPTIMAL_BACKUP_KEY` may be an OpenBao reference, and an OpenBao transit key can wrap each copy's data key instead (see [OpenBao](#openbao)).
+
 Without `OPTIMAL_BACKUP_KEY` an offsite copy is refused with `backup_key_missing` and a message naming the variable, and nothing is uploaded.
 A key that is not 64 hex characters is refused with `backup_key_invalid`.
 There is no setting that uploads a plaintext copy.
@@ -502,6 +504,102 @@ docker run --rm -d -p 127.0.0.1:4222:4222 nats:2.11 -js
 OPTIMAL_TEST_NATS_URL=nats://127.0.0.1:4222 mix test test/storage/nats_jetstream_integration_test.exs
 ```
 
+## OpenBao
+
+OpenBao is where the Engine's secrets can live instead of its environment and database.
+It is configured by `OPTIMAL_OPENBAO_ADDR` and `OPTIMAL_OPENBAO_TOKEN` (sent as `X-Vault-Token`, never logged or returned), and `OPTIMAL_OPENBAO_KV_MOUNT` names the KV version 2 mount (`secret`).
+A managed MIOSA Engine runs OpenBao in its guest at `http://127.0.0.1:8200` and sets both variables.
+Without OpenBao every secret below comes from the environment exactly as before.
+
+### Secret References
+
+Any of these variables may hold an OpenBao reference instead of the value itself:
+
+```text
+OPTIMAL_BACKUP_KEY             OPTIMAL_AUTHORITY_KEY          CONNECTOR_KEY
+OPTIMAL_S3_ACCESS_KEY_ID       OPTIMAL_S3_SECRET_ACCESS_KEY
+```
+
+A reference is `openbao:<path>#<field>`: the `<field>` of the KV version 2 secret at `<path>` under the mount.
+
+```bash
+bao kv put secret/optimal/engine backup_key=$(openssl rand -hex 32) authority_key=$(openssl rand -hex 32)
+export OPTIMAL_BACKUP_KEY=openbao:optimal/engine#backup_key
+export OPTIMAL_AUTHORITY_KEY=openbao:optimal/engine#authority_key
+```
+
+A value read from OpenBao is kept in memory for a minute, so a rotated secret is read within the minute; a failure is never kept.
+A reference never falls back: OpenBao not configured, sealed, unreachable, refusing the token, or holding no such secret or field fails the caller with that reason, and the log line names the variable and the reason, never the value.
+A backup is then refused with `backup_key_unavailable`, an authority key is not created or opened (`authority_key_unavailable`, and never stored unwrapped, even on an open development Engine), connector envelopes are not sealed or opened, and the object store reports `credentials_unavailable`.
+`OPTIMAL_OPENBAO_TOKEN` itself cannot be a reference.
+A renewable token is renewed (`auth/token/renew-self`) when half its remaining time has passed, for as long as the Engine runs; a token that expires and cannot be renewed is logged once, with when it runs out; a token with no expiry (a root token) needs nothing.
+
+A sealed or unreachable OpenBao never stops the Engine from booting.
+The Engine starts and serves, and readiness (`GET /api/health`, `GET /api/status`, `Release.preflight/0`) reports it as degraded, not down: the `secrets` check warns `openbao_unavailable` with the reason (`openbao_sealed`, `openbao_unreachable`, ...), and `credential_key` warns `connector_key_unavailable` when `CONNECTOR_KEY` is a reference.
+Until OpenBao is unsealed, each feature that needs a secret fails with that reason as above; nothing needs a restart once it is.
+While OpenBao is sealed or not answering, the Engine asks it again only every `OPTIMAL_OPENBAO_RETRY_AFTER_MS` (5000 ms): calls in between fail at once with the same reason rather than each waiting out the three-second timeout, so an unsealed OpenBao is used again within that window.
+
+### Connector Credentials
+
+Connector credentials move into OpenBao only when the operator opts in with `OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao`.
+Configuring OpenBao (for secret references, say) does not move them: without that setting they are sealed into the connector row with `CONNECTOR_KEY`, as they always were.
+Opted in, they are written to `optimal/connectors/<tenant>/<connector id>` under the mount, and the connector row keeps only the marker `"credentials_store": "openbao"`: nothing in the Engine database can open them, and `CONNECTOR_KEY` is not needed for them.
+
+**Engine backups do not include OpenBao.** A backup of the Engine (local or offsite) copies the Engine database, which holds the marker, not the credentials.
+An operator who opts in must back up OpenBao separately: its storage (for integrated storage, `bao operator raft snapshot save <file>`; for file storage, its data directory) and its unseal keys or recovery keys.
+Restoring an Engine backup without that OpenBao gives connectors that fail every sync with `credentials_not_found` until their credentials are entered again.
+The path comes from the row's own tenant and id, never from its config.
+A sync reads the secret just before the adapter starts, for that cycle only; OpenBao sealed or unreachable fails the run with `credentials_unavailable` and the reason, before any adapter code runs.
+A write OpenBao refuses is refused (`503 openbao_sealed`, `openbao_unreachable`, ...), and no row is left claiming credentials.
+A write that fails after the credentials reached OpenBao (the row write, or anything after the vault write) puts OpenBao back as the row still describes it: the secret an existing row names is written back, and a secret no row names is deleted.
+Removing a connector's credentials or deleting the connector deletes the secret; a delete OpenBao refuses keeps the connector, so no secret outlives it unseen.
+Rows sealed with `CONNECTOR_KEY` before the opt-in keep being read the way they were written, until they are migrated.
+
+To move them, opt in and run the migration, first as a dry run:
+
+```bash
+mix optimal.connector migrate-credentials --dry-run   # lists would_migrate, changes nothing
+mix optimal.connector migrate-credentials
+# in a release:
+bin/optimal eval 'OptimalEngine.Release.migrate_connector_credentials(dry_run: true)'
+bin/optimal eval 'OptimalEngine.Release.migrate_connector_credentials()'
+```
+
+Each row's envelope is opened with `CONNECTOR_KEY`, the credentials are written to OpenBao, read back and compared, and only then is the row rewritten to the marker, if it is still the row that was read.
+Any failure (a wrong `CONNECTOR_KEY`, OpenBao sealed, a copy that reads back different) leaves that row unchanged and is listed under `failed`; the run exits non-zero.
+Running it again is safe: marked rows are `already_migrated`, a running connector is `skipped` until the next run, and the output names connector ids, never a credential.
+Keep `CONNECTOR_KEY` until every row is migrated.
+`OPTIMAL_CONNECTOR_CREDENTIAL_STORE` unset, `engine` or any other value writes database envelopes; `openbao` refuses a write when OpenBao is not configured.
+
+A server initialised without a secrets engine (as the in-guest one is) gets its KV version 2 mount enabled by the Engine's first write, when the token may do that (the in-guest root token may); otherwise the write fails with `openbao_mount_missing`, and `bao secrets enable -path=secret -version=2 kv` fixes it.
+
+### Backups Under Transit
+
+With `OPTIMAL_OPENBAO_TRANSIT_KEY` set, each offsite copy's data key is made by that OpenBao transit key (under `OPTIMAL_OPENBAO_TRANSIT_MOUNT`, default `transit`) and wrapped twice: by transit, and by `OPTIMAL_BACKUP_KEY`.
+The OpenBao beside the Engine (the in-guest one on a managed MIOSA Engine) is lost with the machine, and an offsite copy only it could open would be lost with it.
+So the copy is named by the backup key and restores on a new machine with `OPTIMAL_BACKUP_KEY` alone, no OpenBao reachable or configured; keep that key off the machine.
+With `OPTIMAL_BACKUP_KEY` set, the transit wrap adds a second way in while that OpenBao is up; it never replaces the backup key.
+
+```bash
+bao secrets enable transit
+bao write -f transit/keys/optimal-backup
+export OPTIMAL_OPENBAO_TRANSIT_KEY=optimal-backup
+```
+
+A transit key without `OPTIMAL_BACKUP_KEY` is refused (`backup_recovery_key_missing`), and no backup is taken or shipped.
+`OPTIMAL_BACKUP_TRANSIT_ONLY=true` accepts copies wrapped by transit alone. **Risk:** such a copy opens only through that OpenBao's transit key, so losing that OpenBao (the machine it runs on, its storage, or its unseal keys) loses every copy sealed that way, which is exactly the loss an offsite backup is for.
+`OPTIMAL_BACKUP_KEY` given as an OpenBao reference to the same OpenBao gives no such protection either; the Engine logs a warning when it is.
+
+The sealed header of a copy wrapped twice records the backup key's id as `key_id` with its `wrapped_key`, and the transit key as `transit_key_id` (`transit:<mount>/<name>`) with `transit_wrapped_key`, OpenBao's ciphertext of the same data key; the header is authenticated with the first chunk.
+A transit-only copy records `key_wrap: openbao-transit`, the key id `transit:<mount>/<name>`, and OpenBao's ciphertext as its `wrapped_key`.
+A copy opens with whichever configured key its header names, so copies sealed under `OPTIMAL_BACKUP_KEY` before the switch still restore while that key is set.
+A transit key named without OpenBao configured is refused, never replaced by the local key, and a missing transit key is `openbao_transit_key_missing`.
+Rotating the transit key (`bao write -f transit/keys/optimal-backup/rotate`) keeps every older copy restorable; deleting the key loses every copy sealed with it.
+`GET /api/backup/offsite` reports `schedule.encryption.key_source` (`openbao_transit+env`, `openbao_transit+openbao`, `openbao_transit`, `openbao`, `env`, or `unset`), `recoverable_without_openbao`, and the key id, never the key.
+
+`OptimalEngine.Storage.OpenBao.Adapter.status/1` reports, without reading a secret, which of the Engine's secrets are references (`secret_references`), where connector credentials are written (`connector_credentials`, `engine` unless opted in), and the transit key id (`backup_transit_key`).
+`GET /api/storage/providers` lists what is routed through it in `serves` (`secret_references`, `connector_credentials`, `backup_key_wrapping`); a configured OpenBao none of them uses is `probe_only`.
+
 ## Provider Status
 
 One Engine instance is the default data layer: it holds every store inside it and runs no Postgres, Qdrant, or Redis next to it.
@@ -518,7 +616,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
 | `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`) and the proof (a Parquet file written and read back) | No Engine projection is written to it yet |
-| `openbao` | Wired | The probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` | The Engine's own secrets still come from the environment |
+| `openbao` | Wired, in the data path | Secret references for the backup, authority, connector and S3 keys; connector credentials kept in KV instead of the database (opt in, not in Engine backups); backup data keys wrapped by transit beside `OPTIMAL_BACKUP_KEY`; the probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` ([OpenBao](#openbao)) | PKI; the OpenBao token itself still comes from the environment; peer sync credentials are still sealed with `CONNECTOR_KEY` |
 | `fractal` | Declared, no adapter yet | | Everything |
 
 `GET /api/storage/providers` reports `adapter_implemented` for each entry and `adapter_missing` as the lifecycle state of the declared ones, whatever is configured.

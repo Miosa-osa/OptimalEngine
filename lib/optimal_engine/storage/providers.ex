@@ -218,7 +218,14 @@ defmodule OptimalEngine.Storage.Providers do
       probe: :openbao,
       serves: [],
       required_env: ["OPTIMAL_OPENBAO_ADDR", "OPTIMAL_OPENBAO_TOKEN"],
-      optional_env: []
+      optional_env: [
+        "OPTIMAL_OPENBAO_KV_MOUNT",
+        "OPTIMAL_OPENBAO_TRANSIT_KEY",
+        "OPTIMAL_OPENBAO_TRANSIT_MOUNT",
+        "OPTIMAL_OPENBAO_RETRY_AFTER_MS",
+        "OPTIMAL_CONNECTOR_CREDENTIAL_STORE",
+        "OPTIMAL_BACKUP_TRANSIT_ONLY"
+      ]
     },
     %{
       id: "fractal",

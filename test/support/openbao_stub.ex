@@ -5,8 +5,15 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
   in-memory secret table and a record of every request. Options: `:token` (the
   only token accepted), `:sealed` (health reports sealed and every other call
   is 503), `kv: 1` (the mount answers as KV version 1: a write is 204 and a
-  read has no metadata) and `delete: :forbidden` (deleting metadata is 403).
-  No test here talks to a real OpenBao.
+  read has no metadata), `delete: :forbidden` (deleting metadata is 403),
+  `transit_keys:` (the names of the keys a `transit` mount holds; a data key
+  is made under one and decrypted only by it) and `transit_mount:` (`transit`).
+  `token_ttl:` and `renewable:` (what `lookup-self` reports: seconds left,
+  0 by default as a root token has, and whether `renew-self` extends it),
+  `read: :tampered` (every KV read answers with one field changed, as a
+  copy that did not survive would), `mount: nil` (no KV mount until `sys/mounts` enables one; `mount_enable:
+  :forbidden` refuses that), `put_secret/3` seeds a secret, and `seal/1` and `unseal/1` change the seal of
+  a running stub. No test here talks to a real OpenBao.
   """
 
   @behaviour Plug
@@ -25,7 +32,14 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
       sealed: Keyword.get(opts, :sealed, false),
       mount: Keyword.get(opts, :mount, "secret"),
       kv: Keyword.get(opts, :kv, 2),
-      delete: Keyword.get(opts, :delete, :ok)
+      delete: Keyword.get(opts, :delete, :ok),
+      read: Keyword.get(opts, :read, :ok),
+      token_ttl: Keyword.get(opts, :token_ttl, 0),
+      renewable: Keyword.get(opts, :renewable, false),
+      mount_enable: Keyword.get(opts, :mount_enable, :ok),
+      transit_mount: Keyword.get(opts, :transit_mount, "transit"),
+      transit_keys: Keyword.get(opts, :transit_keys, []),
+      data_keys: %{}
     }
 
     {:ok, agent} = Agent.start_link(fn -> state end)
@@ -47,6 +61,19 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
   @spec secrets(map()) :: map()
   def secrets(%{agent: agent}), do: Agent.get(agent, & &1.secrets)
 
+  @doc "Stores `data` (a map) at `path` under the KV mount, as a write through the API would."
+  @spec put_secret(map(), String.t(), map()) :: :ok
+  def put_secret(%{agent: agent}, path, data),
+    do: Agent.update(agent, &put_in(&1, [:secrets, path], data))
+
+  @doc "Seals the running stub: health says sealed and every other call is 503."
+  @spec seal(map()) :: :ok
+  def seal(%{agent: agent}), do: Agent.update(agent, &%{&1 | sealed: true})
+
+  @doc "Unseals the running stub."
+  @spec unseal(map()) :: :ok
+  def unseal(%{agent: agent}), do: Agent.update(agent, &%{&1 | sealed: false})
+
   @impl Plug
   def init(opts), do: opts
 
@@ -60,7 +87,7 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
     mount = state.mount
     provided = token(conn)
 
-    case {conn.method, conn.path_info} do
+    case {conn.method, Enum.map(conn.path_info, &URI.decode/1)} do
       {"GET", ["v1", "sys", "health"]} ->
         json(conn, if(state.sealed, do: 503, else: 200), %{
           initialized: true,
@@ -75,7 +102,24 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
         json(conn, 403, %{errors: ["permission denied"]})
 
       {"GET", ["v1", "auth", "token", "lookup-self"]} ->
-        json(conn, 200, %{data: %{policies: ["root"]}})
+        json(conn, 200, %{
+          data: %{policies: ["root"], ttl: state.token_ttl, renewable: state.renewable}
+        })
+
+      {"POST", ["v1", "auth", "token", "renew-self"]} when state.renewable ->
+        json(conn, 200, %{auth: %{lease_duration: state.token_ttl, renewable: true}})
+
+      {"POST", ["v1", "auth", "token", "renew-self"]} ->
+        json(conn, 400, %{errors: ["lease is not renewable"]})
+
+      # `mount: nil` starts the stub with no KV mount, as a freshly initialised
+      # server has; enabling one makes it the mount every KV route answers on.
+      {"POST", ["v1", "sys", "mounts", name]} when state.mount_enable == :ok ->
+        Agent.update(agent, &%{&1 | mount: name})
+        send_resp(conn, 204, "")
+
+      {"POST", ["v1", "sys", "mounts", _name]} ->
+        json(conn, 403, %{errors: ["permission denied"]})
 
       {"POST", ["v1", ^mount, "data" | path]} when state.kv == 1 ->
         Agent.update(agent, &put_in(&1, [:secrets, Enum.join(path, "/")], body["data"]))
@@ -87,8 +131,29 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
 
       {"GET", ["v1", ^mount, "data" | path]} ->
         case Map.get(state.secrets, Enum.join(path, "/")) do
-          nil -> json(conn, 404, %{errors: []})
-          data -> json(conn, 200, %{data: %{data: data, metadata: %{version: 1}}})
+          nil ->
+            json(conn, 404, %{errors: []})
+
+          data ->
+            data = if state.read == :tampered, do: Map.put(data, "tampered", "1"), else: data
+            json(conn, 200, %{data: %{data: data, metadata: %{version: 1}}})
+        end
+
+      {"POST", ["v1", transit, "datakey", "plaintext", name]}
+      when transit == state.transit_mount ->
+        if name in state.transit_keys do
+          plaintext = :crypto.strong_rand_bytes(div(Map.get(body, "bits", 256), 8))
+          ciphertext = "vault:v1:" <> Base.encode64(:crypto.strong_rand_bytes(48))
+          Agent.update(agent, &put_in(&1, [:data_keys, ciphertext], {name, plaintext}))
+          json(conn, 200, %{data: %{plaintext: Base.encode64(plaintext), ciphertext: ciphertext}})
+        else
+          json(conn, 400, %{errors: ["encryption key not found"]})
+        end
+
+      {"POST", ["v1", transit, "decrypt", name]} when transit == state.transit_mount ->
+        case Map.get(state.data_keys, body["ciphertext"]) do
+          {^name, plaintext} -> json(conn, 200, %{data: %{plaintext: Base.encode64(plaintext)}})
+          _other -> json(conn, 400, %{errors: ["cipher: message authentication failed"]})
         end
 
       {"DELETE", ["v1", ^mount, "metadata" | _path]} when state.delete == :forbidden ->

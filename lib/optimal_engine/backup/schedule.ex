@@ -196,7 +196,7 @@ defmodule OptimalEngine.Backup.Schedule do
   @spec status(keyword()) :: map()
   def status(opts \\ []) do
     interval = interval_ms(opts)
-    key = Envelope.backup_key()
+    key = Envelope.sealing_key()
     store = S3.config()
     last_job = latest_job()
     last_success = latest_success()
@@ -210,6 +210,8 @@ defmodule OptimalEngine.Backup.Schedule do
         cipher: Envelope.cipher(),
         key_configured: match?({:ok, _}, key),
         key_id: key_id(key),
+        key_source: key_source(),
+        recoverable_without_openbao: recoverable?(key),
         problem: problem(key)
       },
       object_store: %{configured: match?({:ok, _}, store), problem: problem(store)},
@@ -228,7 +230,7 @@ defmodule OptimalEngine.Backup.Schedule do
 
   # Refuse before taking a backup that could never be shipped.
   defp ready do
-    with {:ok, _key} <- Envelope.backup_key(),
+    with {:ok, _key} <- Envelope.sealing_key(),
          {:ok, _config} <- S3.config(),
          do: :ok
   end
@@ -377,6 +379,22 @@ defmodule OptimalEngine.Backup.Schedule do
 
   defp key_id({:ok, key}), do: Envelope.key_id(key)
   defp key_id({:error, _reason}), do: nil
+
+  # Where the sealing key lives, named without reading it: the transit key,
+  # and beside it where OPTIMAL_BACKUP_KEY comes from when it is set.
+  defp key_source do
+    local = OptimalEngine.Secrets.source("OPTIMAL_BACKUP_KEY")
+
+    cond do
+      is_nil(OptimalEngine.Storage.OpenBao.transit_key()) -> local
+      local == "unset" -> "openbao_transit"
+      true -> "openbao_transit+" <> local
+    end
+  end
+
+  # Whether a copy sealed now opens on a machine without this OpenBao.
+  defp recoverable?({:ok, key}), do: Envelope.recoverable_without_openbao?(key)
+  defp recoverable?({:error, _reason}), do: false
 
   defp problem({:ok, _}), do: nil
   defp problem({:error, reason}), do: Backup.explain(reason)

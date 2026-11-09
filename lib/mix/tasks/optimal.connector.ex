@@ -13,6 +13,8 @@ defmodule Mix.Tasks.Optimal.Connector do
       mix optimal.connector register <id> ... --disabled   - register without pulling yet
       mix optimal.connector run <id>                       - run one sync cycle into the connector's workspace
       mix optimal.connector run <id> --max-retries 3
+      mix optimal.connector migrate-credentials --dry-run  - which sealed credentials would move to OpenBao
+      mix optimal.connector migrate-credentials            - move them (OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao)
 
   ## Options
 
@@ -24,6 +26,7 @@ defmodule Mix.Tasks.Optimal.Connector do
     --tenant       <id>      tenant scope (default: default)
     --disabled               register the connector disabled
     --max-retries  <n>       runner retry cap for transient errors (default 5)
+    --dry-run                `migrate-credentials`: report, change nothing
 
   `register` replaces the tenant's own row of the same id. `list` never prints
   credentials: it says whether they are stored, brokered, or absent.
@@ -48,16 +51,31 @@ defmodule Mix.Tasks.Optimal.Connector do
           tenant: :string,
           disabled: :boolean,
           adapters: :boolean,
-          max_retries: :integer
+          max_retries: :integer,
+          dry_run: :boolean
         ]
       )
 
     case rest do
-      ["list" | _] -> if parsed[:adapters], do: do_adapters(), else: do_list(parsed)
-      ["adapters" | _] -> do_adapters()
-      ["register", id | _] -> do_register(id, parsed)
-      ["run", id | _] -> do_run(id, parsed)
-      _ -> Mix.raise("Usage: mix optimal.connector list | adapters | register <id> | run <id>")
+      ["list" | _] ->
+        if parsed[:adapters], do: do_adapters(), else: do_list(parsed)
+
+      ["adapters" | _] ->
+        do_adapters()
+
+      ["register", id | _] ->
+        do_register(id, parsed)
+
+      ["run", id | _] ->
+        do_run(id, parsed)
+
+      ["migrate-credentials" | _] ->
+        do_migrate_credentials(parsed)
+
+      _ ->
+        Mix.raise(
+          "Usage: mix optimal.connector list | adapters | register <id> | run <id> | migrate-credentials"
+        )
     end
   end
 
@@ -70,6 +88,43 @@ defmodule Mix.Tasks.Optimal.Connector do
       IO.puts("  #{pad(kind)} #{pad(name, 22)} auth=#{auth}")
     end)
   end
+
+  # Each copy is read back and compared before its row is rewritten
+  # (CredentialVault.Migration); the output names ids and reasons only.
+  defp do_migrate_credentials(parsed) do
+    opts =
+      [dry_run: parsed[:dry_run] == true] ++
+        if(parsed[:tenant], do: [tenant: parsed[:tenant]], else: [])
+
+    case OptimalEngine.Connectors.CredentialVault.migrate(opts) do
+      {:ok, report} ->
+        IO.puts(
+          "Connector credentials to OpenBao#{if report.dry_run, do: " (dry run, nothing changed)", else: ""}:"
+        )
+
+        for key <- ~w(would_migrate migrated already_migrated skipped failed)a, report[key] != [] do
+          IO.puts("  #{key}:")
+          Enum.each(report[key], &IO.puts("    #{format_entry(&1)}"))
+        end
+
+        if report.failed != [],
+          do:
+            Mix.raise(
+              "#{length(report.failed)} connector(s) not migrated; their rows are unchanged."
+            )
+
+      {:error, :credential_store_not_openbao} ->
+        Mix.raise(
+          "Set OPTIMAL_CONNECTOR_CREDENTIAL_STORE=openbao (and OPTIMAL_OPENBAO_ADDR, OPTIMAL_OPENBAO_TOKEN) first."
+        )
+
+      {:error, reason} ->
+        Mix.raise("Credential migration refused: #{OptimalEngine.Secrets.describe(reason)}")
+    end
+  end
+
+  defp format_entry({id, reason}), do: "#{id} (#{OptimalEngine.Secrets.describe(reason)})"
+  defp format_entry(id), do: id
 
   defp do_list(parsed) do
     tenant = Keyword.get(parsed, :tenant, "default")

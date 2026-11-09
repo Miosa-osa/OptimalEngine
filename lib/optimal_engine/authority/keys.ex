@@ -8,9 +8,13 @@ defmodule OptimalEngine.Authority.Keys do
 
   A key's id (`kid`) is its RFC 7638 JWK thumbprint. Public keys are
   published as an RFC 8037 JWK set. Private keys are wrapped with AES-256-GCM
-  under `OPTIMAL_AUTHORITY_KEY` (64 hex characters). Without that variable an
-  engine that requires authentication refuses to create keys; an open local
-  development engine stores them unwrapped and logs a warning.
+  under `OPTIMAL_AUTHORITY_KEY` (64 hex characters, or an OpenBao reference to
+  them, `openbao:<path>#<field>`, see `OptimalEngine.Secrets`). Without that
+  variable an engine that requires authentication refuses to create keys; an
+  open local development engine stores them unwrapped and logs a warning. A
+  reference OpenBao cannot answer (sealed, unreachable, refused) is
+  `{:error, {:authority_key_unavailable, reason}}` in every mode: a key is
+  never stored unwrapped because the secrets store was down.
 
   Lifecycle: `active` keys sign; `rotate/2` retires the active key, which
   keeps verifying what it signed; `revoke/2` marks a key compromised and
@@ -20,7 +24,7 @@ defmodule OptimalEngine.Authority.Keys do
   require Logger
 
   alias OptimalEngine.Authority.{CanonicalJSON, JWS}
-  alias OptimalEngine.Store
+  alias OptimalEngine.{Secrets, Store}
 
   @purposes ~w(grant evidence)
   @aad "optimal-authority-key-v1"
@@ -288,10 +292,10 @@ defmodule OptimalEngine.Authority.Keys do
   end
 
   defp wrapping_available do
-    cond do
-      match?({:ok, _}, wrapping_key()) -> :ok
-      auth_required?() -> {:error, :authority_key_missing}
-      true -> :ok
+    case wrapping_key() do
+      {:ok, _key} -> :ok
+      {:error, {:authority_key_unavailable, _reason}} = unavailable -> unavailable
+      {:error, _missing} -> if auth_required?(), do: {:error, :authority_key_missing}, else: :ok
     end
   end
 
@@ -334,11 +338,18 @@ defmodule OptimalEngine.Authority.Keys do
   defp ok_or(:error, reason), do: {:error, reason}
 
   defp wrapping_key do
-    with hex when is_binary(hex) <- System.get_env("OPTIMAL_AUTHORITY_KEY"),
-         {:ok, key} when byte_size(key) == 32 <- Base.decode16(hex, case: :mixed) do
-      {:ok, key}
-    else
-      _ -> {:error, :authority_key_missing}
+    case Secrets.fetch("OPTIMAL_AUTHORITY_KEY") do
+      {:ok, hex} ->
+        case Base.decode16(hex, case: :mixed) do
+          {:ok, key} when byte_size(key) == 32 -> {:ok, key}
+          _invalid -> {:error, :authority_key_missing}
+        end
+
+      {:error, :not_set} ->
+        {:error, :authority_key_missing}
+
+      {:error, {:secret_unavailable, _name, reason}} ->
+        {:error, {:authority_key_unavailable, reason}}
     end
   end
 

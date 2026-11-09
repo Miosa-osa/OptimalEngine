@@ -5,9 +5,15 @@ defmodule OptimalEngine.Health do
   Liveness is a boolean: "is the supervision tree up?". Readiness is
   richer: "can the engine actually serve traffic right now?" — SQLite
   writable, embedder reachable, credential key present if connectors
-  are configured, migration state current, and the API not open to the
+  are configured, migration state current, the API not open to the
   network without authentication (`network_auth`, which warns
-  `auth_open_on_network`; see `OptimalEngine.API.Exposure`).
+  `auth_open_on_network`; see `OptimalEngine.API.Exposure`), and OpenBao
+  able to answer when the Engine takes secrets from it (`secrets`).
+
+  A sealed or unreachable OpenBao is a warning (`openbao_unavailable`), not
+  an error: the Engine boots and serves without it, the features that need a
+  secret fail with the reason until it is unsealed, and an orchestrator that
+  restarted an Engine reported down would not unseal OpenBao.
 
   ## Usage
 
@@ -22,6 +28,7 @@ defmodule OptimalEngine.Health do
           migrations: :ok,
           credential_key: :ok,
           network_auth: :ok,
+          secrets: :ok,
           embedder: :ok
         },
         degraded: []
@@ -33,7 +40,9 @@ defmodule OptimalEngine.Health do
   `warnings/1` names them.
   """
 
-  alias OptimalEngine.Connectors.Credential
+  alias OptimalEngine.Connectors.{Credential, CredentialVault}
+  alias OptimalEngine.Secrets
+  alias OptimalEngine.Storage.OpenBao
   alias OptimalEngine.Embed.Text, as: TextEmbedder
   alias OptimalEngine.Store
 
@@ -69,7 +78,7 @@ defmodule OptimalEngine.Health do
     embedder = Keyword.get(opts, :embedder, :probe)
 
     checks =
-      [:store, :migrations, :credential_key, :network_auth, :embedder]
+      [:store, :migrations, :credential_key, :network_auth, :secrets, :embedder]
       |> Enum.reject(&(&1 in skip))
       |> Enum.map(fn
         :embedder -> {:embedder, embedder_check(embedder)}
@@ -151,6 +160,11 @@ defmodule OptimalEngine.Health do
       Credential.ready?() ->
         :ok
 
+      # The key is in OpenBao and OpenBao cannot answer: the `secrets` check
+      # names why. Connector runs fail until it does; the Engine is not down.
+      Secrets.source("CONNECTOR_KEY") == "openbao" ->
+        {:warn, :connector_key_unavailable}
+
       connectors_configured?() ->
         {:error, :connector_key_missing}
 
@@ -160,6 +174,25 @@ defmodule OptimalEngine.Health do
         # matters once a connector is wired up.
         :ok
     end
+  end
+
+  # Only when the Engine takes something from OpenBao: a secret reference,
+  # connector credentials, or the backup transit key.
+  defp run_check(:secrets) do
+    if Secrets.references() != [] or CredentialVault.mode() == :openbao or
+         OpenBao.transit_key() != nil do
+      with :ok <- OpenBao.availability(),
+           :ok <- references_resolve() do
+        :ok
+      else
+        {:error, {:secret_unavailable, _name, _reason} = reason} -> {:warn, reason}
+        {:error, reason} -> {:warn, {:openbao_unavailable, reason}}
+      end
+    else
+      :ok
+    end
+  rescue
+    e -> {:warn, {:openbao_unavailable, Exception.message(e)}}
   end
 
   # Each failure is named for what the operator has to fix: "unreachable"
@@ -204,6 +237,15 @@ defmodule OptimalEngine.Health do
     catch
       :exit, reason -> {:error, reason}
     end
+  end
+
+  defp references_resolve do
+    Enum.reduce_while(Secrets.references(), :ok, fn name, :ok ->
+      case Secrets.fetch(name) do
+        {:ok, _value} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp connectors_configured? do
