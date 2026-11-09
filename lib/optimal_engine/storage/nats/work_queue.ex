@@ -53,6 +53,7 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   @expires_ms 2_000
   @idle_ms 1_000
   @max_backoff_ms 600_000
+  @max_unsent 10_000
 
   @doc false
   def child_spec({callback, opts}) do
@@ -83,7 +84,9 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   @doc """
   Publishes in the background: returns at once, never fails, and does nothing
   while the queue is off. For a caller whose own record is durable and is
-  announced again on the next connection (`JobQueue`).
+  announced again on the next connection (`JobQueue`). A message that could
+  not be sent (NATS down) is kept, the latest #{@max_unsent} of them, and sent
+  first when the queue is next provisioned, before `on_provisioned/2` runs.
   """
   @spec publish_async(GenServer.server(), String.t(), iodata(), String.t()) :: :ok
   def publish_async(server, token, payload, msg_id),
@@ -141,6 +144,9 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
           true -> "starting"
         end,
       consumer_pid: nil,
+      # Background publishes that did not get through, newest first.
+      unsent: [],
+      unsent_count: 0,
       counts: %{
         published: 0,
         acked: 0,
@@ -188,8 +194,10 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
     do: {:noreply, state}
 
   def handle_cast({:publish, token, payload, msg_id}, state) do
-    {_reply, state} = handle_publish(token, payload, msg_id, state)
-    {:noreply, state}
+    case handle_publish(token, payload, msg_id, state) do
+      {{:ok, _ack}, state} -> {:noreply, state}
+      {{:error, _reason}, state} -> {:noreply, keep_unsent(state, {token, payload, msg_id})}
+    end
   end
 
   def handle_cast({:counted, counts}, state) do
@@ -256,13 +264,8 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
              :ok <- ensure_dead_letters(state),
              {:ok, _} <- JetStream.ensure_consumer(state.connection, stream(state), consumer) do
           state = %{state | epoch: {n, since}, state: "running", last_error: nil}
-
-          # Off this process: the callback may publish through it.
-          if function_exported?(state.callback, :on_provisioned, 2) do
-            {callback, name, context} = {state.callback, self_name(state), state.context}
-            spawn(fn -> callback.on_provisioned(name, context) end)
-          end
-
+          {unsent, state} = take_unsent(state)
+          after_provision(state, unsent)
           {:ok, state}
         else
           {:error, reason} -> {:error, reason, unavailable(state, reason)}
@@ -272,6 +275,37 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
         {:error, :not_connected, %{state | state: "buffering", epoch: nil}}
     end
   end
+
+  # Off this process, since both publish through it: first what could not be
+  # sent while NATS was down, oldest first, then the callback's own sweep. A
+  # message sent in the background is announced at once on a new connection,
+  # however many older ones the sweep has to go through first; one that fails
+  # again is kept again.
+  defp after_provision(state, unsent) do
+    {callback, name, context} = {state.callback, self_name(state), state.context}
+    sweep? = function_exported?(callback, :on_provisioned, 2)
+
+    if unsent != [] or sweep? do
+      spawn(fn ->
+        Enum.each(unsent, fn {token, payload, msg_id} ->
+          publish_async(name, token, payload, msg_id)
+        end)
+
+        if sweep?, do: callback.on_provisioned(name, context)
+      end)
+    end
+
+    :ok
+  end
+
+  defp keep_unsent(%{unsent_count: count} = state, message) when count >= @max_unsent,
+    do: %{state | unsent: [message | Enum.take(state.unsent, @max_unsent - 1)]}
+
+  defp keep_unsent(state, message),
+    do: %{state | unsent: [message | state.unsent], unsent_count: state.unsent_count + 1}
+
+  defp take_unsent(state),
+    do: {Enum.reverse(state.unsent), %{state | unsent: [], unsent_count: 0}}
 
   defp setup(state) do
     %{

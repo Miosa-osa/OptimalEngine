@@ -28,10 +28,12 @@ defmodule OptimalEngine.Storage.NATS.JobQueue do
   in-process path, and the one jobs take while NATS is down. Announcing never
   fails or delays an enqueue: it is a message to this process, which
   publishes in the background. A job queued while NATS is down is announced
-  when the connection is back: every connection starts by announcing every
-  job still queued or running (a few thousand at most, oldest first), and a
-  job announced twice inside the stream's duplicate window (an hour) is
-  stored once.
+  when the connection is back: the announcements that could not be sent are
+  kept (the latest 10,000) and sent first, then every connection announces
+  every job still queued or running (5,000 at most, oldest first), and a job
+  announced twice inside the stream's duplicate window (an hour) is stored
+  once. So a job queued during an outage does not wait behind every older
+  unfinished job to be announced.
 
   Woken on their kind: `reindex` (`Reindex.Worker`), `import.*`
   (`Imports.Worker`), `analysis.*` (`Analyses.Worker`) and `maintenance.*`
