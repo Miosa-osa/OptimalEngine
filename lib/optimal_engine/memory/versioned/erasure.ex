@@ -68,14 +68,37 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   names no memory is `{:ok, %{memories: [], removed: %{}}}`.
   """
   @spec forget(String.t(), String.t() | nil, String.t() | nil) ::
-          {:ok, %{memories: [Versioned.t()], removed: %{atom() => non_neg_integer()}}}
-          | {:error, term()}
-  def forget(id, reason, forget_after) when is_binary(id) do
+          {:ok, done()} | {:error, term()}
+  def forget(id, reason, forget_after) when is_binary(id),
+    do: erase(id, reason, forget_after, :keep_rows)
+
+  @doc """
+  Erases what `forget/3` erases, for the memory `id` and every version of its
+  chain, then deletes the chain's rows: a hard delete. Returns what `forget/3`
+  returns.
+  """
+  @spec delete(String.t()) :: {:ok, done()} | {:error, term()}
+  def delete(id) when is_binary(id), do: erase(id, nil, nil, :delete_rows)
+
+  @typedoc """
+  What a forget or delete did: the versions as they were before (to drop what
+  was cached from their text), the rows each step changed, and the full-text
+  refresh after the commit (`:ok`, or its error: the rows are erased and the
+  key stays queued for the store's next refresh).
+  """
+  @type done :: %{
+          memories: [Versioned.t()],
+          removed: %{atom() => non_neg_integer()},
+          refresh: :ok | {:error, term()}
+        }
+
+  defp erase(id, reason, forget_after, rows) do
     result =
       Store.transaction(
         fn txn ->
           with {:ok, versions} <- chain(txn, id),
-               {:ok, removed} <- erase_all(txn, versions, reason, forget_after) do
+               {:ok, removed} <- erase_all(txn, versions, reason, forget_after),
+               {:ok, removed} <- delete_rows(txn, versions, removed, rows) do
             {:ok, %{memories: versions, removed: removed}}
           end
         end,
@@ -83,41 +106,89 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
       )
 
     with {:ok, %{memories: versions} = done} <- result do
-      if versions == [] do
-        {:ok, done}
-      else
-        case FullText.refresh(["memories_fts"]) do
-          :ok -> {:ok, done}
-          {:error, reason} -> {:error, {:memory_erasure_failed, :fts_refresh, reason}, done}
-        end
+      refresh = if versions == [], do: :ok, else: FullText.refresh(["memories_fts"])
+      {:ok, Map.put(done, :refresh, refresh)}
+    end
+  end
+
+  defp delete_rows(_txn, _versions, removed, :keep_rows), do: {:ok, removed}
+  defp delete_rows(_txn, [], removed, :delete_rows), do: {:ok, removed}
+
+  defp delete_rows(txn, versions, removed, :delete_rows) do
+    ids = Jason.encode!(Enum.map(versions, & &1.id))
+
+    case Store.txn_execute(
+           txn,
+           "DELETE FROM memories WHERE id IN (SELECT value FROM json_each(?1))",
+           [ids]
+         ) do
+      {:ok, count} -> {:ok, Map.put(removed, :memories_deleted, count)}
+      {:error, reason} -> {:error, {:memory_erasure_failed, :memories_deleted, reason}}
+    end
+  end
+
+  @doc """
+  The root a memory's chain is held by: its `root_memory_id`, or for a chain
+  an older build wrote without one, the first version up its
+  `parent_memory_id` links. `{:ok, nil}` when there is no such memory.
+  """
+  @spec root(term(), String.t()) :: {:ok, String.t() | nil} | {:error, term()}
+  def root(txn, id) do
+    with {:ok, rows} <-
+           query(
+             txn,
+             """
+             WITH RECURSIVE up(id, parent, root, depth) AS (
+               SELECT id, parent_memory_id, root_memory_id, 0 FROM memories WHERE id = ?1
+               UNION ALL
+               SELECT m.id, m.parent_memory_id, m.root_memory_id, up.depth + 1
+                 FROM memories m JOIN up ON m.id = up.parent
+                WHERE up.root IS NULL AND up.depth < 10000
+             )
+             SELECT COALESCE(root, id) FROM up WHERE root IS NOT NULL OR parent IS NULL
+             ORDER BY depth ASC LIMIT 1
+             """,
+             [id]
+           ) do
+      case rows do
+        [[root]] -> {:ok, root}
+        [] -> {:ok, nil}
       end
     end
   end
 
-  # The memory and every version that shares its root, in its workspace.
+  # The memory and every version of its chain, in its workspace: those that
+  # share its root, and those linked to the root through `parent_memory_id`
+  # (a chain an older build wrote without `root_memory_id`). The root's row is
+  # held first (`FOR UPDATE` on PostgreSQL), so an update of the chain
+  # (`Versioned.update/2`, which holds it too) runs wholly before or after.
   defp chain(txn, id) do
-    with {:ok, rows} <-
-           query(txn, "SELECT root_memory_id, workspace_id FROM memories WHERE id = ?1", [id]) do
-      case rows do
-        [] ->
-          {:ok, []}
-
-        [[root, workspace]] ->
-          root = root || id
-
-          with {:ok, rows} <-
-                 query(
-                   txn,
-                   """
-                   SELECT #{VStore.select_cols()} FROM memories
-                    WHERE workspace_id = ?1 AND (root_memory_id = ?2 OR id = ?2 OR id = ?3)
-                    ORDER BY version ASC
-                   """,
-                   [workspace, root, id]
-                 ) do
-            {:ok, Enum.map(rows, &Versioned.row_to_struct/1)}
-          end
-      end
+    with {:ok, root} when is_binary(root) <- root(txn, id),
+         :ok <- Store.txn_lock_row(txn, "memories", "id", root),
+         {:ok, [[workspace]]} <-
+           query(txn, "SELECT workspace_id FROM memories WHERE id = ?1", [id]),
+         {:ok, rows} <-
+           query(
+             txn,
+             """
+             WITH RECURSIVE down(id, depth) AS (
+               SELECT id, 0 FROM memories WHERE id = ?2
+               UNION ALL
+               SELECT m.id, down.depth + 1 FROM memories m JOIN down ON m.parent_memory_id = down.id
+                WHERE down.depth < 10000
+             )
+             SELECT #{VStore.select_cols()} FROM memories
+              WHERE workspace_id = ?1
+                AND (root_memory_id = ?2 OR id = ?3 OR id IN (SELECT id FROM down))
+              ORDER BY version ASC
+             """,
+             [workspace, root, id]
+           ) do
+      {:ok, Enum.map(rows, &Versioned.row_to_struct/1)}
+    else
+      {:ok, nil} -> {:ok, []}
+      {:ok, []} -> {:ok, []}
+      {:error, _} = error -> error
     end
   end
 

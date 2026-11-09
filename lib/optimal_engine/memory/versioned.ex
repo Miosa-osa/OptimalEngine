@@ -43,6 +43,7 @@ defmodule OptimalEngine.Memory.Versioned do
   """
 
   alias OptimalEngine.Memory.Versioned.Erasure
+  alias OptimalEngine.Store
   alias OptimalEngine.Memory.Versioned.Embeddings, as: MemoryEmbeddings
   alias OptimalEngine.Memory.Versioned.Store, as: VStore
   alias OptimalEngine.Memory.Surfacer
@@ -235,31 +236,50 @@ defmodule OptimalEngine.Memory.Versioned do
   """
   @spec update(String.t(), map()) :: {:ok, t()} | {:error, term()}
   def update(id, attrs) when is_binary(id) and is_map(attrs) do
-    with {:ok, old} <- get(id) do
-      new_id = generate_id()
+    # In one transaction that holds the chain's root row first, as a forget
+    # does (`Erasure.forget/3`): a forget runs wholly before (and the update
+    # is refused) or after (and erases the new version too).
+    Store.transaction(fn txn ->
+      with {:ok, root} when is_binary(root) <- Erasure.root(txn, id),
+           :ok <- Store.txn_lock_row(txn, "memories", "id", root),
+           {:ok, old} <- read(txn, id),
+           :ok <- if(old.is_forgotten, do: {:error, :forgotten}, else: :ok) do
+        new_id = generate_id()
 
-      row_attrs = %{
-        id: new_id,
-        tenant_id: old.tenant_id,
-        workspace_id: old.workspace_id,
-        content: Map.get(attrs, :content, old.content),
-        is_static: Map.get(attrs, :is_static, old.is_static),
-        version: old.version + 1,
-        parent_memory_id: old.id,
-        root_memory_id: old.root_memory_id || old.id,
-        is_latest: true,
-        citation_uri: Map.get(attrs, :citation_uri, old.citation_uri),
-        source_chunk_id: Map.get(attrs, :source_chunk_id, old.source_chunk_id),
-        audience: Map.get(attrs, :audience, old.audience),
-        metadata: updated_metadata(old, attrs)
-      }
+        row_attrs = %{
+          id: new_id,
+          tenant_id: old.tenant_id,
+          workspace_id: old.workspace_id,
+          content: Map.get(attrs, :content, old.content),
+          is_static: Map.get(attrs, :is_static, old.is_static),
+          version: old.version + 1,
+          parent_memory_id: old.id,
+          root_memory_id: old.root_memory_id || root,
+          is_latest: true,
+          citation_uri: Map.get(attrs, :citation_uri, old.citation_uri),
+          source_chunk_id: Map.get(attrs, :source_chunk_id, old.source_chunk_id),
+          audience: Map.get(attrs, :audience, old.audience),
+          metadata: updated_metadata(old, attrs)
+        }
 
-      with {:ok, _} <- VStore.insert(row_attrs),
-           {:ok, _} <- VStore.demote_latest(old.id),
-           {:ok, _} <-
-             VStore.add_relation(new_id, old.id, "updates", old.workspace_id, old.tenant_id) do
-        {:ok, struct_from_attrs(row_attrs)}
+        with {:ok, _} <- VStore.insert(row_attrs, txn),
+             {:ok, _} <- VStore.demote_latest(old.id, txn),
+             {:ok, _} <-
+               VStore.add_relation(new_id, old.id, "updates", old.workspace_id, old.tenant_id, txn) do
+          {:ok, struct_from_attrs(row_attrs)}
+        end
+      else
+        {:ok, nil} -> {:error, :not_found}
+        {:error, _} = error -> error
       end
+    end)
+  end
+
+  defp read(txn, id) do
+    case Store.txn_query(txn, "SELECT #{VStore.select_cols()} FROM memories WHERE id = ?1", [id]) do
+      {:ok, [row]} -> {:ok, row_to_struct(row)}
+      {:ok, []} -> {:error, :not_found}
+      {:error, _} = error -> error
     end
   end
 
@@ -300,18 +320,7 @@ defmodule OptimalEngine.Memory.Versioned do
 
     # The chain is read inside the erasure's transaction; the copies it returns
     # are the text as it was, from which the cached embeddings are found.
-    case Erasure.forget(id, reason, forget_after) do
-      {:ok, %{memories: memories}} ->
-        Enum.each(memories, &forget_cached_embedding/1)
-        :ok
-
-      {:error, {:memory_erasure_failed, :fts_refresh, _} = reason, %{memories: memories}} ->
-        Enum.each(memories, &forget_cached_embedding/1)
-        {:error, reason}
-
-      {:error, _reason} = error ->
-        error
-    end
+    id |> Erasure.forget(reason, forget_after) |> erased()
   end
 
   @doc """
@@ -364,29 +373,27 @@ defmodule OptimalEngine.Memory.Versioned do
     end
   end
 
-  @doc "Hard deletes a memory row. Cascades to memory_relations."
+  @doc """
+  Hard deletes a memory: erases what `forget/2` erases for every version of its
+  chain (`OptimalEngine.Memory.Versioned.Erasure.delete/1`), then deletes the
+  chain's rows (their relations cascade).
+  """
   @spec delete(String.t()) :: :ok | {:error, term()}
-  def delete(id) when is_binary(id) do
-    memory = held(id)
+  def delete(id) when is_binary(id), do: id |> Erasure.delete() |> erased()
 
-    case VStore.delete(id) do
-      {:ok, _} ->
-        forget_cached_embedding(memory)
-        :ok
+  # The erasure committed: what was cached from the versions' text goes, and a
+  # full-text refresh that failed (the key stays queued for the store's next
+  # one) is the caller's error.
+  defp erased({:ok, %{memories: memories, refresh: refresh}}) do
+    Enum.each(memories, &forget_cached_embedding/1)
 
-      other ->
-        other
+    case refresh do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:memory_erasure_failed, :fts_refresh, reason}}
     end
   end
 
-  # The memory as it is before it is forgotten or deleted: after, its text is gone (a delete)
-  # or no longer worth reading (a forget), and the embedding cached from it should go too.
-  defp held(id) do
-    case get(id) do
-      {:ok, memory} -> memory
-      _ -> nil
-    end
-  end
+  defp erased({:error, _reason} = error), do: error
 
   defp forget_cached_embedding(nil), do: :ok
   defp forget_cached_embedding(memory), do: MemoryEmbeddings.forget_cache(memory)

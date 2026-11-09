@@ -37,8 +37,8 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   # ---------------------------------------------------------------------------
 
   @doc "Inserts a new memory row. Returns the raw row list on success."
-  @spec insert(map()) :: {:ok, list()} | {:error, term()}
-  def insert(attrs) do
+  @spec insert(map(), term()) :: {:ok, term()} | {:error, term()}
+  def insert(attrs, txn \\ nil) do
     sql = """
     INSERT INTO memories (
       id, tenant_id, workspace_id, content, is_static, is_forgotten,
@@ -64,7 +64,7 @@ defmodule OptimalEngine.Memory.Versioned.Store do
       attrs[:content_hash]
     ]
 
-    Store.raw_query(sql, params)
+    exec(txn, sql, params)
   end
 
   @doc """
@@ -296,13 +296,18 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   @doc """
   Marks an old version as no longer latest. Called during update versioning.
   """
-  @spec demote_latest(String.t()) :: {:ok, term()} | {:error, term()}
-  def demote_latest(id) when is_binary(id) do
-    Store.raw_query(
+  @spec demote_latest(String.t(), term()) :: {:ok, term()} | {:error, term()}
+  def demote_latest(id, txn \\ nil) when is_binary(id) do
+    exec(
+      txn,
       "UPDATE memories SET is_latest = 0, updated_at = datetime('now') WHERE id = ?1",
       [id]
     )
   end
+
+  # Inside the caller's transaction when it names one.
+  defp exec(nil, sql, params), do: Store.raw_query(sql, params)
+  defp exec(txn, sql, params), do: Store.txn_execute(txn, sql, params)
 
   @doc "Marks a memory as forgotten (soft delete)."
   @spec mark_forgotten(String.t(), String.t() | nil, String.t() | nil) ::
@@ -330,16 +335,16 @@ defmodule OptimalEngine.Memory.Versioned.Store do
   # ---------------------------------------------------------------------------
 
   @doc "Inserts a typed relation between two memories."
-  @spec add_relation(String.t(), String.t(), String.t(), String.t(), String.t()) ::
+  @spec add_relation(String.t(), String.t(), String.t(), String.t(), String.t(), term()) ::
           {:ok, term()} | {:error, term()}
-  def add_relation(source_id, target_id, relation, workspace_id, tenant_id) do
+  def add_relation(source_id, target_id, relation, workspace_id, tenant_id, txn \\ nil) do
     sql = """
     INSERT OR IGNORE INTO memory_relations
       (tenant_id, workspace_id, source_memory_id, target_memory_id, relation)
     VALUES (?1, ?2, ?3, ?4, ?5)
     """
 
-    Store.raw_query(sql, [tenant_id, workspace_id, source_id, target_id, relation])
+    exec(txn, sql, [tenant_id, workspace_id, source_id, target_id, relation])
   end
 
   @doc """
