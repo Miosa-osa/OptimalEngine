@@ -18,6 +18,7 @@ defmodule OptimalEngine.API.PrometheusAccessTest do
   alias OptimalEngine.API.Router
   alias OptimalEngine.Auth.ApiKey
   alias OptimalEngine.Secrets
+  alias OptimalEngine.Store
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.TestSupport.OpenBaoStub
 
@@ -166,6 +167,48 @@ defmodule OptimalEngine.API.PrometheusAccessTest do
   describe "GET /api/metrics" do
     @engine_wide ~w(counters histograms uptime_ms sizing gauges)
 
+    # A failing connector of the default tenant: its id, kind and error text.
+    defp failing_connector!(ctx) do
+      id = "prom-failing-#{ctx.n}"
+      error = "zqsecretfailure#{ctx.n}xv"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO connectors (id, tenant_id, workspace_id, kind, config, enabled) VALUES (?1, 'default', 'default', 'sources_folder', '{}', 1)",
+          [id]
+        )
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO connector_runs (tenant_id, workspace_id, connector_id, started_at, completed_at, status, error_detail) VALUES ('default', 'default', ?1, datetime('now'), datetime('now'), 'error', ?2)",
+          [id, error]
+        )
+
+      on_exit(fn ->
+        Store.raw_query("DELETE FROM connector_runs WHERE connector_id = ?1", [id])
+        Store.raw_query("DELETE FROM connectors WHERE id = ?1", [id])
+      end)
+
+      {id, error}
+    end
+
+    test "another tenant's key sees none of this tenant's connectors", ctx do
+      {id, error} = failing_connector!(ctx)
+
+      # The operator (default tenant) sees it, so the row is one the summary reads.
+      operator = scrape(ctx.operator, "/api/metrics").resp_body
+      assert operator =~ id
+
+      for key <- [ctx.foreign_reader, ctx.foreign_admin] do
+        resp = scrape(key, "/api/metrics")
+        body = Jason.decode!(resp.resp_body)
+        assert body["connectors"]["total"] == 0
+        assert body["connectors"]["failing_connectors"] == []
+        refute resp.resp_body =~ id
+        refute resp.resp_body =~ error
+      end
+    end
+
     test "another tenant's key gets its connectors and no Engine-wide field", ctx do
       for key <- [ctx.foreign_reader, ctx.foreign_admin, ctx.default_reader, ctx.scoped_admin] do
         resp = scrape(key, "/api/metrics")
@@ -179,6 +222,27 @@ defmodule OptimalEngine.API.PrometheusAccessTest do
     test "the Engine operator gets the Engine-wide fields", ctx do
       body = Jason.decode!(scrape(ctx.operator, "/api/metrics").resp_body)
       for field <- ["connectors" | @engine_wide], do: assert(Map.has_key?(body, field), field)
+    end
+  end
+
+  describe "GET /api/health and /api/status" do
+    test "another tenant's key gets the status and fixed codes, not the checks", ctx do
+      for path <- ["/api/health", "/api/status"], key <- [ctx.foreign_reader, ctx.default_reader] do
+        resp = scrape(key, path)
+        assert resp.status == 200
+        body = Jason.decode!(resp.resp_body)
+        assert body["status"] in ["up", "degraded", "down"]
+        assert is_boolean(body["ok?"])
+        assert is_list(body["warnings"])
+        refute Map.has_key?(body, "checks"), path
+      end
+    end
+
+    test "the Engine operator gets the checks", ctx do
+      for path <- ["/api/health", "/api/status"] do
+        body = Jason.decode!(scrape(ctx.operator, path).resp_body)
+        assert is_map(body["checks"]), path
+      end
     end
   end
 

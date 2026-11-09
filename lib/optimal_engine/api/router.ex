@@ -1319,16 +1319,19 @@ defmodule OptimalEngine.API.Router do
         report = Health.ready(embedder: :recent)
         live? = Health.live?()
 
-        json(conn, %{
-          # From the report shown below, so the status cannot disagree with its own checks.
-          status: if(live?, do: Health.status_of(report), else: :down),
-          live: live?,
-          ok?: report.ok?,
-          release: OptimalEngine.Version.info(),
-          degraded: report.degraded,
-          warnings: Health.warnings(report),
-          checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end)
-        })
+        conn
+        |> json(
+          %{
+            # From the report shown below, so the status cannot disagree with its own checks.
+            status: if(live?, do: Health.status_of(report), else: :down),
+            live: live?,
+            ok?: report.ok?,
+            release: OptimalEngine.Version.info(),
+            degraded: report.degraded,
+            warnings: Health.warnings(report)
+          }
+          |> with_checks(conn, report)
+        )
     end
   end
 
@@ -1342,15 +1345,28 @@ defmodule OptimalEngine.API.Router do
   get "/api/status" do
     report = Health.ready(embedder: :recent)
 
-    json(conn, %{
-      status: Health.status_of(report),
-      ok?: report.ok?,
-      checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end),
-      degraded: report.degraded,
-      warnings: Health.warnings(report),
-      api_version: "v1",
-      release: OptimalEngine.Version.info()
-    })
+    json(
+      conn,
+      %{
+        status: Health.status_of(report),
+        ok?: report.ok?,
+        degraded: report.degraded,
+        warnings: Health.warnings(report),
+        api_version: "v1",
+        release: OptimalEngine.Version.info()
+      }
+      |> with_checks(conn, report)
+    )
+  end
+
+  # The checks' details (a store error's message, the interface an open API
+  # binds, counts across tenants) are the Engine's: the Engine operator with
+  # the admin grant gets them. Any other key gets the status, the booleans and
+  # the fixed codes (`degraded`, `warnings`).
+  defp with_checks(body, conn, report) do
+    if OptimalEngine.API.Actor.engine_admin?(conn),
+      do: Map.put(body, :checks, Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end)),
+      else: body
   end
 
   # Prometheus text exposition format, not rate-limited. The counters are the
