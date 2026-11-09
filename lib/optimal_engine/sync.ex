@@ -1264,7 +1264,11 @@ defmodule OptimalEngine.Sync do
               fact_conflicts: [],
               retry: [],
               held: [],
-              erased?: false
+              erased?: false,
+              # The ledger rows of the changes applied, newest first, written
+              # at the end of the transaction (`record_ledger/4`).
+              ledger: [],
+              ledger_ids: MapSet.new()
             },
             fn
               {:skip, reason, _mutation}, acc ->
@@ -1278,7 +1282,7 @@ defmodule OptimalEngine.Sync do
               # same change (`POST /api/sync/run` during a scheduler tick) may
               # have committed it since; an append-only row would be added twice.
               {:apply, step}, acc ->
-                case txn_id_state(txn, tenant_id, workspace_id, step.mutation["id"]) do
+                case id_state(txn, tenant_id, workspace_id, step.mutation["id"], acc) do
                   :new ->
                     apply_step(txn, tenant_id, workspace_id, step, acc, foreign_keys)
 
@@ -1305,6 +1309,7 @@ defmodule OptimalEngine.Sync do
             apply_step(txn, tenant_id, workspace_id, step, acc, :final)
           end)
 
+        record_ledger(txn, tenant_id, workspace_id, Enum.reverse(outcome.ledger))
         {:ok, _} = Store.txn_execute(txn, "UPDATE sync_identity SET applying = 0 WHERE id = 1", [])
         {:ok, outcome}
       end)
@@ -1508,9 +1513,15 @@ defmodule OptimalEngine.Sync do
       case write(txn, table, columns, mutation, workspace_id, tenant_id, gate) do
         :ok ->
           {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
-          record_ledger(txn, tenant_id, workspace_id, mutation)
 
-          acc = %{acc | applied: acc.applied + 1} |> note_erased(table, mutation)
+          acc =
+            %{
+              acc
+              | applied: acc.applied + 1,
+                ledger: [mutation | acc.ledger],
+                ledger_ids: MapSet.put(acc.ledger_ids, mutation["id"])
+            }
+            |> note_erased(table, mutation)
 
           if conflict do
             record_conflict(
@@ -1851,10 +1862,19 @@ defmodule OptimalEngine.Sync do
   defp plain({:blob, bytes}), do: bytes
   defp plain(value), do: value
 
-  defp record_ledger(txn, tenant_id, workspace_id, mutation) do
-    payload = Jason.encode!(mutation["payload"])
-    # Sequences commit in the order they are drawn (Sync.Postgres).
+  # The ledger rows of an apply go in at the end of its transaction, under the
+  # ledger lock taken once (Sync.Postgres, "Ledger sequences commit in order"):
+  # the lock is held from the first row to the commit, so taking it at the end
+  # keeps a long apply from holding up every seal, and every pull behind them.
+  defp record_ledger(_txn, _tenant_id, _workspace_id, []), do: :ok
+
+  defp record_ledger(txn, tenant_id, workspace_id, mutations) do
     :ok = OptimalEngine.Sync.Postgres.lock_ledger(txn)
+    Enum.each(mutations, &record_ledger_row(txn, tenant_id, workspace_id, &1))
+  end
+
+  defp record_ledger_row(txn, tenant_id, workspace_id, mutation) do
+    payload = Jason.encode!(mutation["payload"])
 
     {:ok, _} =
       Store.txn_execute(
@@ -2270,6 +2290,14 @@ defmodule OptimalEngine.Sync do
     "SELECT tenant_id, workspace_id FROM sync_mutations WHERE id = ?1"
     |> Store.raw_query([id])
     |> classify_id(tenant_id, workspace_id)
+  end
+
+  # A change applied earlier in this transaction has its ledger row still to
+  # be written (`record_ledger/4`), so it is a duplicate too.
+  defp id_state(txn, tenant_id, workspace_id, id, acc) do
+    if MapSet.member?(acc.ledger_ids, id),
+      do: :duplicate,
+      else: txn_id_state(txn, tenant_id, workspace_id, id)
   end
 
   defp txn_id_state(txn, tenant_id, workspace_id, id) do

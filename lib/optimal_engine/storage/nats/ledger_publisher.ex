@@ -341,8 +341,15 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
         {{:error, reason}, failed(state, reason)}
     end
   rescue
+    # A seal that fails or times out (a long apply holding the ledger lock)
+    # raises in `Sync.changes/3`; the pass ends, the cursors stay where they
+    # were, and the next pass goes on from them.
     error ->
       Logger.warning("[NATS] ledger pass failed: #{Exception.message(error)}")
+      {{:error, :pass_failed}, failed(state, :pass_failed)}
+  catch
+    kind, reason ->
+      Logger.warning("[NATS] ledger pass failed: #{kind} #{inspect(reason)}")
       {{:error, :pass_failed}, failed(state, :pass_failed)}
   end
 
@@ -673,7 +680,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
 
   # Sealed first, so a write the triggers captured counts before a pass ran.
   defp backlogs(state) do
-    {:ok, _} = OptimalEngine.Sync.Capture.seal()
+    seal_for_status()
 
     for {tenant, ws} = workspace <- workspaces(state, nil) do
       through = Map.get(state.cursors, workspace)
@@ -686,6 +693,17 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
 
       %{tenant_id: tenant, workspace_id: ws, published_through: through, backlog: backlog}
     end
+  end
+
+  # A status never fails over a seal: one that cannot run now leaves the
+  # backlog counting the ledger as it stands.
+  defp seal_for_status do
+    OptimalEngine.Sync.Capture.seal()
+  rescue
+    error -> Logger.warning("[NATS] ledger status could not seal: #{Exception.message(error)}")
+  catch
+    kind, reason ->
+      Logger.warning("[NATS] ledger status could not seal: #{kind} #{inspect(reason)}")
   end
 
   defp settled(%{more: true} = state), do: %{state | state: "publishing", last_error: nil}

@@ -38,7 +38,11 @@ defmodule OptimalEngine.Sync.Postgres do
   ledger (sealing, an applied change, a storage mutation entry) therefore takes
   one transaction-scoped advisory lock (`lock_ledger_sql/0`, keyed on the
   store's schema, so Engines sharing a database and a schema share it) before it
-  inserts, and holds it until it commits or rolls back. Sequences become visible
+  inserts, and holds it until it commits or rolls back. An apply takes it once,
+  at the end of its transaction, where it writes its ledger rows, so a long page
+  holds it only for those inserts. The sequence caches no values
+  (`ensure_ledger_sequence/0`): a session's cached values would be drawn out
+  of order whatever the lock does. Sequences become visible
   in the order they were drawn, so every snapshot sees a prefix of the ledger.
   A writer that rolls back leaves a gap no row will ever fill, and readers go
   past it as they always did.
@@ -64,11 +68,25 @@ defmodule OptimalEngine.Sync.Postgres do
   (`Lineage.may_name_class_sql/2`) translated by the store's dialect.
   """
 
+  require Logger
+
   alias OptimalEngine.Store.Postgres.Connection
 
   @pool OptimalEngine.Store.Postgres.Pool
 
-  @ledger_lock "SELECT pg_advisory_xact_lock(hashtext('optimal_engine.sync.ledger'), hashtext(current_schema()))"
+  # `current_schema()` is NULL when no schema of the search path exists, and
+  # hashtext(NULL) would make the lock call take no lock at all.
+  @ledger_lock "SELECT pg_advisory_xact_lock(hashtext('optimal_engine.sync.ledger'), hashtext(coalesce(current_schema(), '')))"
+
+  # A seal's ledger rows (`Capture.seal/0`); a mutation id is the capture key,
+  # so a row sealed already is ignored.
+  @ledger_insert """
+  INSERT INTO sync_mutations
+    (id, tenant_id, organization_id, workspace_id, device_id, entity_type, entity_id, operation,
+     payload, payload_hash, idempotency_key, occurred_at)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+  ON CONFLICT DO NOTHING
+  """
 
   @doc """
   The statement every ledger writer runs in its transaction before it inserts
@@ -98,6 +116,45 @@ defmodule OptimalEngine.Sync.Postgres do
   @spec ensure() :: :ok
   def ensure do
     run_in_transaction(["SELECT pg_advisory_xact_lock(hashtext('optimal_engine.sync'))" | ddl()])
+    ensure_ledger_sequence()
+  end
+
+  @doc """
+  The cache of the ledger's sequence, which must be 1: a session that caches
+  values hands out sequences in an order of its own, so two sessions could
+  draw 11 and then 10, and the ledger lock would order their commits but not
+  their sequences. The identity column is made with no cache (1); one found
+  with a larger cache is set back to 1, and the boot says so.
+  """
+  @spec ensure_ledger_sequence() :: :ok
+  def ensure_ledger_sequence do
+    case ledger_sequence_cache() do
+      1 ->
+        :ok
+
+      cache ->
+        Logger.warning(
+          "[Sync] the ledger sequence cached #{cache} values a session; set back to 1 so sequences are drawn in order"
+        )
+
+        run_in_transaction([
+          "SELECT pg_advisory_xact_lock(hashtext('optimal_engine.sync.ddl'))",
+          "ALTER TABLE sync_mutations ALTER COLUMN sequence SET CACHE 1"
+        ])
+    end
+  end
+
+  @doc "The cache size of the `sync_mutations.sequence` identity."
+  @spec ledger_sequence_cache() :: pos_integer()
+  def ledger_sequence_cache do
+    {:ok, [[cache]]} =
+      native(
+        "SELECT s.seqcache FROM pg_sequence s " <>
+          "WHERE s.seqrelid = pg_get_serial_sequence('sync_mutations', 'sequence')::regclass",
+        []
+      )
+
+    cache
   end
 
   @doc false
@@ -450,18 +507,19 @@ defmodule OptimalEngine.Sync.Postgres do
   end
 
   @doc """
-  Writes ledger rows (`insert`, written for PostgreSQL) and deletes the
+  Writes a seal's ledger rows (`Capture.seal/0`'s entries) and deletes the
   captured rows up to `max_seq`, in one READ COMMITTED transaction
-  (`Capture.seal/0` says why). Returns how many entries were offered.
+  (`Capture.seal/0` says why), under the ledger lock. Returns how many entries
+  were offered. An Engine sharing the database seals through this too.
   """
-  @spec write_ledger(String.t(), [[term()]], integer()) :: {:ok, non_neg_integer()}
-  def write_ledger(insert, entries, max_seq) do
+  @spec write_ledger([[term()]], integer()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def write_ledger(entries, max_seq) do
     Postgrex.transaction(
       @pool,
       fn conn ->
         Postgrex.query!(conn, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED", [])
         if entries != [], do: Postgrex.query!(conn, @ledger_lock, [])
-        Enum.each(entries, &Postgrex.query!(conn, insert, &1))
+        Enum.each(entries, &Postgrex.query!(conn, @ledger_insert, &1))
         Postgrex.query!(conn, "DELETE FROM sync_capture WHERE seq <= $1", [max_seq])
         length(entries)
       end,

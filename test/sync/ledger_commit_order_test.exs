@@ -123,7 +123,7 @@ defmodule OptimalEngine.Sync.LedgerCommitOrderTest do
       "2026-11-09T12:00:00.000"
     ]
 
-    Task.async(fn -> PgCapture.write_ledger(Capture.ledger_insert_pg(), [entry], 0) end)
+    Task.async(fn -> PgCapture.write_ledger([entry], 0) end)
   end
 
   # Writer A, a second Engine's seal, stops after drawing its sequence; writer
@@ -246,6 +246,7 @@ defmodule OptimalEngine.Sync.LedgerCommitOrderTest do
   test "a rolled-back sequence leaves a gap the readers go past", ctx do
     fail = "fail-#{ctx.n}"
     after_gap = "after-#{ctx.n}"
+    before = ledger_top()
 
     assert_raise_or_error(fn ->
       Sync.apply_changes(ctx.tenant, ctx.ws, [peer_change(ctx, fail)])
@@ -254,17 +255,21 @@ defmodule OptimalEngine.Sync.LedgerCommitOrderTest do
     assert {:ok, %{applied: 1}} =
              Sync.apply_changes(ctx.tenant, ctx.ws, [peer_change(ctx, after_gap)])
 
-    {:ok, [[low, high]]} =
-      Store.raw_query(
-        "SELECT MIN(sequence), MAX(sequence) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2",
-        [ctx.tenant, ctx.ws]
-      )
+    {:ok, [[after_seq]]} =
+      Store.raw_query("SELECT sequence FROM sync_mutations WHERE entity_id = ?1", [after_gap])
 
-    assert low == high, "only the change after the gap is in the workspace's ledger"
+    # The failed change drew a sequence and rolled back: it is not in the
+    # ledger, and the change after it has a sequence past the gap.
+    assert {:ok, []} =
+             Store.raw_query("SELECT 1 FROM sync_mutations WHERE entity_id = ?1", [fail])
 
-    page = Sync.changes(ctx.tenant, ctx.ws, since: 0, requester: "rep_puller")
-    assert entity_ids(page) == [after_gap]
-    assert page["cursor"] == high
+    assert after_seq > before + 1
+
+    # A reader that had read up to the gap goes past it at once.
+    page = Sync.changes(ctx.tenant, ctx.ws, since: before, requester: "rep_puller")
+    assert after_gap in entity_ids(page)
+    refute fail in entity_ids(page)
+    assert page["cursor"] >= after_seq
 
     # A storage mutation entry after the gap commits and is read too: nothing
     # waits on the sequence that will never come.
@@ -278,7 +283,163 @@ defmodule OptimalEngine.Sync.LedgerCommitOrderTest do
         payload: %{"text" => "after the gap"}
       })
 
-    assert entry.sequence > high
+    assert entry.sequence > after_seq
+  end
+
+  test "an apply takes the ledger lock only at its end, so a seal is not held up by it", ctx do
+    slow = "slow-#{ctx.n}"
+    hold = LedgerHold.hold(slow)
+
+    # Two changes: the first applied and done, the second held part way, as
+    # a long page would be.
+    apply =
+      Task.async(fn ->
+        Sync.apply_changes(ctx.tenant, ctx.ws, [
+          peer_change(ctx, "first-#{ctx.n}"),
+          peer_change(ctx, slow)
+        ])
+      end)
+
+    assert wait_for(fn -> LedgerHold.waiting?(hold, slow) end), "the apply never reached its row"
+
+    seal = seal_async(ctx, "local-#{ctx.n}")
+    assert {:ok, {:ok, sealed}} = Task.yield(seal, 5_000), "the seal waited on the apply"
+    assert sealed >= 1
+
+    LedgerHold.release(hold)
+    assert {:ok, %{applied: 2}} = Task.await(apply, 30_000)
+
+    # The apply's rows went in after the seal's, in the order applied.
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT entity_id FROM sync_mutations WHERE workspace_id = ?1 AND entity_id IN (?2, ?3, ?4) ORDER BY sequence",
+        [ctx.ws, "local-#{ctx.n}", "first-#{ctx.n}", slow]
+      )
+
+    assert List.flatten(rows) == ["local-#{ctx.n}", "first-#{ctx.n}", slow]
+  end
+
+  test "a seal that fails ends the publisher's pass, not the publisher", ctx do
+    {:ok, stub} = NATSStub.start()
+    on_exit(fn -> NATSStub.stop(stub) end)
+    conn = :"ledord_conn_fail_#{ctx.n}"
+
+    start_supervised!(
+      {Connection, name: conn, url: "nats://127.0.0.1:#{stub.port}", backoff: {20, 100}},
+      id: conn
+    )
+
+    assert wait_for(fn -> Connection.connected?(conn) end)
+    pub = :"ledord_pub_fail_#{ctx.n}"
+
+    start_supervised!(
+      {LedgerPublisher,
+       name: pub,
+       connection: conn,
+       namespace: "optimal",
+       enabled: true,
+       interval_ms: 0,
+       workspaces: [ctx.ws]},
+      id: pub
+    )
+
+    # A captured row whose ledger row the test trigger refuses: every seal fails
+    # until it is gone.
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO contexts (id, tenant_id, workspace_id, title, content, created_at) VALUES (?1, ?2, ?3, ?1, 'body', '2026-11-09T12:00:00Z')",
+        ["fail-seal-#{ctx.n}", ctx.tenant, ctx.ws]
+      )
+
+    on_exit(fn ->
+      Store.raw_query("DELETE FROM sync_capture WHERE entity_key = ?1", ["fail-seal-#{ctx.n}"])
+    end)
+
+    pid = Process.whereis(pub)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert {:error, _} = LedgerPublisher.publish_now(pub)
+      assert %{state: "error"} = LedgerPublisher.status(pub)
+    end)
+
+    assert Process.whereis(pub) == pid
+
+    {:ok, _} =
+      Store.raw_query("DELETE FROM sync_capture WHERE entity_key = ?1", ["fail-seal-#{ctx.n}"])
+
+    assert {:ok, _} = LedgerPublisher.publish_now(pub)
+  end
+
+  test "the ledger lock is taken even when no schema of the search path exists" do
+    LedgerHold.with_conn(
+      fn conn ->
+        Postgrex.query!(conn, "BEGIN", [])
+        %{rows: [[nil]]} = Postgrex.query!(conn, "SELECT current_schema()", [])
+        Postgrex.query!(conn, PgCapture.lock_ledger_sql(), [])
+
+        %{rows: [[n]]} =
+          Postgrex.query!(
+            conn,
+            "SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid()",
+            []
+          )
+
+        Postgrex.query!(conn, "ROLLBACK", [])
+        assert n == 1
+      end,
+      "oe_no_such_schema"
+    )
+  end
+
+  test "the ledger's sequence caches no values, and a larger cache is set back at boot" do
+    assert PgCapture.ledger_sequence_cache() == 1
+
+    LedgerHold.with_conn(fn conn ->
+      Postgrex.query!(conn, "ALTER TABLE sync_mutations ALTER COLUMN sequence SET CACHE 20", [])
+    end)
+
+    assert PgCapture.ledger_sequence_cache() == 20
+
+    ExUnit.CaptureLog.capture_log(fn -> assert :ok = PgCapture.ensure() end) =~
+      "set back to 1"
+
+    assert PgCapture.ledger_sequence_cache() == 1
+  end
+
+  test "the ledger's payload and the events' metadata come back as the JSON text written", ctx do
+    payload = %{"text" => "ünïcode ✓ \"quoted\"", "nested" => %{"list" => [1, 2.5, nil, true]}}
+
+    {:ok, entry} =
+      PolicyStore.append_mutation(%{
+        workspace_id: ctx.ws,
+        device_id: "app-device",
+        entity_type: "memory_object",
+        entity_id: "json-#{ctx.n}",
+        operation: :create,
+        payload: payload
+      })
+
+    {:ok, [[stored]]} =
+      Store.raw_query("SELECT payload FROM sync_mutations WHERE id = ?1", [entry.id])
+
+    assert is_binary(stored)
+    assert Jason.decode!(stored) == payload
+
+    metadata = Jason.encode!(%{"messages_purged" => 3, "reason" => "ünïcode"})
+
+    {:ok, [[id]]} =
+      Store.raw_query(
+        "INSERT INTO events (tenant_id, principal, kind, target_uri, metadata) VALUES (?1, 'system:test', 'test_json', 'x', ?2) RETURNING id",
+        [ctx.tenant, metadata]
+      )
+
+    {:ok, [[read]]} = Store.raw_query("SELECT metadata FROM events WHERE id = ?1", [id])
+    assert read == metadata
+  end
+
+  defp ledger_top do
+    {:ok, [[top]]} = Store.raw_query("SELECT COALESCE(MAX(sequence), 0) FROM sync_mutations", [])
+    top
   end
 
   test "storage mutation entries commit in sequence order as well", ctx do
