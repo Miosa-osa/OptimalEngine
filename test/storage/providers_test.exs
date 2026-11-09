@@ -224,7 +224,9 @@ defmodule OptimalEngine.Storage.ProvidersTest do
       assert {:ok, valkey} = Providers.get("valkey", probe: true)
       assert valkey.lifecycle_state == "available"
 
-      adapter = OptimalEngine.Storage.Valkey.Adapter
+      # Resolved at run time, as above, so the compiler does not check for a
+      # serves/0 this build's adapter may not define yet.
+      adapter = Module.concat([valkey.adapter_module])
 
       if function_exported?(adapter, :serves, 0) do
         assert valkey.serves == adapter.serves()
