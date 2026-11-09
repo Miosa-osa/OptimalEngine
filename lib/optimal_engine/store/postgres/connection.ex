@@ -274,7 +274,7 @@ defmodule OptimalEngine.Store.Postgres.Connection do
           fn remaining ->
             execute(pool, statement, bound, Keyword.put(opts, :timeout, remaining))
           end
-          |> retrying(1, deadline)
+          |> retrying(1, deadline, statement)
           |> json_columns(json)
         after
           Process.delete({@last_conflict, :started, deadline})
@@ -507,7 +507,7 @@ defmodule OptimalEngine.Store.Postgres.Connection do
     error in [DBConnection.EncodeError, ArgumentError] -> {:error, error}
   end
 
-  defp retrying(run, attempt, deadline) do
+  defp retrying(run, attempt, deadline, statement) do
     case run.(max(remaining(deadline), @min_attempt)) do
       {:ok, result} ->
         {:ok, result}
@@ -519,12 +519,12 @@ defmodule OptimalEngine.Store.Postgres.Connection do
 
           attempt < @max_attempts and retry_after_backoff?(attempt, deadline) ->
             retried(:statement, error.postgres.code, attempt)
-            retrying(run, attempt + 1, deadline)
+            retrying(run, attempt + 1, deadline, statement)
 
           true ->
             {:error,
              {:serialization_failure,
-              gave_up(error.postgres.code, attempt, deadline, {:statement, error})}}
+              gave_up(error.postgres.code, attempt, deadline, {:conflict, {statement, error}})}}
         end
     end
   end
@@ -539,12 +539,9 @@ defmodule OptimalEngine.Store.Postgres.Connection do
     "#{reason}; gave up after #{attempt} attempts#{elapsed}" <> conflict_detail(conflict)
   end
 
-  defp conflict_detail({:statement, %Postgrex.Error{query: query} = error}),
-    do: "; last conflict at: #{excerpt(query)}#{server_detail(error)}"
+  defp conflict_detail({:conflict, nil}), do: ""
 
-  defp conflict_detail({:transaction, nil}), do: ""
-
-  defp conflict_detail({:transaction, {statement, error}}),
+  defp conflict_detail({:conflict, {statement, error}}),
     do: "; last conflict at: #{excerpt(statement)}#{server_detail(error)}"
 
   defp server_detail(%Postgrex.Error{postgres: %{} = fields}) do
@@ -748,8 +745,7 @@ defmodule OptimalEngine.Store.Postgres.Connection do
     else
       conflict = Process.get({@last_conflict, deadline})
 
-      {:error,
-       {:serialization_failure, gave_up(reason, attempt, deadline, {:transaction, conflict})}}
+      {:error, {:serialization_failure, gave_up(reason, attempt, deadline, {:conflict, conflict})}}
     end
   end
 
