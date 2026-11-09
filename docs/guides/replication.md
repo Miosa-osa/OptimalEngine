@@ -31,6 +31,9 @@ A replay is answered before the entity type is checked, so an entry written befo
 A replay is answered only with a storage entry: a change of a row that holds the key (an earlier version stored a peer's change under the key the peer sent) gets `409 idempotency_key_conflict` or the 422 above, never the change.
 The Engine gives every entry its id.
 
+A workspace's ledger can also be published to NATS JetStream for subscribers that follow its changes without being a peer (`OPTIMAL_NATS_FLOWS=ledger`, see [Storage providers](storage-providers.md#the-change-ledger-stream)).
+That stream carries what `GET /api/sync/changes` serves, behind the same data-class gate; it is not a transport between Engines, which still replicate as described here.
+
 ## What replicates, and what a peer can write
 
 What replicates is an explicit list of workspace knowledge (`Capture.replicated_tables/0`): contexts, chunks and their embeddings, memories and their associations, claims, facts, decisions, episodes, entities and their aliases, mentions and lineage, citations, classifications, intents, clusters, rhythm notes, open loops, observations, source packages, signal events, edges, nodes and node relationships and types, wiki pages, sessions, workflows and their traces, procedural memory, training examples, derivation records and analysis reports.

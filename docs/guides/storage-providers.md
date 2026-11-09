@@ -357,6 +357,42 @@ The provider has two halves:
 On that client, `OptimalEngine.Storage.NATS.JetStream` provisions streams (created when missing, left alone when they already hold the settings asked for, updated when one differs) and durable pull consumers with explicit acks, publishes with the stream's acknowledgement and a `Nats-Msg-Id` (a second publish of the same id within the stream's duplicate window is stored once), and pulls messages that are acknowledged, refused for redelivery (`-NAK`, at once or after a delay) or terminated one at a time.
 It needs a server with JetStream enabled, 2.9 or later (the tests run against 2.11).
 
+### Flows
+
+Setting `OPTIMAL_NATS_URL` alone checks and proves the server; nothing the Engine holds leaves it.
+`OPTIMAL_NATS_FLOWS` names what runs through JetStream, a comma-separated list or `all`:
+
+| Flow | What runs through JetStream | Without NATS, or while it is down |
+| --- | --- | --- |
+| `ledger` | The change ledger of every workspace enabled for replication, as stream `<NAMESPACE>_LEDGER` | The ledger stays in SQLite (`sync_mutations`), as it always does; the backlog goes out when NATS is back |
+
+Every subject and stream starts with `OPTIMAL_NATS_NAMESPACE` (default `optimal`, stream names upper-cased: `OPTIMAL_LEDGER`).
+Two Engines on one NATS account need two namespaces.
+No flow makes an Engine write wait on NATS or fail because NATS is down: each one reads what the Engine has already stored durably, and sends it afterwards.
+The provider's `serves` names the flows that are on (`change_ledger_stream`).
+
+### The change ledger stream
+
+With `ledger` on, `OptimalEngine.Storage.NATS.LedgerPublisher` publishes, every second, what `GET /api/sync/changes` would serve a peer that pulls: the changes of the workspaces enabled for replication, only the tables that replicate, and never a row the data-class gate keeps home (`config :optimal_engine, :sync_serve_max_class`, default `confidential`).
+A workspace that is not enabled for replication has no ledger, and nothing of it is published.
+Storage mutation entries (`POST /api/storage/workspaces/:id/mutations`) are not changes and are not published either.
+
+* Stream `<NAMESPACE>_LEDGER`, file storage, limits retention, kept `OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS` (default 168, `0` keeps it forever).
+* Subject `<namespace>.ledger.<tenant>.<workspace>`, each id made a subject token: bytes other than letters, digits, `_` and `-` are percent-encoded (`default:notes` is `default%3Anotes`).
+  Follow one workspace with that subject as a consumer's filter, or all of them with `<namespace>.ledger.>`.
+* Each message is one change as JSON, the shape a peer pulls (`sequence`, `id`, `device_id`, `entity_type`, `entity_id`, `operation`, `payload`, `payload_hash`, `idempotency_key`, `occurred_at`) with `tenant_id` and `workspace_id`.
+  Headers: `Nats-Msg-Id` (the change's id), `Optimal-Ledger-Seq`, `Optimal-Entity-Type`, `Optimal-Operation`, `Optimal-Replica`.
+
+Changes go out one at a time in ledger order, each acknowledged by the stream before the next, so a workspace's subject holds its changes in the order the Engine made them.
+A publish whose acknowledgement was lost is sent again with the same message id, and the stream stores it once.
+Where to resume is read from the stream (the `Optimal-Ledger-Seq` of the last message on the workspace's subject) at start and after every reconnect: a restart repeats nothing, and a stream that was deleted or lost is filled again from the start of the ledger.
+
+`runtime.flows.ledger` in `GET /api/storage/providers/nats_jetstream` says where it stands: `state` (`off`, `buffering` while NATS is down, `publishing` while a backlog remains, `caught_up`, `error` with `last_error`), the changes published since start, and each workspace's `published_through` and `backlog`.
+
+The stream is a copy for subscribers, not a replication transport: Engines still replicate over HTTP or the MIOSA relay (see [Replication](replication.md)), and a peer's conflict detection, gates and version checks do not apply to a reader of the stream.
+A workspace erasure removes rows from the Engine and the ledger, not from the stream: the stream's age limit is what removes a change from NATS, so keep it as short as subscribers allow.
+The stream holds workspace content up to the serve ceiling, so the NATS account needs the same care as a replication peer.
+
 `GET /api/storage/providers` shows the client under the provider's `runtime.client`: `state` (`connected`, `connecting`, `disconnected`, `not_configured`), `reconnects` (connections lost since the Engine started), `last_error`, `connected_since`, `server` (`version`, `jetstream`) and `pending` (requests waiting on an answer).
 
 ```console
@@ -383,7 +419,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | RocksDB | Wired, opt in | A persistent triple-store mirror of `graph_edges` (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`) | Falls back to ETS when the native library is missing |
 | `s3` (S3-compatible: Garage, AWS S3, R2, MinIO, a MIOSA bucket) | Wired | Asset bytes, offsite backups, the probe and the placement reconciler | |
 | `postgres` | Wired, partial | The canonical relational store of a compile-time `OPTIMAL_STORE=postgres` build | Full-text search, replication, app data collections, and the engine's backup routes; moving an existing Engine to it |
-| `nats_jetstream` | Wired | The probe (PONG and a JetStream account answer), the proof (a stream created, a message published and read back by sequence, the stream deleted), and a supervised JetStream client that reconnects with backoff, over `OPTIMAL_NATS_URL` | Engine events, jobs and replication do not flow through it yet |
+| `nats_jetstream` | Wired | The probe and the proof, a supervised JetStream client that reconnects with backoff, and with `OPTIMAL_NATS_FLOWS=ledger` the change ledger published as a stream per workspace subject | Jobs and connector intake do not run through it; replication between Engines does not use it |
 | `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
 | `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
 | `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`) and the proof (a Parquet file written and read back) | No Engine projection is written to it yet |

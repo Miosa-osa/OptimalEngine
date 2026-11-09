@@ -100,8 +100,17 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 
 The mirror is not what retrieval reads: the graph that search and assembly read is the `graph_edges` table in SQLite.
 
-Providers with an adapter that no Engine feature uses yet: `OPTIMAL_NATS_URL`, `OPTIMAL_VALKEY_URL`, `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`, `OPTIMAL_ANALYTICS_PATH` (DuckDB and Parquet), and `OPTIMAL_OPENBAO_ADDR` with `OPTIMAL_OPENBAO_TOKEN` and `OPTIMAL_OPENBAO_KV_MOUNT`.
+Providers with an adapter that no Engine feature uses yet: `OPTIMAL_VALKEY_URL`, `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`, `OPTIMAL_ANALYTICS_PATH` (DuckDB and Parquet), and `OPTIMAL_OPENBAO_ADDR` with `OPTIMAL_OPENBAO_TOKEN` and `OPTIMAL_OPENBAO_KV_MOUNT`.
 Setting them lets `GET /api/storage/providers?probe=true` check each service and the provider proofs prove it with a round trip; the Engine's data stays where it is.
+NATS JetStream is reached the same way, and runs the flows it is given:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPTIMAL_NATS_URL` | unset | `nats://[user:password@\|token@]host[:port]`, `tls://` for TLS. The Engine's JetStream client, the probe and the proof. |
+| `OPTIMAL_NATS_FLOWS` | none | What runs through JetStream: `ledger` (the change ledger as a stream), or `all`. Without it nothing the Engine holds is sent to NATS. |
+| `OPTIMAL_NATS_NAMESPACE` | `optimal` | Prefix of every subject and stream (`OPTIMAL_LEDGER`); one per Engine on a shared NATS account. |
+| `OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS` | `168` | How long the ledger stream keeps a change; `0` keeps it forever. |
+
 `OPTIMAL_FRACTAL_ENDPOINT` with `OPTIMAL_FRACTAL_CREDENTIAL_REF` is declared with no adapter, and the inventory reports it `adapter_missing` whatever is set.
 See [Storage providers](docs/guides/storage-providers.md) and [Installation and deployment](docs/guides/installation-and-deployment.md).
 

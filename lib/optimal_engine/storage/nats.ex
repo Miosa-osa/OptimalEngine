@@ -28,6 +28,55 @@ defmodule OptimalEngine.Storage.NATS do
 
   @type health :: :healthy | :unreachable | :not_configured | :invalid_config
 
+  @flows_env "OPTIMAL_NATS_FLOWS"
+  @namespace_env "OPTIMAL_NATS_NAMESPACE"
+  @default_namespace "optimal"
+  @flows ~w(ledger)
+
+  @doc """
+  The Engine flows that run through JetStream, from `OPTIMAL_NATS_FLOWS`: a
+  comma-separated list of #{Enum.map_join(@flows, ", ", &"`#{&1}`")}, or `all`.
+  None by default: setting the URL alone only checks and proves the server,
+  and nothing the Engine holds leaves it until a flow is named. A name that is
+  not a flow is ignored.
+  """
+  @spec flows() :: [String.t()]
+  def flows do
+    names =
+      (System.get_env(@flows_env) || "")
+      |> String.split(",", trim: true)
+      |> Enum.map(&(&1 |> String.trim() |> String.downcase()))
+
+    if "all" in names, do: @flows, else: Enum.filter(@flows, &(&1 in names))
+  end
+
+  @doc "Every flow the Engine can run through JetStream."
+  @spec known_flows() :: [String.t()]
+  def known_flows, do: @flows
+
+  @doc "Whether `flow` is named in `OPTIMAL_NATS_FLOWS` and the provider is configured."
+  @spec flow?(String.t()) :: boolean()
+  def flow?(flow), do: configured?() and flow in flows()
+
+  @doc """
+  The prefix of every subject and stream the Engine uses, from
+  `OPTIMAL_NATS_NAMESPACE` (default `optimal`): a letter, then up to 31
+  letters, digits, `_` or `-`. Two Engines on one NATS account need two
+  namespaces, or their ledgers share subjects.
+  """
+  @spec namespace() :: {:ok, String.t()} | {:error, :invalid_namespace}
+  def namespace do
+    value = System.get_env(@namespace_env) || @default_namespace
+
+    if Regex.match?(~r/^[A-Za-z][A-Za-z0-9_-]{0,31}$/, value),
+      do: {:ok, value},
+      else: {:error, :invalid_namespace}
+  end
+
+  @doc "The stream name for `suffix` in `namespace`: `OPTIMAL_LEDGER` for `optimal`."
+  @spec stream_name(String.t(), String.t()) :: String.t()
+  def stream_name(namespace, suffix), do: String.upcase(namespace) <> "_" <> suffix
+
   @doc "The environment variable the provider is configured by."
   @spec env_name() :: String.t()
   def env_name, do: @env
