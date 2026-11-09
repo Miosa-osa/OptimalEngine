@@ -41,8 +41,29 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
 
     for i <- 1..3, do: context(tenant, ws.id, "bjobs-#{n}-#{i}")
 
-    on_exit(&drain_all/0)
+    on_exit(fn ->
+      drain_all()
+      cancel_queued(tenant)
+    end)
+
     %{tenant: tenant, n: n, ws: ws.id}
+  end
+
+  # A job a test leaves queued for later, as a retry is (due a minute on), is
+  # claimed by the drain of whichever test runs once that minute has passed,
+  # which then runs and reports that job instead of its own: an import whose
+  # target another import still holds ends `retrying` again, where the test
+  # expected its own job cancelled or killed. A run of this file takes longer
+  # than a minute on PostgreSQL. So each test cancels what it leaves queued,
+  # as test/portability/export_space_test.exs does with its retry.
+  defp cancel_queued(tenant) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT id FROM jobs WHERE tenant_id = ?1 AND status = 'available' AND kind IN (SELECT value FROM json_each(?2))",
+        [tenant, Jason.encode!(BundleJobs.kinds())]
+      )
+
+    for [id] <- rows, do: {:ok, _view, :cancelled} = BundleJobs.cancel(tenant, id)
   end
 
   defp context(tenant, workspace, id) do

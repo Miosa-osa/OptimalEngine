@@ -257,10 +257,21 @@ defmodule OptimalEngine.Storage.NATSWorkQueueTest do
       assert {:ok, %{status: "available"}} = Jobs.fetch(job.id)
     end
 
-    test "a job enqueued while NATS is down is announced when it is back, and the enqueue never failed",
+    # The job is announced first when NATS is back, ahead of the reconnect
+    # sweep, which goes through every unfinished job of the database oldest
+    # first: in the full suite that took longer than the wait below, or never
+    # reached the job at all past the sweep's limit. `older` stands for them.
+    test "a job enqueued while NATS is down is announced first when it is back, and the enqueue never failed",
          ctx do
       kind = "natsdown.#{ctx.n}"
       queue = job_queue(ctx, %{})
+      {:ok, older} = Jobs.enqueue(ctx.ws, kind <> ".older", %{}, run_in: 3_600)
+
+      {:ok, _} =
+        Store.raw_query("UPDATE jobs SET inserted_at = '2000-01-01 00:00:00' WHERE id = ?1", [
+          older.id
+        ])
+
       port = ctx.stub.port
       NATSStub.stop(ctx.stub)
       assert wait_for(fn -> not Connection.connected?(ctx.conn) end)
@@ -280,6 +291,9 @@ defmodule OptimalEngine.Storage.NATSWorkQueueTest do
                |> NATSStub.messages("OPTIMAL_JOBS")
                |> Enum.any?(&(&1.headers["Nats-Msg-Id"] == job.id))
              end)
+
+      assert [first | _] = NATSStub.messages(back, "OPTIMAL_JOBS")
+      assert first.headers["Nats-Msg-Id"] == job.id
     end
 
     test "Jobs.enqueue announces to the Engine's queue, and an enqueue with the flow off still works",

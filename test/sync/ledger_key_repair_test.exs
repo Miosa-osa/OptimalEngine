@@ -94,8 +94,12 @@ defmodule OptimalEngine.Sync.LedgerKeyRepairTest do
 
     capture_id = plant(ctx, "stored-#{ctx.n}-id", "mut_#{local}_#{next}", "stored", local)
 
-    # An entry that took the key a peer's next change is recorded under.
-    peer = "rep_remote_#{ctx.n}"
+    # An entry that took the key a peer's next change is recorded under. The
+    # peer is not the one the rows above were planted for: their ids,
+    # `mut_rep_remote_<n>_<seq>`, follow the capture sequence, and one of them
+    # was this change's id whenever the sequence stood at 75 to 77, so the
+    # change was skipped as a duplicate.
+    peer = "rep_sender_#{ctx.n}"
     incoming = "mut_#{peer}_77"
     entry = plant(ctx, "entry-#{ctx.n}", "peer:" <> incoming, "entry", "app-device")
 
