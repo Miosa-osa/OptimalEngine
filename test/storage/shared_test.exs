@@ -319,6 +319,84 @@ defmodule OptimalEngine.Storage.SharedTest do
     end
   end
 
+  describe "the signing key" do
+    defmodule FakeSecrets do
+      @moduledoc false
+      def fetch("CONNECTOR_KEY") do
+        case System.get_env("CONNECTOR_KEY") do
+          "openbao:" <> _ref -> :persistent_term.get({__MODULE__, :answer})
+          nil -> {:error, :not_set}
+          value -> {:ok, value}
+        end
+      end
+    end
+
+    setup do
+      previous_key = System.get_env("CONNECTOR_KEY")
+      previous_resolver = Application.fetch_env(:optimal_engine, :secrets_resolver)
+      Application.put_env(:optimal_engine, :secrets_resolver, FakeSecrets)
+      Shared.reset_signing_key()
+
+      on_exit(fn ->
+        if previous_key,
+          do: System.put_env("CONNECTOR_KEY", previous_key),
+          else: System.delete_env("CONNECTOR_KEY")
+
+        case previous_resolver do
+          {:ok, value} -> Application.put_env(:optimal_engine, :secrets_resolver, value)
+          :error -> Application.delete_env(:optimal_engine, :secrets_resolver)
+        end
+
+        Shared.reset_signing_key()
+      end)
+
+      stub = stub!()
+      start_pool(stub)
+      :ok
+    end
+
+    # Two processes on one Valkey: the second has a signing key of its own
+    # making, from the same configuration.
+    defp shared_between_nodes? do
+      :ok = Shared.put(@ns, "signed", :value, 60_000)
+      Shared.reset_signing_key()
+      Shared.get(@ns, "signed") == {:ok, :value}
+    end
+
+    test "a CONNECTOR_KEY that is an OpenBao reference is resolved, not used raw" do
+      hex = Base.encode16(:crypto.strong_rand_bytes(32))
+      :persistent_term.put({FakeSecrets, :answer}, {:ok, hex})
+      System.put_env("CONNECTOR_KEY", "openbao:optimal/engine#connector_key")
+      assert shared_between_nodes?()
+
+      # The same key given plainly signs the same way.
+      System.put_env("CONNECTOR_KEY", hex)
+      Shared.reset_signing_key()
+      assert {:ok, :value} = Shared.get(@ns, "signed")
+    end
+
+    test "a reference that cannot be read signs with a key of this node's own, and says so" do
+      :persistent_term.put(
+        {FakeSecrets, :answer},
+        {:error, {:secret_unavailable, "CONNECTOR_KEY", :openbao_sealed}}
+      )
+
+      System.put_env("CONNECTOR_KEY", "openbao:optimal/engine#connector_key")
+
+      log = ExUnit.CaptureLog.capture_log(fn -> refute shared_between_nodes?() end)
+      assert log =~ "CONNECTOR_KEY"
+      refute log =~ "optimal/engine#connector_key"
+    end
+
+    test "without a resolver a reference is never taken for the key" do
+      Application.put_env(:optimal_engine, :secrets_resolver, :no_such_resolver)
+      System.put_env("CONNECTOR_KEY", "openbao:optimal/engine#connector_key")
+
+      log = ExUnit.CaptureLog.capture_log(fn -> refute shared_between_nodes?() end)
+      assert log =~ "CONNECTOR_KEY"
+    end
+  end
+
   describe "the Engine's shared state on Valkey" do
     setup do
       stub = stub!()

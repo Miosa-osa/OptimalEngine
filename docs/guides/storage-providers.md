@@ -866,7 +866,7 @@ When Valkey answers again, the first step on a bucket the process spent during t
 What is stored, and how:
 
 * Keys are `optimal:shared:<namespace>:<generation>:<key>`; clearing a namespace moves its generation in one command, and the old keys expire.
-* Cached values are signed with an HMAC: a value this Engine did not write reads as a miss. The key comes from `CONNECTOR_KEY`; give every process that shares a Valkey the same `CONNECTOR_KEY` and they share cache entries, otherwise each reads only its own (the rate limits are shared either way).
+* Cached values are signed with an HMAC: a value this Engine did not write reads as a miss. The key comes from `CONNECTOR_KEY`; give every process that shares a Valkey the same `CONNECTOR_KEY` and they share cache entries, otherwise each reads only its own (the rate limits are shared either way). An `openbao:` reference in `CONNECTOR_KEY` is resolved through the Engine's secret resolver, never used as the key; while it cannot be read the process signs with a key of its own and logs why.
 * The key cache stores the SHA-256 of the stored bcrypt hash and the secret, never either of them.
 * A gate cache entry is keyed by the Engine's replica id, so Engines with stores of their own never share one; a store without a replica id keeps its gate cache entries in the process's ETS table.
 * The URL and its credential are never logged or returned; the inventory shows only whether TLS is on and how many connections are up (`OptimalEngine.Storage.Valkey.Adapter.status/1`).

@@ -33,7 +33,11 @@ defmodule OptimalEngine.Storage.Shared do
   Engine did not write is a miss, not a term it trusts. The signing key comes
   from `CONNECTOR_KEY` when it is set (set the same one on every node that
   shares a Valkey and they share entries); without it each node signs with a
-  key of its own and reads only its own entries.
+  key of its own and reads only its own entries. `CONNECTOR_KEY` is read
+  through the Engine's secret resolver (`OptimalEngine.Secrets` when the build
+  has it), so an `openbao:<path>#<field>` reference is resolved, never decoded
+  as the key; a reference that cannot be read is logged and the node signs
+  with a key of its own, trying the reference again a minute later.
 
   ## Invalidation during an outage
 
@@ -46,10 +50,13 @@ defmodule OptimalEngine.Storage.Shared do
   Valkey is down a lock is per node, as all locks were before.
   """
 
+  require Logger
+
   alias OptimalEngine.Storage.Shared.Local
   alias OptimalEngine.Storage.Valkey.Pool
 
   @prefix "optimal:shared:"
+  @signing_key_retry_ms 60_000
   @max_plain_key 200
 
   # Each script starts by resolving the namespace's generation, so a clear is
@@ -399,24 +406,84 @@ defmodule OptimalEngine.Storage.Shared do
     ])
   end
 
+  @doc false
+  # Tests: forget the signing key, as a fresh process would.
+  @spec reset_signing_key() :: :ok
+  def reset_signing_key do
+    :persistent_term.erase({__MODULE__, :signing_key})
+    :ok
+  end
+
+  # A key derived from CONNECTOR_KEY is kept for good. A per-node key made
+  # because a CONNECTOR_KEY reference could not be read is kept only for
+  # @signing_key_retry_ms, so the node starts sharing entries once OpenBao
+  # answers.
   defp signing_key do
+    now = System.monotonic_time(:millisecond)
+
     case :persistent_term.get({__MODULE__, :signing_key}, nil) do
-      nil ->
-        key = derive_signing_key()
-        :persistent_term.put({__MODULE__, :signing_key}, key)
+      {key, :final} ->
         key
 
-      key ->
+      {key, {:until, until}} when until > now ->
+        key
+
+      _none_or_expired ->
+        {key, keep} = derive_signing_key()
+
+        entry =
+          if keep == :final, do: {key, :final}, else: {key, {:until, now + @signing_key_retry_ms}}
+
+        :persistent_term.put({__MODULE__, :signing_key}, entry)
         key
     end
   end
 
   defp derive_signing_key do
-    with hex when is_binary(hex) <- System.get_env("CONNECTOR_KEY"),
-         {:ok, master} when byte_size(master) == 32 <- Base.decode16(hex, case: :mixed) do
-      :crypto.mac(:hmac, :sha256, master, "optimal-engine shared cache v1")
-    else
-      _ -> :crypto.strong_rand_bytes(32)
+    case connector_key() do
+      {:ok, hex} ->
+        case Base.decode16(hex, case: :mixed) do
+          {:ok, master} when byte_size(master) == 32 ->
+            {:crypto.mac(:hmac, :sha256, master, "optimal-engine shared cache v1"), :final}
+
+          _ ->
+            {:crypto.strong_rand_bytes(32), :final}
+        end
+
+      :unset ->
+        {:crypto.strong_rand_bytes(32), :final}
+
+      {:error, reason} ->
+        Logger.error(
+          "[Valkey] CONNECTOR_KEY could not be resolved (#{reason}); shared cache entries " <>
+            "are signed with a key of this process's own until it can be"
+        )
+
+        {:crypto.strong_rand_bytes(32), :retry}
     end
   end
+
+  # CONNECTOR_KEY through the Engine's secret resolver, so an OpenBao
+  # reference (`openbao:<path>#<field>`) is resolved, never decoded as the key.
+  defp connector_key do
+    resolver = Application.get_env(:optimal_engine, :secrets_resolver, OptimalEngine.Secrets)
+
+    if Code.ensure_loaded?(resolver) and function_exported?(resolver, :fetch, 1) do
+      case resolver.fetch("CONNECTOR_KEY") do
+        {:ok, value} -> {:ok, value}
+        {:error, :not_set} -> :unset
+        {:error, {:secret_unavailable, _name, why}} -> {:error, describe(why)}
+        {:error, _other} -> {:error, "the secret resolver refused it"}
+      end
+    else
+      case System.get_env("CONNECTOR_KEY") do
+        nil -> :unset
+        "openbao:" <> _ -> {:error, "it is an OpenBao reference and this build has no resolver"}
+        value -> {:ok, String.trim(value)}
+      end
+    end
+  end
+
+  defp describe(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp describe(_reason), do: "the secret is unavailable"
 end
