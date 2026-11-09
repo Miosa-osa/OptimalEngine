@@ -106,6 +106,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   @max_age_env "OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS"
   @default_max_age_hours 168
   @empty %{published: 0, purged: 0, forgotten: 0}
+  @checkpoint {__MODULE__, :workspace_checkpoint}
   @degraded_after 5
 
   @doc false
@@ -210,6 +211,10 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
 
   @impl GenServer
   def init(opts) do
+    # A publisher that starts again starts healthy: a degraded mark its last
+    # run left in persistent_term is not this run's.
+    put_health(Keyword.get(opts, :name, __MODULE__), 0, nil)
+
     enabled = Keyword.get_lazy(opts, :enabled, fn -> NATS.flow?(@flow) end)
 
     namespace =
@@ -394,16 +399,26 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   # cursors they moved. (A read that fails is caught page by page in
   # `read_page/4`, which keeps this workspace's earlier pages too.)
   defp guarded_workspace(state, workspace) do
+    Process.delete(@checkpoint)
     publish_workspace(state, workspace, @pages_per_pass, @empty)
   rescue
     error ->
       Logger.warning("[NATS] ledger publish failed: #{Exception.message(error)}")
-      {:error, {:raised, Exception.message(error)}, @empty, state}
+      {state, counts} = checkpoint(state)
+      {:error, {:raised, Exception.message(error)}, counts, state}
   catch
     kind, reason ->
       Logger.warning("[NATS] ledger publish failed: #{kind} #{inspect(reason)}")
-      {:error, {kind, reason}, @empty, state}
+      {state, counts} = checkpoint(state)
+      {:error, {kind, reason}, counts, state}
+  after
+    Process.delete(@checkpoint)
   end
+
+  # The state and counts after the last page of this workspace that went out
+  # whole: a raise or exit later in the workspace keeps the cursor those pages
+  # moved.
+  defp checkpoint(state), do: Process.get(@checkpoint, {state, @empty})
 
   # One page of a workspace's changes and the later forgets of its rows. The
   # read seals first, and a seal that fails or waits past its timeout (a long
@@ -464,6 +479,8 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
 
           state =
             if page_counts.published > 0, do: %{state | last_published_at: now()}, else: state
+
+          Process.put(@checkpoint, {state, counts})
 
           if page["more"] do
             publish_workspace(state, workspace, pages - 1, counts)

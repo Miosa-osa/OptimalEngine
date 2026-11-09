@@ -80,7 +80,7 @@ defmodule OptimalEngine.Test.LedgerHold do
 
   @doc "Takes the lock a writer of `entity_id` will wait on; returns the holding connection."
   def hold(entity_id) do
-    conn = connect()
+    conn = open()
 
     Postgrex.query!(conn, "SELECT pg_advisory_lock(hashtext($1), hashtext($2))", [@key, entity_id])
 
@@ -110,7 +110,7 @@ defmodule OptimalEngine.Test.LedgerHold do
 
   @doc "Runs `fun` with a connection of its own on the store's schema (or `schema`)."
   def with_conn(fun, schema \\ nil) do
-    conn = connect(schema)
+    conn = open(schema)
 
     try do
       fun.(conn)
@@ -119,7 +119,8 @@ defmodule OptimalEngine.Test.LedgerHold do
     end
   end
 
-  defp connect(schema \\ nil) do
+  @doc "A connection (one session) of its own on the store's schema (or `schema`); stop it with `GenServer.stop/1`."
+  def open(schema \\ nil) do
     {:ok, config} = OptimalEngine.Storage.Postgres.config()
 
     schema =

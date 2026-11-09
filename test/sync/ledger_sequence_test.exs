@@ -99,22 +99,134 @@ defmodule OptimalEngine.Sync.LedgerSequenceTest do
     assert Health.ready(skip: [:embedder]).checks.ledger == :ok
   end
 
-  test "values a session cached before the cache was set back never come out of order", ctx do
+  # A session of its own that draws once, and so holds a block of `cache`
+  # values while the cache is larger than 1.
+  defp draw(conn) do
+    %{rows: [[value]]} =
+      Postgrex.query!(
+        conn,
+        "SELECT nextval(pg_get_serial_sequence('sync_mutations', 'sequence'))",
+        []
+      )
+
+    value
+  end
+
+  # What a ledger writer runs in its transaction before it draws.
+  defp writer_draw(conn) do
+    {:ok, value} =
+      Postgrex.transaction(conn, fn conn ->
+        Enum.each(PgCapture.ledger_lock_statements(), &Postgrex.query!(conn, &1, []))
+        draw(conn)
+      end)
+
+    value
+  end
+
+  defp with_sessions(count, fun) do
+    sessions = for _ <- 1..count, do: LedgerHold.open()
+
+    try do
+      fun.(sessions)
+    after
+      Enum.each(sessions, &GenServer.stop/1)
+    end
+  end
+
+  test "a block a session cached before the check never comes out of order" do
     set_cache(20)
 
-    # Every pooled session draws once, and so holds a block of 20 values.
-    1..20
-    |> Enum.map(fn i -> Task.async(fn -> append(ctx, i) end) end)
-    |> Task.await_many(30_000)
+    with_sessions(4, fn sessions ->
+      first = Enum.map(sessions, &draw/1)
+      allocated = last_value()
+      # Each session holds a block: the sequence went past every first draw.
+      assert allocated >= Enum.max(first) + 19
 
-    allocated = last_value()
-    capture_log(fn -> assert :ok = PgCapture.ensure_ledger_sequence() end)
+      capture_log(fn -> assert :ok = PgCapture.ensure_ledger_sequence() end)
+      assert PgCapture.discard_sequences?()
 
-    # Whichever session draws next, it does not hand out a value from a block
-    # it cached before: every new value is past all that was allocated.
-    drawn = for i <- 21..60, do: append(ctx, i)
-    assert Enum.all?(drawn, &(&1 > allocated)), inspect({allocated, drawn})
-    assert drawn == Enum.sort(drawn)
+      drawn = Enum.map(sessions, &writer_draw/1)
+      assert Enum.all?(drawn, &(&1 > allocated)), inspect({allocated, drawn})
+      assert drawn == Enum.sort(drawn)
+    end)
+  end
+
+  test "without the check, a session hands out the block it cached" do
+    # The test above would catch a check that did not hold: here the cache
+    # stays at 20 and the writers do not discard.
+    set_cache(20)
+    refute PgCapture.discard_sequences?()
+
+    with_sessions(4, fn sessions ->
+      Enum.each(sessions, &draw/1)
+      allocated = last_value()
+
+      drawn = Enum.map(sessions, &writer_draw/1)
+      assert Enum.all?(drawn, &(&1 <= allocated)), inspect({allocated, drawn})
+    end)
+  end
+
+  test "the ledger column is an identity; a serial one is set back through its sequence", ctx do
+    {:ok, [[identity]]} =
+      Store.raw_query(
+        "SELECT attidentity::text FROM pg_attribute WHERE attrelid = 'sync_mutations'::regclass AND attname = 'sequence'",
+        []
+      )
+
+    assert identity in ["a", "d"]
+
+    other = "oe_serial_#{ctx.n}"
+
+    LedgerHold.with_conn(fn conn ->
+      Postgrex.query!(conn, ~s|CREATE SCHEMA "#{other}"|, [])
+      Postgrex.query!(conn, ~s|CREATE TABLE "#{other}".sync_mutations (sequence BIGSERIAL)|, [])
+      Postgrex.query!(conn, ~s|ALTER SEQUENCE "#{other}".sync_mutations_sequence_seq CACHE 20|, [])
+    end)
+
+    on_exit(fn ->
+      LedgerHold.with_conn(fn conn ->
+        Postgrex.query!(conn, ~s|DROP SCHEMA IF EXISTS "#{other}" CASCADE|, [])
+      end)
+    end)
+
+    pool = schema_pool(other)
+    assert {:ok, 20} = PgCapture.ledger_sequence_cache(pool: pool)
+
+    log =
+      capture_log(fn ->
+        assert :ok = PgCapture.ensure_ledger_sequence(pool: pool, record: false)
+      end)
+
+    assert log =~ "set back to 1"
+    assert {:ok, 1} = PgCapture.ledger_sequence_cache(pool: pool)
+  end
+
+  test "a check that could not run is tried again at the next install", ctx do
+    checked = {PgCapture, :sequence_checked}
+    :persistent_term.erase(checked)
+    on_exit(fn -> :persistent_term.put(checked, true) end)
+
+    # A schema with no ledger table: the check's query fails.
+    pool = schema_pool("oe_missing_#{ctx.n}")
+
+    capture_log(fn -> assert :ok = PgCapture.ensure(pool: pool) end)
+    refute :persistent_term.get(checked, false)
+    assert {:warn, {:ledger_sequence_unchecked, _}} = PgCapture.ledger_order()
+
+    capture_log(fn -> assert :ok = PgCapture.ensure() end)
+    assert :persistent_term.get(checked, false)
+    assert PgCapture.ledger_order() == :ok
+  end
+
+  defp schema_pool(schema) do
+    {:ok, config} = OptimalEngine.Storage.Postgres.config()
+
+    url =
+      "postgres://#{config.username}:#{config.password}@#{config.hostname}:#{config.port}/#{config.database}"
+
+    {:ok, pool} = Connection.start_link(url: url, schema: schema, pool_size: 1)
+    on_exit(fn -> if Process.alive?(pool), do: GenServer.stop(pool) end)
+    pool
   end
 
   test "a role that does not own the table cannot set the cache back, and the boot goes on",
@@ -181,13 +293,7 @@ defmodule OptimalEngine.Sync.LedgerSequenceTest do
       end)
     end)
 
-    {:ok, config} = OptimalEngine.Storage.Postgres.config()
-
-    url =
-      "postgres://#{config.username}:#{config.password}@#{config.hostname}:#{config.port}/#{config.database}"
-
-    {:ok, pool} = Connection.start_link(url: url, schema: other, pool_size: 1)
-    on_exit(fn -> if Process.alive?(pool), do: GenServer.stop(pool) end)
+    pool = schema_pool(other)
 
     capture_log(fn ->
       assert {:degraded, :no_ledger_sequence} =

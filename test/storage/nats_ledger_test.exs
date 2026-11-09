@@ -255,6 +255,58 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
       assert %{state: "error", consecutive_failures: 5} = LedgerPublisher.status(pub)
       assert {:degraded, 5, _last_error} = LedgerPublisher.health(pub)
     end
+
+    test "a raise on a later page keeps the cursor the earlier pages moved", ctx do
+      insert_context(ctx, "paged-#{ctx.n}", "Paged")
+      calls = :counters.new(1, [])
+
+      # The first page goes out whole and says there is more; the second
+      # holds a change that cannot be encoded, so publishing it raises.
+      changes = fn tenant, ws, opts ->
+        :counters.add(calls, 1, 1)
+        page = Sync.changes(tenant, ws, opts)
+
+        case :counters.get(calls, 1) do
+          1 ->
+            Map.put(page, "more", true)
+
+          _later ->
+            [last | _] = Enum.reverse(page_mutations(tenant, ws))
+
+            bad =
+              last
+              |> Map.put("id", "unencodable-#{ctx.n}")
+              |> Map.put("sequence", last["sequence"] + 1_000_000)
+              |> Map.put("payload", {:not, :json})
+
+            %{page | "mutations" => [bad], "more" => false}
+        end
+      end
+
+      pub = publisher(ctx, changes: changes)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, _} = LedgerPublisher.publish_now(pub)
+      end)
+
+      status = LedgerPublisher.status(pub)
+      assert status.state == "error"
+      ws = Enum.find(status.workspaces, &(&1.workspace_id == ctx.ws))
+      assert is_integer(ws.published_through) and ws.published_through > 0
+      assert ws.backlog == 0
+    end
+
+    defp page_mutations(tenant, ws), do: Sync.changes(tenant, ws, since: 0, limit: 200)["mutations"]
+  end
+
+  test "a publisher that starts again starts healthy", ctx do
+    name = :"nats_ledger_pub_restart_#{ctx.n}"
+    key = {LedgerPublisher, :health, name}
+    :persistent_term.put(key, {:degraded, 7, "the last run's error"})
+    on_exit(fn -> :persistent_term.erase(key) end)
+
+    publisher(ctx, name: name)
+    assert LedgerPublisher.health(name) == :ok
   end
 
   test "off unless the ledger flow is enabled, and the inventory says which" do

@@ -78,8 +78,13 @@ defmodule OptimalEngine.Sync.Postgres do
   # hashtext(NULL) would make the lock call take no lock at all.
   @ledger_lock "SELECT pg_advisory_xact_lock(hashtext('optimal_engine.sync.ledger'), hashtext(coalesce(current_schema(), '')))"
 
+  # The sequence, its cache, and whether the column is an identity (`a`, `d`)
+  # or a serial column whose default draws from it (`''`).
   @sequence_cache """
-  SELECT pg_get_serial_sequence('sync_mutations', 'sequence'), s.seqcache FROM pg_sequence s
+  SELECT pg_get_serial_sequence('sync_mutations', 'sequence'), s.seqcache,
+         (SELECT a.attidentity::text FROM pg_attribute a
+          WHERE a.attrelid = 'sync_mutations'::regclass AND a.attname = 'sequence')
+  FROM pg_sequence s
   WHERE s.seqrelid = pg_get_serial_sequence('sync_mutations', 'sequence')::regclass
   """
 
@@ -107,36 +112,49 @@ defmodule OptimalEngine.Sync.Postgres do
   @spec lock_ledger(term()) :: :ok | {:error, term()}
   def lock_ledger(txn) do
     if active?() do
-      with {:ok, _} <- OptimalEngine.Store.Postgres.txn_query_native(txn, @ledger_lock, []),
-           {:ok, _} <- discard_cached(&OptimalEngine.Store.Postgres.txn_query_native(txn, &1, [])) do
-        :ok
-      end
+      Enum.reduce_while(ledger_lock_statements(), :ok, fn sql, :ok ->
+        case OptimalEngine.Store.Postgres.txn_query_native(txn, sql, []) do
+          {:ok, _} -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
     else
       :ok
     end
   end
 
-  # While the sequence caches values this Engine could not set back, a writer
-  # drops its session's block under the lock, so its draw is the sequence's
-  # next value (`ensure_ledger_sequence/1`).
-  defp discard_cached(run) do
-    if discard_sequences?(), do: run.("DISCARD SEQUENCES"), else: {:ok, :kept}
+  @doc false
+  # What a ledger writer runs before it draws: the lock and, after a set-back
+  # or while the sequence caches values this Engine could not set back,
+  # `DISCARD SEQUENCES`, so the draw is the sequence's next value whatever the
+  # session cached (`ensure_ledger_sequence/1`).
+  @spec ledger_lock_statements() :: [String.t()]
+  def ledger_lock_statements do
+    if discard_sequences?(), do: [@ledger_lock, "DISCARD SEQUENCES"], else: [@ledger_lock]
   end
 
   @doc "True when this build's store is PostgreSQL."
   @spec active?() :: boolean()
   def active?, do: OptimalEngine.Store.selected?(OptimalEngine.Store.Postgres)
 
-  @doc "Creates or replaces the capture and stamp functions and the stamp table."
-  @spec ensure() :: :ok
-  def ensure do
+  @doc """
+  Creates or replaces the capture and stamp functions and the stamp table, and
+  checks the ledger sequence once per boot. `opts` go to
+  `ensure_ledger_sequence/1`.
+  """
+  @spec ensure(keyword()) :: :ok
+  def ensure(opts \\ []) do
     run_in_transaction(["SELECT pg_advisory_xact_lock(hashtext('optimal_engine.sync'))" | ddl()])
 
     # The sequence is checked once per boot: installs that follow (the
-    # scheduler's among them) do not query it again.
+    # scheduler's among them) do not query it again, once the check has an
+    # answer. A check that could not run (the database busy, a timeout) is
+    # tried again at the next install.
     unless :persistent_term.get({__MODULE__, :sequence_checked}, false) do
-      _ = ensure_ledger_sequence()
-      :persistent_term.put({__MODULE__, :sequence_checked}, true)
+      case ensure_ledger_sequence(opts) do
+        {:degraded, {:check_failed, _reason}} -> :retry_next_install
+        _answered -> :persistent_term.put({__MODULE__, :sequence_checked}, true)
+      end
     end
 
     :ok
@@ -146,17 +164,23 @@ defmodule OptimalEngine.Sync.Postgres do
   Makes sure the ledger's sequence caches no values. A session that caches
   values draws them from a block of its own, so two sessions could draw 11 and
   then 10 whatever the ledger lock does. The identity column is made with no
-  cache (1). One found with a larger cache is set back to 1, inside the DDL lock
-  so Engines booting together do not both alter it; PostgreSQL then discards
-  what other sessions had cached (the sequence is rewritten, so a session's next
-  draw takes a fresh value).
+  cache (1). One found with a larger cache is set back to 1 (through the table
+  for an identity column, `ALTER SEQUENCE` for a serial one), inside the DDL lock
+  so Engines booting together do not both alter it.
+
+  Sessions that cached a block before the change might still hand it out: the
+  ALTER SEQUENCE documentation says they use up what they cached. PostgreSQL
+  16.14 was seen to drop those blocks (`test/sync/ledger_sequence_test.exs`
+  holds a block in dedicated sessions across the check), but nothing relies on
+  it: after a set-back, every ledger writer of this Engine runs `DISCARD
+  SEQUENCES` under the ledger lock before it draws, for the rest of the boot,
+  so its draw is the sequence's next value whatever its session cached.
 
   It never fails the boot. When the cache cannot be set back (the Engine's role
   does not own the table), it logs what to run as the owner, readiness warns
-  (`ledger: {:warn, {:ledger_sequence_cached, n}}`), and from then on every
-  ledger writer runs `DISCARD SEQUENCES` after the ledger lock and before it
-  draws, so its session's block is dropped and each draw takes the next value
-  of the sequence: ordering holds, with a gap of up to `n - 1` values a draw.
+  (`ledger: {:warn, {:ledger_sequence_cached, n}}`), and the writers discard as
+  above: ordering holds, with a gap of up to `n - 1` values a draw. A check that
+  could not run is tried again at the next install.
 
   Options: `:pool` (default the store's), `:record` (default true: what readiness
   and the ledger writers read). Returns `:ok` or `{:degraded, reason}`.
@@ -197,11 +221,11 @@ defmodule OptimalEngine.Sync.Postgres do
               [] ->
                 {:ok, :no_ledger_sequence}
 
-              [[_name, 1]] ->
+              [[_name, 1, _identity]] ->
                 {:ok, :ok}
 
-              [[name, cache]] ->
-                case ddl_query(txn, "ALTER TABLE sync_mutations ALTER COLUMN sequence SET CACHE 1") do
+              [[name, cache, identity]] ->
+                case ddl_query(txn, set_back_sql(name, identity)) do
                   {:ok, _} -> {:ok, {:set_back, name, cache}}
                   {:error, reason} -> {:error, {:sequence_cached, name, cache, reason}}
                 end
@@ -221,6 +245,14 @@ defmodule OptimalEngine.Sync.Postgres do
   end
 
   defp ddl_query(txn, sql), do: Connection.txn_query(txn, sql, [], dialect: :postgres)
+
+  # An identity column's sequence is changed through its table; a serial
+  # column's, which it only names in its default, directly. The name comes
+  # from pg_get_serial_sequence, quoted as PostgreSQL quotes it.
+  defp set_back_sql(_name, identity) when identity in ["a", "d"],
+    do: "ALTER TABLE sync_mutations ALTER COLUMN sequence SET CACHE 1"
+
+  defp set_back_sql(name, _serial), do: "ALTER SEQUENCE #{name} CACHE 1"
 
   defp report(:ok), do: :ok
 
@@ -246,9 +278,15 @@ defmodule OptimalEngine.Sync.Postgres do
     {status, discard?} =
       case outcome do
         :ok -> {:ok, false}
-        {:set_back, _name, _cache} -> {:ok, false}
+        # Values other sessions cached before the change could still be
+        # handed out (PostgreSQL 16.14 drops them, which nothing here relies
+        # on): the writers discard their sessions' blocks for the rest of this
+        # boot, as when the change is refused.
+        {:set_back, _name, _cache} -> {:ok, true}
         {:refused, _name, cache, _reason} -> {{:warn, {:ledger_sequence_cached, cache}}, true}
-        {:degraded, reason} -> {{:warn, {:ledger_sequence_unchecked, reason}}, false}
+        # A check that could not run changes nothing the writers do: a
+        # set-back found earlier in this boot keeps them discarding.
+        {:degraded, reason} -> {{:warn, {:ledger_sequence_unchecked, reason}}, discard_sequences?()}
       end
 
     :persistent_term.put({__MODULE__, :ledger_order}, status)
@@ -263,15 +301,18 @@ defmodule OptimalEngine.Sync.Postgres do
   @spec ledger_order() :: :ok | {:warn, term()}
   def ledger_order, do: :persistent_term.get({__MODULE__, :ledger_order}, :ok)
 
-  defp discard_sequences?, do: :persistent_term.get({__MODULE__, :discard_sequences}, false)
+  @doc false
+  # Whether ledger writers discard their session's cached sequence values
+  # before they draw (`ensure_ledger_sequence/1`).
+  def discard_sequences?, do: :persistent_term.get({__MODULE__, :discard_sequences}, false)
 
-  @doc "The cache of the `sync_mutations.sequence` identity: `{:ok, n}`, `:none` without one."
+  @doc "The cache of the `sync_mutations.sequence` sequence: `{:ok, n}`, `:none` without one."
   @spec ledger_sequence_cache(keyword()) :: {:ok, pos_integer()} | :none | {:error, term()}
   def ledger_sequence_cache(opts \\ []) do
     pool = Keyword.get(opts, :pool, @pool)
 
     case Connection.query(pool, @sequence_cache, [], dialect: :postgres) do
-      {:ok, %{rows: [[_name, cache]]}} -> {:ok, cache}
+      {:ok, %{rows: [[_name, cache, _identity]]}} -> {:ok, cache}
       {:ok, %{rows: []}} -> :none
       {:error, reason} -> {:error, reason}
     end
@@ -640,8 +681,7 @@ defmodule OptimalEngine.Sync.Postgres do
         Postgrex.query!(conn, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED", [])
 
         if entries != [] do
-          Postgrex.query!(conn, @ledger_lock, [])
-          {:ok, _} = discard_cached(&Postgrex.query(conn, &1, []))
+          Enum.each(ledger_lock_statements(), &Postgrex.query!(conn, &1, []))
         end
 
         Enum.each(entries, &Postgrex.query!(conn, @ledger_insert, &1))
