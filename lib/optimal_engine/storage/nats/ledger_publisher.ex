@@ -211,9 +211,23 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
 
   @impl GenServer
   def init(opts) do
-    # A publisher that starts again starts healthy: a degraded mark its last
-    # run left in persistent_term is not this run's.
-    put_health(Keyword.get(opts, :name, __MODULE__), 0, nil)
+    # Its failures in a row outlive the process (`run/1`): a run that ended
+    # without stopping (a crash, a kill) is one more, so a publisher its
+    # supervisor keeps restarting shows degraded. A clean stop keeps the count
+    # and adds nothing; a pass that goes through clears it. A health mark with
+    # no run behind it (another boot's) is not this run's.
+    Process.flag(:trap_exit, true)
+    name = Keyword.get(opts, :name, __MODULE__)
+
+    {failures, last_error} =
+      case :persistent_term.get({__MODULE__, :run, name}, nil) do
+        nil -> {0, nil}
+        %{running: true, failures: n} -> {n + 1, "restarted after an abnormal exit"}
+        %{failures: n, last_error: error} -> {n, error}
+      end
+
+    put_run(name, failures, last_error, true)
+    put_health(name, failures, last_error)
 
     enabled = Keyword.get_lazy(opts, :enabled, fn -> NATS.flow?(@flow) end)
 
@@ -232,7 +246,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
       name: Keyword.get(opts, :name, __MODULE__),
       # How a workspace's changes are read (tests stand in a failing read).
       changes: Keyword.get(opts, :changes, &Sync.changes/3),
-      failures: 0,
+      failures: failures,
       state: if(enabled, do: "starting", else: "off"),
       epoch: nil,
       more: false,
@@ -240,7 +254,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
       published: 0,
       purged: 0,
       last_published_at: nil,
-      last_error: nil
+      last_error: last_error
     }
 
     cond do
@@ -310,6 +324,10 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
     {:noreply, state}
   end
 
+  # Exits are trapped only so a clean stop reaches `terminate/2`; a linked
+  # process that ends (its parent's exit is handled by GenServer) changes nothing.
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
+
   defp schedule(%{interval: interval}) when interval > 0,
     do: Process.send_after(self(), :tick, interval)
 
@@ -332,8 +350,25 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
         {{:ok, _totals}, _settled} -> 0
       end
 
+    put_run(state.name, failures, state.last_error, true)
     put_health(state.name, failures, state.last_error)
     {reply, %{state | failures: failures}}
+  end
+
+  # The run's record: its failures in a row, its last error, and whether it is
+  # running (cleared by a clean stop, `terminate/2`).
+  defp put_run(name, failures, last_error, running) do
+    record = %{failures: failures, last_error: last_error, running: running}
+    key = {__MODULE__, :run, name}
+    if :persistent_term.get(key, nil) != record, do: :persistent_term.put(key, record)
+  end
+
+  @impl GenServer
+  def terminate(reason, state) do
+    if reason in [:normal, :shutdown] or match?({:shutdown, _}, reason),
+      do: put_run(state.name, state.failures, state.last_error, false)
+
+    :ok
   end
 
   defp put_health(name, failures, last_error) do

@@ -309,6 +309,36 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     assert LedgerPublisher.health(name) == :ok
   end
 
+  test "a publisher that keeps crashing shows degraded; a clean stop adds nothing", ctx do
+    name = :"nats_ledger_pub_crashloop_#{ctx.n}"
+
+    on_exit(fn ->
+      :persistent_term.erase({LedgerPublisher, :health, name})
+      :persistent_term.erase({LedgerPublisher, :run, name})
+    end)
+
+    # The child's id (the helper's own name); the process is registered as `name`.
+    id = publisher(ctx, name: name)
+    assert LedgerPublisher.health(name) == :ok
+
+    # Each kill is a run that ended without stopping; its supervisor starts it again.
+    for _ <- 1..5 do
+      pid = Process.whereis(name)
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 5_000
+      assert eventually(fn -> is_pid(Process.whereis(name)) and Process.whereis(name) != pid end)
+    end
+
+    assert {:degraded, failures, _error} = LedgerPublisher.health(name)
+    assert failures >= 5
+
+    # A clean stop and start keeps the count, and adds no failure of its own.
+    :ok = stop_supervised(id)
+    publisher(ctx, name: name)
+    assert {:degraded, ^failures, _} = LedgerPublisher.health(name)
+  end
+
   test "off unless the ledger flow is enabled, and the inventory says which" do
     previous = {System.get_env("OPTIMAL_NATS_FLOWS"), System.get_env("OPTIMAL_NATS_URL")}
 
@@ -358,6 +388,14 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     for bad <- ["a.b", "has space", "*", ">", String.duplicate("x", 40), ""] do
       System.put_env("OPTIMAL_NATS_NAMESPACE", bad)
       assert NATS.namespace() == {:error, :invalid_namespace}, bad
+    end
+  end
+
+  defp eventually(check, tries \\ 50) do
+    cond do
+      check.() -> true
+      tries == 0 -> false
+      true -> Process.sleep(50) && eventually(check, tries - 1)
     end
   end
 end
