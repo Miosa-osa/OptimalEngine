@@ -181,13 +181,20 @@ defmodule OptimalEngine.Analyses.ScheduleCostTest do
   # statement that reads the whole table per batch makes the daily schedule
   # quadratic: on a full test database it ran past a minute (#259, test-current).
   # SQLite's plan names a full read of a table, or of all of an index, `SCAN`;
-  # a lookup is a `SEARCH`.
+  # a lookup is a `SEARCH`. Two entries, so the statements' shapes are fixed
+  # (the EXPLAINs are on test/support/sql_census_allowlist.txt).
   @tag :sqlite_store
-  test "no statement of the schedule reads the whole jobs table", ctx do
-    statements =
-      store_statements(fn -> Analyses.schedule(Date.utc_today(), tenant_id: ctx.other) end)
+  test "no statement of a batch enqueue reads the whole jobs table", ctx do
+    entries =
+      for i <- 1..2,
+          do: {ctx.other, "#{ctx.other}:w#{i}", "analysis.promises", %{}, "plan-#{ctx.n}-#{i}"}
 
-    assert statements != []
+    statements =
+      store_statements(fn ->
+        assert {:ok, %{inserted: 2, scheduled: 2}} = OptimalEngine.Jobs.enqueue_many(entries)
+      end)
+
+    assert Enum.count(statements, fn {sql, _} -> sql =~ ~r/\bjobs\b/i end) == 2
 
     scans =
       for {sql, params} <- statements,
