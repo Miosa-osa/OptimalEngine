@@ -11,6 +11,7 @@ defmodule OptimalEngine.Release do
       bin/optimal eval 'OptimalEngine.Release.preflight()'
       bin/optimal eval 'OptimalEngine.Release.backup("/backups/$(date +%F).db")'
       bin/optimal eval 'OptimalEngine.Release.graph_backfill()'
+      bin/optimal eval 'OptimalEngine.Release.redact_ledger(dry_run: true)'
 
   Every function here must:
     * start only the apps it actually needs (not the full supervision tree)
@@ -154,6 +155,30 @@ defmodule OptimalEngine.Release do
         Logger.error("[Release] graph backfill failed: #{inspect(reason)}")
         System.halt(1)
     end
+  end
+
+  @doc """
+  Redacts erased content from the replication ledger, once, for an Engine that
+  erased rows before it redacted its ledger (`OptimalEngine.Sync.Redaction.backfill/1`).
+  `dry_run: true` changes nothing. Prints the report as JSON (counts only, no
+  ids or content) and returns it. Safe to run again: a second run finds
+  nothing.
+  """
+  @spec redact_ledger(keyword()) :: map()
+  def redact_ledger(opts \\ []) do
+    load_app()
+    {:ok, _} = Application.ensure_all_started(@app)
+
+    {:ok, report} =
+      OptimalEngine.Sync.Redaction.backfill(dry_run: Keyword.get(opts, :dry_run, false))
+
+    Logger.info(
+      "[Release] ledger redaction #{if report.dry_run, do: "dry run", else: "done"}: " <>
+        "#{Enum.reduce(Map.values(report.exposed), 0, &(&1.rows + &2))} rows exposed"
+    )
+
+    IO.puts(Jason.encode!(report, pretty: true))
+    report
   end
 
   @doc "Current health status — exits 0 when :up, non-zero otherwise."

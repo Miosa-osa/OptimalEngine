@@ -42,9 +42,15 @@ defmodule OptimalEngine.Compliance.DerivedData do
   sidecars are rewritten through `Compliance.Redact` instead of removed. `preview/2` counts what
   `erase_contexts/2` would remove, and removes nothing.
 
+  The replication ledger is redacted in the same transaction
+  (`OptimalEngine.Sync.Redaction.redact_deleted/2`): the earlier changes of
+  every row deleted, here or by a foreign-key cascade, keep their place in
+  `sync_mutations` with the row's key and a `redacted` marker instead of the
+  row, and the captured rows not sealed yet and the payloads of
+  `sync_conflicts` go the same way.
+
   Not touched: shared canonical entities and aliases, which are not specific to a
-  context; replication ledgers (`sync_mutations`, `sync_capture`), which are
-  append-only; backups.
+  context; backups.
   """
 
   require Logger
@@ -54,6 +60,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
   alias OptimalEngine.Storage.Qdrant.Projection
   alias OptimalEngine.Storage.S3
   alias OptimalEngine.Store
+  alias OptimalEngine.Sync.Redaction
 
   @batch_size 200
   @timeout 120_000
@@ -78,11 +85,47 @@ defmodule OptimalEngine.Compliance.DerivedData do
            :ok <- Projection.erase_contexts(batch, tenant_id),
            {:ok, _removed} <-
              ContextFiles.remove(plan.files ++ plan.wiki_files, except: batch, owned: plan.owned) do
-        Store.transaction(&erase_batch(&1, tenant_id, batch, true), @timeout)
+        tenant_id
+        |> erase_and_redact(batch)
         |> drop_triples()
         |> qdrant_after_commit(batch, tenant_id)
       end
     end)
+  end
+
+  # The batch's deletes and, in the same transaction, the earlier changes of
+  # every row they and their foreign-key cascades deleted leave the replication
+  # ledger (`OptimalEngine.Sync.Redaction`). A workspace that did not replicate
+  # captured no delete: what its ledger still holds of those rows is redacted
+  # after the commit, and NATS is flushed by the caller.
+  defp erase_and_redact(tenant_id, batch) do
+    workspaces = context_workspaces(batch)
+
+    result =
+      Store.transaction(
+        fn txn ->
+          with {:ok, removed} <- erase_batch(txn, tenant_id, batch, true),
+               {:ok, _redacted} <- Redaction.redact_deleted(txn, workspaces) do
+            {:ok, removed}
+          end
+        end,
+        @timeout
+      )
+
+    if match?({:ok, _}, result), do: Redaction.redact_missing(workspaces)
+    result
+  end
+
+  @doc "The workspaces the contexts `ids` are in."
+  @spec context_workspaces([String.t()]) :: [String.t()]
+  def context_workspaces(ids) do
+    case Store.raw_query(
+           "SELECT DISTINCT workspace_id FROM contexts WHERE id IN #{set(1)}",
+           [json(ids)]
+         ) do
+      {:ok, rows} -> rows |> List.flatten() |> Enum.reject(&is_nil/1)
+      _ -> []
+    end
   end
 
   @doc """
@@ -130,7 +173,22 @@ defmodule OptimalEngine.Compliance.DerivedData do
          :ok <- Projection.erase_contexts(ids, nil),
          {:ok, _redacted} <- ContextFiles.redact(plan.files, except: ids, owned: plan.owned),
          {:ok, _removed} <- ContextFiles.remove(plan.wiki_files) do
-      Store.transaction(&delete_in(&1, ids, true), @timeout)
+      workspaces = context_workspaces(ids)
+
+      result =
+        Store.transaction(
+          fn txn ->
+            with {:ok, removed} <- delete_in(txn, ids, true),
+                 {:ok, _redacted} <- Redaction.redact_deleted(txn, workspaces) do
+              {:ok, removed}
+            end
+          end,
+          @timeout
+        )
+
+      if match?({:ok, _}, result), do: Redaction.redact_missing(workspaces)
+
+      result
       |> drop_triples()
       |> qdrant_after_commit(ids, nil)
     end

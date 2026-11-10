@@ -951,8 +951,13 @@ defmodule OptimalEngine.SyncGateTest do
 
       {_result, sent} = push(ctx, max_class: "internal")
 
-      assert carries?(sent, "Gone but public 5502")
+      # A deleted row's earlier changes left the ledger with it
+      # (`Sync.Redaction`): only the delete goes, and only the open row's,
+      # judged by the class its versions had.
+      refute carries?(sent, "Gone but public 5502")
       refute carries?(sent, "Gone and secret 5503")
+      assert Enum.any?(sent, &(&1["entity_id"] == plain and &1["operation"] == "delete"))
+      refute sent?(sent, "facts", secret)
     end
 
     test "a row labelled and then deleted holds every version it had", ctx do
@@ -998,7 +1003,7 @@ defmodule OptimalEngine.SyncGateTest do
       refute carries?(sent, "Version 1 secret 5530")
     end
 
-    test "a deleted row whose versions were all open is sent whole, however many there were",
+    test "a deleted row whose versions were all open has its delete sent, however many there were",
          ctx do
       few = "fact-few-#{ctx.n}"
       many = "fact-open-many-#{ctx.n}"
@@ -1022,9 +1027,11 @@ defmodule OptimalEngine.SyncGateTest do
 
       {_result, sent} = push(ctx, max_class: "internal")
 
+      # The versions left the ledger with the delete (`Sync.Redaction`), and
+      # still say the row was open, so the delete goes.
       for {id, versions} <- [{few, 19}, {many, 120}] do
-        assert carries?(sent, "#{id} version 1")
-        assert carries?(sent, "#{id} version #{versions}")
+        refute carries?(sent, "#{id} version 1")
+        refute carries?(sent, "#{id} version #{versions}")
 
         assert Enum.any?(sent, &(&1["entity_id"] == id and &1["operation"] == "delete")),
                "the delete of #{id} was held"

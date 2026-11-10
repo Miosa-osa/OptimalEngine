@@ -153,6 +153,7 @@ defmodule OptimalEngine.Store.Migrations do
       migration_key_grants_backfill(),
       migration_triple_mirror_changes(),
       migration_sync_history(),
+      migration_ledger_redaction(),
       migration_qdrant_pending_removals()
     ]
 
@@ -863,6 +864,36 @@ defmodule OptimalEngine.Store.Migrations do
         "CREATE INDEX IF NOT EXISTS idx_sync_runs_peer ON sync_runs(peer_id, id)"},
        {"idx_sync_runs_workspace",
         "CREATE INDEX IF NOT EXISTS idx_sync_runs_workspace ON sync_runs(tenant_id, workspace_id, id)"}
+     ]}
+  end
+
+  # Erased content leaves the change ledger (`OptimalEngine.Sync.Redaction`):
+  # a ledger row whose content was erased keeps its place, sequence, device and
+  # time, its payload is rewritten to the row's key with a `redacted` marker, and
+  # `redacted_at` says when. `ledger_redactions` is the replicated request that
+  # tells a peer to do the same to its copies of a row's changes: the type of
+  # the row, its id, a reason code and the version erased, and nothing else (a
+  # peer erases by its own rule for the table).
+  @ledger_redaction_version 88
+  defp migration_ledger_redaction do
+    {@ledger_redaction_version,
+     "ledger redaction: erased content leaves sync_mutations, and peers are told",
+     [
+       {"sync_mutations.redacted_at", "ALTER TABLE sync_mutations ADD COLUMN redacted_at TEXT"},
+       {"ledger_redactions",
+        """
+        CREATE TABLE IF NOT EXISTS ledger_redactions (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          target_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          version TEXT NOT NULL
+        )
+        """},
+       {"idx_ledger_redactions_entity",
+        "CREATE INDEX IF NOT EXISTS idx_ledger_redactions_entity ON ledger_redactions(workspace_id, target_type, entity_id)"}
      ]}
   end
 

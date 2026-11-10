@@ -1,6 +1,6 @@
 # Erasure And Retention
 
-What the Engine removes when a workspace is archived or moved, a principal is erased, or a retention policy deletes or redacts a context, and what it leaves.
+What the Engine removes when a workspace is archived or moved, a principal is erased, a memory is forgotten or deleted, or a retention policy deletes or redacts a context, and what it leaves: in its own tables, in the replication ledger, on its peers and on the NATS ledger stream.
 The embedding cache's own rules are in [`OPTIONS.md`](../../OPTIONS.md), Text Embeddings.
 
 ## What each path removes
@@ -44,6 +44,52 @@ The dry run (`Erasure.preview/2`) counts every table by running the delete and r
 A single memory that is deleted or forgotten, and an app data record that is deleted or whose indexed text is rewritten, removes the embedding cached from its text.
 A memory embedded with a custom `document_prefix`, a collection dropped whole, and search queries stay in the cache until `cache_max_age_days` removes them.
 
+## The replication ledger, peers and NATS
+
+Change capture records every write of a replicated row with the whole row (`sync_capture`, then `sync_mutations` when sealed), so an erasure that only appended its own change would leave the erased text in the earlier changes, serve it to every peer that had not caught up, and publish it to NATS.
+`OptimalEngine.Sync.Redaction` takes it out, in the transaction of the erasure.
+
+| Path | `sync_mutations` and `sync_capture` here | Peers | NATS ledger stream |
+| --- | --- | --- | --- |
+| Erase a principal, retention `delete`, retention `redact` (the derived rows) | Every row the batch deleted, explicitly or by a foreign-key cascade (chunks, embeddings, claims, facts, packages, episodes, wiki pages): its earlier changes are redacted and its unsealed captures dropped. The append-only rows made from a deleted chunk, context or memory (intents, citations, classifications, cluster members, decisions, entities, graph edges, memory relations) are found by that link and redacted too | The deletes replicate as deletes; a peer that applies a delete redacts its own copies of the row's changes up to the delete, deletes the append-only rows the origin deletes with a context (decisions, entities, graph edges; a chunk's and a memory's go by foreign key) and redacts their changes | Each delete purges its row's subject before its tombstone goes out; the erasure flushes the publisher (`flush/1`) |
+| Retention `redact` (the context) | The context's earlier changes are redacted before it is rewritten, so the rewrite is the only change that holds its text, and that text is the redacted one | A redaction request (`ledger_redactions`) goes first: a peer redacts its copies, then applies the rewrite | The request purges the context's subject; the sweep flushes the publisher |
+| Forget a memory (`POST /api/memory/:id/forget`) | Every change of the memory and of its embeddings, the forget included, is redacted | A redaction request: a peer erases by its own rule for memories, redacting its copies up to the version erased, deleting its embeddings of the memory and setting `is_forgotten = 1` and `content = ''`. A replica that never had the memory never gets it | The request purges the memory's subject; the forget flushes the publisher |
+| Delete a memory (`DELETE /api/memory/:id`) | The memory's earlier changes and those of its relations and embeddings (cascades) | Deletes, as above | Deletes, as above; the delete flushes the publisher |
+| Finalize a move | Every row of the workspace, as for an erasure | Deletes, as above | The workspace's whole subject tree is purged (`forget_workspace/4`), as for an archive |
+| Archive a workspace | Nothing: the rows stay | Nothing | The workspace's whole subject tree is purged |
+| Any other delete of a replicated row (a graph rebuild, a re-curated wiki page, a bundle import discarded) | The row's earlier changes are redacted when the delete is sealed | Deletes, as above | Deletes, as above, on the publisher's next pass |
+| A workspace whose sync was turned off before the erasure | Its deletes are not captured: after the commit, the changes the ledger still holds of rows that no longer exist are redacted | Nothing is sent: the workspace no longer replicates | No delete goes out to purge them, so the erasure asks the publisher to purge each such row's subject (`forget_rows/5`), now or when NATS is back |
+
+A redacted ledger row keeps its id, sequence, device, operation, idempotency key and times, so cursors, conflict clocks and the history page still read it.
+Its payload becomes `{"row": {...}, "blobs": {}, "redacted": true}`, its `payload_hash` is the SHA-256 of that payload as the ledger computes every hash, and `redacted_at` records when.
+The tombstone's row keeps what the data-class gate and the readers' grant checks classify the row by, reduced to class ranks and ids: labels that are class names or id-shaped (a label that cannot be read becomes `restricted`, the rank the gate gives it), id-shaped partitions, the labels and id keys of its metadata, a class column's class, and link columns as ids only (of a text column, only its `optimal://` addresses).
+The gate decides whether a delete may go to a peer from the row's earlier versions, so a tombstone still ranks as the version did.
+A key that is an id is kept; a natural text key (an alias, a name) is kept as a keyed hash.
+The row's `entity_id` and its delete keep the key as it is: a peer can only delete a row it can name, and the gate finds a deleted row's versions by it.
+The ledger is not hash chained: each hash covers its own row's payload, and a peer recomputes the hash of every change it stores instead of trusting the sender's, so a rewritten row verifies like any other.
+A redacted row is never served, pushed or published again (`Sync.changes/3` and the push read only `redacted_at IS NULL`), so a new replica or a stream filled again from the ledger never sees the text.
+The `local_payload` and `remote_payload` of the row's `sync_conflicts` become the same tombstone.
+A delete already carries only the row's key and is not rewritten.
+
+A redaction request carries the type of the row (`memory` or `context`), its id, a reason code and the version erased (the time of the erasure, as change capture writes `occurred_at`), and nothing else.
+It is as classified as the row it names: the gate holds it from a peer not cleared for that row, so the peer does not learn the row existed.
+A peer erases by its own rule for the table (`Sync.Redaction.erasure_rule/1`), never by values the sender chose: a memory is marked forgotten with no text and its embeddings go; a context's ledger copies go and its redacted text arrives as the rewrite that follows.
+It refuses a request that carries any other column, names another type, or has a reason or version it does not know, and one for a row it holds above the class the sender is cleared for.
+It redacts only the changes that occurred at or before the version, and does not touch the row when a change of it here is newer (that change wins, as any newer change does, and is still pushed); a delete applied from a peer is bounded by the time the delete occurred the same way.
+A peer that applies it does so in the apply's transaction, with capture off, so nothing is echoed.
+On the peer the erasure then reaches what the peer made from the row, as a local erasure does: the full-text index follows the emptied row (the FTS5 triggers in the apply's transaction on SQLite; on PostgreSQL the posting lists of the tables a batch deleted from or redacted are refreshed once it commits), the embeddings this Engine cached from the workspace's text are purged, and the derived rows the origin deleted (embeddings, source packages, claims, facts) arrive as deletes of their own, with the decomposition runs and assets this Engine made from a deleted package removed after them.
+
+### Backfill for an Engine that erased before
+
+An Engine on v0.3.7 to v0.3.14 with a workspace that replicates still holds the text of what it erased since in `sync_mutations`.
+`mix optimal.ledger.redact` (or `bin/optimal eval 'OptimalEngine.Release.redact_ledger()'` on a release) redacts it once: the earlier changes of every row whose delete is in the ledger, of every row of a single-keyed table that no longer exists (deleted while the workspace did not replicate, or by a peer's delete), of every append-only row whose chunk, context or memory no longer exists, and of every forgotten memory, plus the `sync_capture` and `sync_conflicts` rows of workspaces that no longer exist.
+The rows that no longer exist have their NATS subjects purged.
+A forgotten memory of a workspace that replicates gets a redaction request, so peers on this release redact theirs; a peer runs the backfill itself for its own deletes.
+The NATS publisher is flushed for the workspaces it touched.
+`--dry-run` (`redact_ledger(dry_run: true)`) changes nothing (it does not even seal the capture) and prints counts only: the workspaces that replicate, the registered peers, per table the rows still exposed and their ledger changes, and the captured changes not sealed yet; never an id or a word of content.
+A second run finds nothing.
+It does not run by itself at boot: an operator measures with the dry run first, then runs it.
+
 ## What an erasure does not reach
 
 These keep erased data until they are pruned, replaced or removed by an operator.
@@ -58,7 +104,8 @@ These keep erased data until they are pruned, replaced or removed by an operator
 | Files in the workspace directory that an erasure does not remove: a file a person put in a node's folder and the indexer read (or edited under the plain name of a signal file), a file that another context also names, a node's `context.md` (it collects facts from many signals), and the cross-reference copies of a signal that retention redacted | Their text | Until the files are removed; a reindex reads them back as contexts |
 | Other hard links to a signal file (a backup tool that links files makes them) | The text of the file | Until an operator removes the other names; the Engine removes or rewrites its own name and counts the file in the log |
 | Objects in an object store, when an erasure or a retention delete does not reach them | The bytes of assets stored there | Until the objects are deleted: an archive and a move delete none (the workspace's assets on the Engine it moved to still point at them), and neither does an erasure when no object store is configured, when the asset's URI names another bucket or a key outside the asset's workspace prefix, or when another asset still uses the object |
-| Replication ledgers (`sync_capture`, `sync_mutations`) | The rows of a change, in the changes' payloads | Append-only |
+| A peer that runs a release before the ledger redaction (v0.3.14 or older) | Its copies of the erased rows' earlier changes | Until the peer is upgraded and runs the backfill. Replication between the two pauses meanwhile: an Engine syncs only with a peer on the same schema version, so nothing is exchanged with it, and nothing stalls (see [The replication ledger](#the-replication-ledger-peers-and-nats)) |
+| Append-only rows deleted on their own at the origin (a re-curated page's citations, a rebuilt graph's edges, reclustered members), on a peer | The rows: append-only tables replicate inserts only, their ids differ per Engine, and only the deletes that go with a deleted chunk, context or memory reach a peer | Until the peer rebuilds them, or an operator removes them; these are rebuilds, not erasures, and the origin's ledger keeps their earlier versions until their chunk, context or memory goes |
 | The NATS ledger stream (`OPTIMAL_NATS_FLOWS=ledger`), while NATS is down | The erased rows' earlier messages | Until NATS is back: the erasure's deletes then purge each row's subject, and the report's `nats_ledger` says `pending: true` meanwhile (see [Storage Providers](storage-providers.md#what-the-engine-forgets-leaves-the-stream)) |
 | What a NATS subscriber already read | Whatever it kept | The subscriber's own retention |
 | NATS intake dead letters of a workspace that was not archived, moved or had its connector deleted | The connector content of a Signal intake gave up on | Until requeued, or `OPTIMAL_NATS_DEAD_LETTER_MAX_AGE_HOURS` (720) after it was dead-lettered |

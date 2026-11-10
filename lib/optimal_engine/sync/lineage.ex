@@ -322,6 +322,10 @@ defmodule OptimalEngine.Sync.Lineage do
     "export_records" => {:derived, [{:typed, "source_object_type", "source_object_id"}]},
     "projection_revisions" =>
       {:derived, [{:id, "export_record_id", "export_records"}, {:links, "source_object_links"}]},
+    # A request to redact a row's changes (`OptimalEngine.Sync.Redaction`): it
+    # names the row by type and id, and is as classified as that row, so a peer
+    # not cleared for the row does not learn that it existed.
+    "ledger_redactions" => {:derived, [{:typed, "target_type", "entity_id"}]},
     "link_health_records" =>
       {:derived,
        [
