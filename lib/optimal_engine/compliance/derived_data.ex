@@ -112,7 +112,9 @@ defmodule OptimalEngine.Compliance.DerivedData do
         @timeout
       )
 
-    if match?({:ok, _}, result), do: Redaction.redact_missing(workspaces)
+    with {:ok, removed} <- result,
+         do: Redaction.redact_missing(workspaces, Redaction.removed_tables(removed, ["contexts"]))
+
     result
   end
 
@@ -186,7 +188,8 @@ defmodule OptimalEngine.Compliance.DerivedData do
           @timeout
         )
 
-      if match?({:ok, _}, result), do: Redaction.redact_missing(workspaces)
+      with {:ok, removed} <- result,
+           do: Redaction.redact_missing(workspaces, Redaction.removed_tables(removed))
 
       result
       |> drop_triples()

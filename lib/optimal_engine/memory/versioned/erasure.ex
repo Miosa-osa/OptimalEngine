@@ -135,10 +135,11 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
         @timeout
       )
 
-    with {:ok, %{memories: versions} = done} <- result do
+    with {:ok, %{memories: versions, removed: removed} = done} <- result do
       workspaces = workspaces(versions)
-      # A workspace that does not replicate captured no delete to redact by.
-      :ok = Redaction.redact_missing(workspaces)
+      # A workspace that does not replicate captured no delete to redact by:
+      # the tables this erasure deleted from are searched for what is gone.
+      :ok = Redaction.redact_missing(workspaces, Redaction.removed_tables(removed))
       _ = Redaction.flush_nats(workspaces)
       refresh = if versions == [], do: :ok, else: FullText.refresh(["memories_fts"])
       {:ok, Map.put(done, :refresh, refresh)}

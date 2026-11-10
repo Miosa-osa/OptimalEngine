@@ -565,6 +565,126 @@ defmodule OptimalEngine.Sync.LedgerRedactionTest do
       assert_hashes_hold(ctx.ws)
     end
 
+    test "a forgotten memory is not brought back by a lagging peer's change older than the forget",
+         ctx do
+      {:ok, memory} = Memory.create(%{content: "first #{ctx.token}", workspace_id: ctx.ws})
+      seal!()
+
+      {:ok, [[created_at]]} =
+        Store.raw_query(
+          "SELECT MIN(occurred_at) FROM sync_mutations WHERE entity_type = 'memories' AND entity_id = ?1",
+          [memory.id]
+        )
+
+      assert :ok = Memory.forget(memory.id)
+      seal!()
+
+      # A peer that had not caught up sends an edit it made before the forget.
+      late =
+        mutation("update", "memories", memory.id, %{
+          "id" => memory.id,
+          "content" => "late edit #{ctx.token}",
+          "content_hash" => "hl#{ctx.n}",
+          "is_forgotten" => 0,
+          "created_at" => "2026-10-14T10:00:00Z",
+          "updated_at" => "2026-10-14T10:00:00Z"
+        })
+        |> Map.put("occurred_at", created_at)
+
+      assert {:ok, %{applied: 0, failed: []}} = Sync.apply_changes(ctx.tenant, ctx.ws, [late])
+
+      assert {:ok, [["", 1]]} =
+               Store.raw_query("SELECT content, is_forgotten FROM memories WHERE id = ?1", [
+                 memory.id
+               ])
+
+      seal!()
+      assert ledger_hits(ctx.token) == []
+    end
+
+    test "a request and an older change of its row in one batch: the row stays erased", ctx do
+      id = "peer-lag-#{ctx.n}"
+
+      assert {:ok, %{applied: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [
+                 mutation("create", "memories", id, %{
+                   "id" => id,
+                   "content" => "kept for now",
+                   "content_hash" => "hk#{ctx.n}",
+                   "is_forgotten" => 0,
+                   "created_at" => "2026-10-14T10:00:00Z",
+                   "updated_at" => "2026-10-14T10:00:00Z"
+                 })
+               ])
+
+      batch = [
+        mutation(
+          "create",
+          "ledger_redactions",
+          "lr_lag#{ctx.n}",
+          request_row("lr_lag#{ctx.n}", "memory", id, "2026-10-14T13:00:00.000"),
+          2
+        ),
+        # Made before the version erased, relayed after the request.
+        mutation(
+          "update",
+          "memories",
+          id,
+          %{
+            "id" => id,
+            "content" => "relayed late #{ctx.token}",
+            "content_hash" => "hr#{ctx.n}",
+            "is_forgotten" => 0,
+            "created_at" => "2026-10-14T10:00:00Z",
+            "updated_at" => "2026-10-14T12:00:00Z"
+          },
+          2
+        )
+      ]
+
+      assert {:ok, %{failed: []}} = Sync.apply_changes(ctx.tenant, ctx.ws, batch)
+
+      assert {:ok, [["", 1]]} =
+               Store.raw_query("SELECT content, is_forgotten FROM memories WHERE id = ?1", [id])
+
+      assert ledger_hits(ctx.token) == []
+    end
+
+    test "a newer remote delete over a local edit leaves no secret in the conflicts", ctx do
+      id = "peer-conflict-#{ctx.n}"
+
+      assert {:ok, %{applied: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [
+                 mutation("create", "contexts", id, %{
+                   "id" => id,
+                   "title" => "t",
+                   "content" => "from the peer",
+                   "created_at" => "2026-10-14T10:00:00Z"
+                 })
+               ])
+
+      # Edited here, then deleted on the peer later than the edit.
+      {:ok, _} =
+        Store.raw_query("UPDATE contexts SET content = ?1 WHERE id = ?2", [
+          "local edit #{ctx.token}",
+          id
+        ])
+
+      seal!()
+
+      delete =
+        mutation("delete", "contexts", id, %{"id" => id}, 2)
+        |> Map.put("occurred_at", "2099-01-01T00:00:00.000")
+
+      assert {:ok, %{applied: 1, failed: []}} = Sync.apply_changes(ctx.tenant, ctx.ws, [delete])
+
+      {:ok, [[conflicts]]} =
+        Store.raw_query("SELECT COUNT(*) FROM sync_conflicts WHERE entity_key = ?1", [id])
+
+      assert conflicts >= 1
+      assert ledger_hits(ctx.token) == []
+    end
+
     test "a request redacts only changes at or before the version it erased", ctx do
       id = "peer-bound-#{ctx.n}"
 
@@ -706,8 +826,13 @@ defmodule OptimalEngine.Sync.LedgerRedactionTest do
             {table, column} <- links,
             do: {table, column, parent}
 
-      tables = linked |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.sort()
-      assert tables == Enum.sort(Capture.append_only_tables())
+      tables = linked |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+      # Every append-only table is linked to the parent an erasure deletes it
+      # with, or listed as deleted with none.
+      assert Enum.sort(tables ++ Redaction.unlinked_append_only()) ==
+               Enum.sort(Capture.append_only_tables())
+
+      assert MapSet.disjoint?(MapSet.new(tables), MapSet.new(Redaction.unlinked_append_only()))
 
       for {table, column, parent} <- linked do
         assert {:id, column, parent} in OptimalEngine.Sync.Lineage.spec(table).refs,
@@ -760,6 +885,50 @@ defmodule OptimalEngine.Sync.LedgerRedactionTest do
     end
   end
 
+  describe "a seal" do
+    test "redacts a change it sealed of a row an erasure already asked to redact", ctx do
+      {:ok, memory} = Memory.create(%{content: "raced #{ctx.token}", workspace_id: ctx.ws})
+
+      # The forget committed between the seal's read of the capture and its
+      # write: its request is there, the change it took out is not yet sealed.
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO ledger_redactions (id, tenant_id, workspace_id, target_type, entity_id, reason, version) VALUES (?1, ?2, ?3, 'memory', ?4, 'memory_forget', ?5)",
+          ["lr_race#{ctx.n}", ctx.tenant, ctx.ws, memory.id, "2999-01-01T00:00:00.000"]
+        )
+
+      seal!()
+      assert memory_hits(ctx.token) == []
+      assert_hashes_hold(ctx.ws)
+    end
+  end
+
+  describe "a request's version" do
+    test "beyond this Engine's clock and the drift allowed is refused", ctx do
+      id = "peer-future-#{ctx.n}"
+
+      assert {:ok, %{applied: 0, failed: [%{reason: :invalid_redaction}]}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [
+                 mutation(
+                   "create",
+                   "ledger_redactions",
+                   "lr_fut#{ctx.n}",
+                   request_row("lr_fut#{ctx.n}", "memory", id, "2999-01-01T00:00:00.000")
+                 )
+               ])
+    end
+  end
+
+  describe "the erasure's scope where sync is off" do
+    test "is the tables it deleted from and what their foreign keys cascade to" do
+      tables = Redaction.removed_tables(%{chunks: 2, memories_fts: 1, facts: 0})
+      assert "chunks" in tables
+      assert "chunk_embeddings" in tables
+      refute "facts" in tables
+      refute "contexts" in tables
+    end
+  end
+
   describe "the policy store" do
     test "does not hand out redacted changes", ctx do
       id = "ctx-policy-#{ctx.n}"
@@ -801,6 +970,24 @@ defmodule OptimalEngine.Sync.LedgerRedactionTest do
   end
 
   describe "backfill" do
+    test "leaves live append-only rows that name no erased parent", ctx do
+      sql!(
+        "INSERT INTO observations (tenant_id, workspace_id, category, content, source) VALUES (?1, ?2, 'fact', ?3, 'explicit')",
+        [ctx.tenant, ctx.ws, "live observation #{ctx.token}"]
+      )
+
+      sql!(
+        "INSERT INTO graph_edges (tenant_id, workspace_id, source_id, target_id, relation) VALUES (?1, ?2, ?3, ?4, ?5)",
+        [ctx.tenant, ctx.ws, "entity:alpha-#{ctx.n}", "entity:beta-#{ctx.n}", "knows-#{ctx.token}"]
+      )
+
+      seal!()
+      assert length(ledger_hits(ctx.token)) == 2
+
+      assert {:ok, _} = Redaction.backfill()
+      assert length(ledger_hits(ctx.token)) == 2
+    end
+
     test "a dry run changes no row", ctx do
       {:ok, memory} = Memory.create(%{content: "dry #{ctx.token}", workspace_id: ctx.ws})
       id = "ctx-dry-#{ctx.n}"
@@ -855,9 +1042,23 @@ defmodule OptimalEngine.Sync.LedgerRedactionTest do
       # Nothing changed.
       assert ledger_hits(ctx.token) != []
 
+      {:ok, [[forgot_at]]} =
+        Store.raw_query(
+          "SELECT MAX(occurred_at) FROM sync_mutations WHERE entity_type = 'memories' AND entity_id = ?1",
+          [memory.id]
+        )
+
       assert {:ok, done} = Redaction.backfill()
       assert done.ledger_rows_redacted >= 2
       assert done.peer_requests >= 1
+
+      # The request erases up to the forget's own change, not up to now.
+      assert {:ok, [[^forgot_at]]} =
+               Store.raw_query(
+                 "SELECT version FROM ledger_redactions WHERE entity_id = ?1 AND reason = 'backfill'",
+                 [memory.id]
+               )
+
       assert ledger_hits(ctx.token) == []
       assert memory_hits(forgotten) == []
       assert_hashes_hold(ctx.ws)

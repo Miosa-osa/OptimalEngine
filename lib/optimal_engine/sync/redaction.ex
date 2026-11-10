@@ -404,6 +404,7 @@ defmodule OptimalEngine.Sync.Redaction do
         SELECT id, payload FROM sync_mutations
         WHERE workspace_id = ?1 AND entity_id = ?2 AND entity_type IN (#{marks.(3)})
           AND operation <> 'delete' AND redacted_at IS NULL#{before_sql}
+        ORDER BY sequence
         """,
         [workspace_id, entity_id] ++ names ++ before
       )
@@ -474,6 +475,14 @@ defmodule OptimalEngine.Sync.Redaction do
 
     :ok
   end
+
+  @doc """
+  A stored payload (`sync_conflicts`, a ledger row) as its tombstone: the
+  key and what the gate classifies the row by. `nil` stays `nil`, a tombstone
+  stays as it is.
+  """
+  @spec tombstone_payload(String.t(), map(), term()) :: String.t() | nil
+  def tombstone_payload(table, key_row, payload), do: redact_payload(table, key_row, payload)
 
   defp redact_payload(_table, _key_row, nil), do: nil
 
@@ -560,10 +569,17 @@ defmodule OptimalEngine.Sync.Redaction do
   end
 
   @doc """
-  After a seal: the deletes just sealed (ledger entries as `Capture` writes
-  them) redact the earlier changes of their rows, for a delete no erasure path
-  redacted in its own transaction. Never raises; a failure is logged and the
-  next seal or `backfill/1` redacts.
+  After a seal, for what no erasure redacted in its own transaction:
+
+    * a delete just sealed redacts the earlier changes of its row;
+    * a change just sealed of a row an erasure already asked to redact (a
+      `ledger_redactions` request at or after the time it occurred, as when
+      the seal read the change before a forget or a retention redact took it
+      out of the capture) is redacted too, with what the rule derives.
+
+  Each row is redacted in a transaction of its own, so one that fails leaves
+  the others done. Never raises; a failure is logged, and `backfill/1`
+  redacts what is left (nothing else retries it).
   """
   @spec redact_sealed([list()]) :: :ok
   def redact_sealed(entries) do
@@ -573,31 +589,147 @@ defmodule OptimalEngine.Sync.Redaction do
           not String.starts_with?(entity, "row:"),
           do: {ws, table, entity, payload}
 
-    if deletes != [] do
-      {:ok, _} =
+    Enum.each(deletes, fn {ws, table, entity, payload} ->
+      guarded("the changes of a deleted row", fn ->
         Store.transaction(
           fn txn ->
-            Enum.each(deletes, fn {ws, table, entity, payload} ->
-              key_row = (Jason.decode!(payload) || %{})["row"] || %{}
-              {:ok, [[seq]]} = delete_sequence(txn, ws, table, entity)
-              {:ok, _} = redact_entity(txn, ws, table, entity, key_row, before: seq)
-            end)
-
+            key_row = (Jason.decode!(payload) || %{})["row"] || %{}
+            {:ok, [[seq]]} = delete_sequence(txn, ws, table, entity)
+            {:ok, _} = redact_entity(txn, ws, table, entity, key_row, before: seq)
             {:ok, :redacted}
           end,
           120_000
         )
-    end
+      end)
+    end)
+
+    entries
+    |> requested_after_seal()
+    |> Enum.each(fn {ws, request} ->
+      guarded("a change sealed after its erasure", fn ->
+        Store.transaction(
+          fn txn ->
+            :ok = redact_request_ledger(txn, ws, request)
+            {:ok, :redacted}
+          end,
+          120_000
+        )
+      end)
+    end)
 
     :ok
   rescue
     error ->
-      Logger.error(
-        "[Sync] could not redact the changes of deleted rows: #{Exception.message(error)}"
-      )
-
+      Logger.error("[Sync] could not redact after a seal: #{Exception.message(error)}")
       :ok
   end
+
+  defp guarded(what, fun) do
+    case fun.() do
+      {:ok, _} -> :ok
+      other -> Logger.error("[Sync] could not redact #{what}: #{inspect(other)}")
+    end
+  rescue
+    error -> Logger.error("[Sync] could not redact #{what}: #{Exception.message(error)}")
+  catch
+    kind, reason -> Logger.error("[Sync] could not redact #{what}: #{kind} #{inspect(reason)}")
+  end
+
+  # The rows of sealed changes (not deletes) that a request already names with
+  # a version at or after the change: `{workspace, request}` for each.
+  defp requested_after_seal(entries) do
+    for [_id, _tenant, _org, ws, _device, table, entity, op, _payload, _hash, _key, at] <- entries,
+        op != "delete",
+        {rule_table, id} <- [erased_target(table, entity)],
+        rule_table != nil,
+        uniq: true do
+      {ws, rule_table, id, at}
+    end
+    |> Enum.flat_map(fn {ws, rule_table, id, at} ->
+      case outstanding_version(ws, rule_table, id) do
+        version when is_binary(version) and is_binary(at) and at <= version ->
+          [{ws, request_for(rule_table, id, version)}]
+
+        _ ->
+          []
+      end
+    end)
+    |> Enum.uniq()
+  end
+
+  # The table with an erasure rule a change belongs to, and the row's id: the
+  # row itself, or the row a derived row of the rule names first.
+  defp erased_target(table, entity) do
+    cond do
+      Map.has_key?(rules(), table) ->
+        {table, entity}
+
+      parent = derived_parent(table) ->
+        case Jason.decode(entity) do
+          {:ok, [first | _]} when is_binary(first) -> {parent, first}
+          _ -> {nil, nil}
+        end
+
+      true ->
+        {nil, nil}
+    end
+  end
+
+  # The table with an erasure rule that derives rows of `table`, or nil.
+  defp derived_parent(table) do
+    Enum.find_value(rules(), fn {parent, rule} ->
+      if List.keymember?(rule.derived, table, 0), do: parent
+    end)
+  end
+
+  defp outstanding_version(ws, table, id) do
+    case Store.raw_query(
+           "SELECT MAX(version) FROM ledger_redactions WHERE workspace_id = ?1 AND target_type = ?2 AND entity_id = ?3",
+           [ws, rules()[table].type, id]
+         ) do
+      {:ok, [[version]]} -> version
+      _ -> nil
+    end
+  end
+
+  defp request_for(table, id, version),
+    do: %{
+      table: table,
+      entity_id: id,
+      key_row: %{"id" => id},
+      version: version,
+      rule: rules()[table]
+    }
+
+  @doc """
+  The version a request this Engine holds erased the row of `table` (one
+  with an erasure rule, or a row its rule derives) named by the change's
+  `entity_id` at, when the change occurred at or before it; `nil` otherwise.
+  A change that old is one the erasure took out: a peer that had not caught
+  up, or a hub relaying one, must not bring it back.
+  """
+  @spec erased_version(String.t(), String.t(), map()) :: String.t() | nil
+  def erased_version(workspace_id, table, %{"operation" => op} = mutation) when op != "delete" do
+    with {rule_table, id} when is_binary(rule_table) <-
+           erased_target(table, mutation["entity_id"] || ""),
+         version when is_binary(version) <- outstanding_version(workspace_id, rule_table, id),
+         at when is_binary(at) <- mutation["occurred_at"],
+         true <- at <= version do
+      version
+    else
+      _ -> nil
+    end
+  end
+
+  def erased_version(_workspace_id, _table, _mutation), do: nil
+
+  @doc """
+  The target of a change a batch would apply, as `erased_target/2` finds it
+  (`{table, id}` or `{nil, nil}`), for a batch that tracks the requests it
+  applied itself.
+  """
+  @spec erased_target_of(String.t(), String.t()) :: {String.t() | nil, String.t() | nil}
+  def erased_target_of(table, entity), do: erased_target(table, entity)
 
   defp delete_sequence(txn, ws, table, entity) do
     Store.txn_query(
@@ -637,6 +769,8 @@ defmodule OptimalEngine.Sync.Redaction do
     "contexts" => %{type: "context", erased: %{}, governed: [], derived: []}
   }
 
+  defp rules, do: @rules
+
   @reasons ~w(memory_forget retention_redact backfill)
   @version ~r/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?\z/
   @request_columns ~w(id tenant_id workspace_id target_type entity_id reason version)
@@ -670,7 +804,12 @@ defmodule OptimalEngine.Sync.Redaction do
     reason = Keyword.fetch!(opts, :reason)
     true = reason in @reasons
     replicates? = replicates?(txn, workspace_id)
-    version = version_now()
+    version = Keyword.get_lazy(opts, :version, &version_now/0)
+
+    # Under the ledger lock (PostgreSQL), so a seal that read these changes
+    # before the erasure writes them either before it (redacted here) or after
+    # this commits (its `redact_sealed/1` finds the request).
+    :ok = OptimalEngine.Sync.Postgres.lock_ledger(txn)
 
     total =
       Enum.reduce(Enum.uniq(ids), 0, fn id, acc ->
@@ -787,6 +926,7 @@ defmodule OptimalEngine.Sync.Redaction do
          true <- id?(entity),
          true <- row["reason"] in @reasons,
          true <- is_binary(row["version"]) and Regex.match?(@version, row["version"]),
+         true <- not future_version?(row["version"]),
          [_ | _] = columns <- Capture.columns(table) do
       {:ok,
        %{
@@ -804,6 +944,21 @@ defmodule OptimalEngine.Sync.Redaction do
 
   def request(_row, _target_table), do: {:error, :invalid_redaction}
 
+  # How far ahead of this Engine's clock a request's version may be: the clock
+  # drift allowed between devices (`DEVICE_SIGNATURE_SKEW_MS`, 10 minutes). A
+  # version beyond it would erase every change the row gets until then.
+  @version_skew_ms 600_000
+
+  defp future_version?(version) do
+    {:ok, limit} =
+      DateTime.utc_now()
+      |> DateTime.add(@version_skew_ms, :millisecond)
+      |> DateTime.to_unix(:millisecond)
+      |> DateTime.from_unix(:millisecond)
+
+    version > limit |> DateTime.to_naive() |> NaiveDateTime.to_iso8601()
+  end
+
   @doc """
   On a peer, in the apply's transaction: what an applied request erases here,
   bounded by its version. The changes of the row and of the rows its rule
@@ -815,8 +970,7 @@ defmodule OptimalEngine.Sync.Redaction do
   @spec apply_request(term(), String.t(), map()) :: :ok | {:error, term()}
   def apply_request(txn, workspace_id, request) do
     %{table: table, entity_id: id, version: version, rule: rule} = request
-    {:ok, _} = redact_entity(txn, workspace_id, table, id, request.key_row, through: version)
-    {:ok, _} = redact_derived(txn, workspace_id, rule, id, through: version)
+    :ok = redact_request_ledger(txn, workspace_id, request)
 
     if newer_here?(txn, workspace_id, table, id, version) do
       :ok
@@ -824,6 +978,104 @@ defmodule OptimalEngine.Sync.Redaction do
       with :ok <- delete_derived(txn, workspace_id, rule, id),
            {:ok, governed} <- governed(txn, workspace_id, table, id, rule.governed),
            do: set_erased(txn, workspace_id, table, id, Map.merge(rule.erased, governed))
+    end
+  end
+
+  @doc """
+  The ledger part of `apply_request/3`: this Engine's changes of the named row,
+  and of the rows its rule derives from it, that occurred at or before the
+  request's version are redacted. Idempotent.
+  """
+  @spec redact_request_ledger(term(), String.t(), map()) :: :ok
+  def redact_request_ledger(txn, workspace_id, request) do
+    %{table: table, entity_id: id, version: version, rule: rule} = request
+    {:ok, _} = redact_entity(txn, workspace_id, table, id, request.key_row, through: version)
+    {:ok, _} = redact_derived(txn, workspace_id, rule, id, through: version)
+    :ok
+  end
+
+  @doc """
+  In an apply, before its ledger rows are written (`Sync`, which writes them
+  at the end of its transaction): the changes still pending in `entries` that
+  an erasure applied in the same batch takes out become tombstones, marked
+  `"redacted_at"`, so the text never reaches the ledger. `erasure` is
+  `{:request, request}` (the named row and what its rule derives, at or
+  before its version), `{:delete, table, entity_id, occurred_at}` (the row's
+  changes at or before the delete), or `{:parents, %{table => ids}}` (the
+  append-only rows made from deleted parents, `append_only_links/0`).
+  """
+  @spec tombstone_pending([map()], tuple()) :: [map()]
+  def tombstone_pending(entries, erasure) do
+    at = now()
+
+    Enum.map(entries, fn entry ->
+      if entry["operation"] != "delete" and not Map.has_key?(entry, "redacted_at") and
+           pending_erased?(entry, erasure),
+         do: tombstone_entry(entry, at),
+         else: entry
+    end)
+  end
+
+  defp pending_erased?(entry, {:request, request}) do
+    type = entry["entity_type"]
+    at = entry["occurred_at"]
+    earlier? = is_binary(at) and at <= request.version
+
+    earlier? and
+      ((type in entity_types(request.table) and entry["entity_id"] == request.entity_id) or
+         Enum.any?(request.rule.derived, fn {table, _column} ->
+           type == table and
+             String.starts_with?(
+               entry["entity_id"] || "",
+               "[" <> Jason.encode!(request.entity_id) <> ","
+             )
+         end))
+  end
+
+  defp pending_erased?(entry, {:delete, table, entity, occurred_at}) do
+    at = entry["occurred_at"]
+
+    entry["entity_type"] in entity_types(table) and entry["entity_id"] == entity and
+      (not is_binary(occurred_at) or (is_binary(at) and at <= occurred_at))
+  end
+
+  defp pending_erased?(entry, {:parents, parents}) do
+    row = get_in(entry, ["payload", "row"]) || %{}
+
+    Enum.any?(parents, fn {parent, ids} ->
+      Enum.any?(Map.get(append_only_links(), parent, []), fn {table, column} ->
+        entry["entity_type"] == table and row[column] in ids
+      end)
+    end)
+  end
+
+  defp tombstone_entry(entry, at) do
+    table = entry["entity_type"]
+    row = get_in(entry, ["payload", "row"]) || %{}
+    key_row = pending_key_row(entry["entity_id"], row)
+    {tombstone, _hash} = tombstone(tombstone_row(target(table), key_row, row))
+
+    entry
+    |> Map.put("payload", Jason.decode!(tombstone))
+    |> Map.put("redacted_at", at)
+  end
+
+  # The key of a pending change, from its row (the schema is not read inside
+  # the apply's transaction): the columns holding the parts of a composite
+  # `entity_id`, else the column holding the id, else `id`.
+  defp pending_key_row(entity, row) do
+    parts =
+      case Jason.decode(entity || "") do
+        {:ok, list} when is_list(list) -> list
+        _ -> [entity]
+      end
+
+    case Map.filter(row, fn {_column, value} -> value in parts and value != nil end) do
+      keys when map_size(keys) > 0 ->
+        if Map.has_key?(row, "id") and row["id"] in parts, do: %{"id" => row["id"]}, else: keys
+
+      _ ->
+        %{"id" => row["id"] || entity}
     end
   end
 
@@ -928,10 +1180,7 @@ defmodule OptimalEngine.Sync.Redaction do
       {"decisions", "context_id"},
       {"entities", "context_id"},
       {"graph_edges", "source_id"},
-      {"graph_edges", "target_id"},
-      {"edges", "source_id"},
-      {"edges", "target_id"},
-      {"observations", "source"}
+      {"graph_edges", "target_id"}
     ],
     "memories" => [
       {"memory_relations", "source_memory_id"},
@@ -951,6 +1200,21 @@ defmodule OptimalEngine.Sync.Redaction do
       {"graph_edges", "target_id"}
     ]
   }
+
+  # Append-only tables no erasure deletes with a parent: `edges` (the legacy
+  # graph, its endpoints are any node, not only contexts) and `observations`
+  # (`source` is a provenance word such as `explicit`, not a row). Their rows
+  # are redacted only by their own deletes.
+  @unlinked_append_only ~w(edges observations)
+
+  # Links that are not foreign keys: an endpoint that names no context may be
+  # an entity or any other node, so a missing context is no evidence that the
+  # row was erased (`backfill/1` requires the context's delete in the ledger).
+  @soft_links [{"graph_edges", "source_id"}, {"graph_edges", "target_id"}]
+
+  @doc "The append-only tables no erasure deletes with a parent row."
+  @spec unlinked_append_only() :: [String.t()]
+  def unlinked_append_only, do: @unlinked_append_only
 
   @doc "The append-only tables and the link column of each, by the table it links to."
   @spec append_only_links() :: %{String.t() => [{String.t(), String.t()}]}
@@ -1002,6 +1266,7 @@ defmodule OptimalEngine.Sync.Redaction do
           SELECT id, payload FROM sync_mutations
           WHERE workspace_id = ?1 AND entity_type = ?2 AND operation <> 'delete'
             AND redacted_at IS NULL AND (#{likes.("payload")})
+          ORDER BY sequence
           """,
           params
         )
@@ -1169,9 +1434,10 @@ defmodule OptimalEngine.Sync.Redaction do
   # A row of a single-keyed table whose changes are in the ledger and that this
   # Engine no longer holds: deleted while its workspace did not replicate (its
   # delete was not captured), or by a peer's delete before this module.
-  defp missing(workspace_id \\ nil) do
+  defp missing(workspace_id \\ nil, tables \\ :all) do
     for table <- Capture.replicated_tables(),
         table != @table,
+        tables == :all or table in tables,
         columns = Capture.columns(table),
         not Capture.rowid_key?(columns),
         [key] <- [Capture.key_columns(columns)],
@@ -1298,7 +1564,15 @@ defmodule OptimalEngine.Sync.Redaction do
   end
 
   defp backfill_row(txn, {:forgotten, ws, tenant, table, entity, _before, _key}) do
-    {:ok, n} = redact_rows(txn, ws, table, [entity], tenant_id: tenant, reason: "backfill")
+    # The version erased is when the forget happened (its change, the last of
+    # the row's in the ledger), not now: a peer's change made after the forget
+    # stands, as it would have against the forget itself.
+    {:ok, n} =
+      redact_rows(txn, ws, table, [entity],
+        tenant_id: tenant,
+        reason: "backfill",
+        version: forget_version(txn, ws, table, entity)
+      )
 
     {n, if(replicates?(txn, ws), do: 1, else: 0)}
   end
@@ -1306,6 +1580,21 @@ defmodule OptimalEngine.Sync.Redaction do
   defp backfill_row(txn, {_kind, ws, _tenant, table, entity, before, key_row}) do
     {:ok, n} = redact_entity(txn, ws, table, entity, key_row, before: before)
     {n, 0}
+  end
+
+  defp forget_version(txn, ws, table, entity) do
+    case Store.txn_query(
+           txn,
+           "SELECT MAX(occurred_at) FROM sync_mutations WHERE workspace_id = ?1 AND entity_type = ?2 AND entity_id = ?3 AND operation <> 'delete'",
+           [ws, table, entity]
+         ) do
+      {:ok, [[at]]} when is_binary(at) ->
+        normalized = at |> String.replace(" ", "T") |> String.trim_trailing("Z")
+        if Regex.match?(@version, normalized), do: normalized, else: version_now()
+
+      _ ->
+        version_now()
+    end
   end
 
   # The append-only rows whose parent this Engine no longer holds, with
@@ -1343,16 +1632,55 @@ defmodule OptimalEngine.Sync.Redaction do
             is_binary(row[column]),
             do: {id, ws, row[column], row}
 
-      present = present_ids(parent, links |> Enum.map(&elem(&1, 2)) |> Enum.uniq())
+      parent_ids = links |> Enum.map(&elem(&1, 2)) |> Enum.uniq()
+      present = present_ids(parent, parent_ids)
+
+      # A foreign key: a parent that is gone was deleted. Any other link: only a
+      # parent whose delete is in the ledger was erased.
+      erased? =
+        if {table, column} in @soft_links do
+          deleted = deleted_ids(parent, parent_ids)
+          fn ws, parent_id -> MapSet.member?(deleted, {ws, parent_id}) end
+        else
+          fn _ws, parent_id -> not MapSet.member?(present, parent_id) end
+        end
 
       found =
         for {id, ws, parent_id, row} <- links,
             not MapSet.member?(present, parent_id),
+            erased?.(ws, parent_id),
             do: {ws, table, id, row}
 
       [last | _] = List.last(rows)
       linked_missing(parent, table, column, last, acc ++ found)
     end
+  end
+
+  # `{workspace, id}` of the rows of `parent` among `ids` whose delete is in
+  # the ledger.
+  defp deleted_ids(_parent, []), do: MapSet.new()
+
+  defp deleted_ids(parent, ids) do
+    names = entity_types(parent)
+
+    ids
+    |> Enum.chunk_every(500)
+    |> Enum.reduce(MapSet.new(), fn batch, acc ->
+      type_marks = names |> Enum.with_index(1) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
+
+      id_marks =
+        batch
+        |> Enum.with_index(length(names) + 1)
+        |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
+
+      {:ok, rows} =
+        Store.raw_query(
+          "SELECT DISTINCT workspace_id, entity_id FROM sync_mutations WHERE operation = 'delete' AND entity_type IN (#{type_marks}) AND entity_id IN (#{id_marks})",
+          names ++ batch
+        )
+
+      MapSet.union(acc, MapSet.new(rows, fn [ws, id] -> {ws, id} end))
+    end)
   end
 
   defp present_ids(_parent, []), do: MapSet.new()
@@ -1447,11 +1775,19 @@ defmodule OptimalEngine.Sync.Redaction do
   ran (their deletes were not captured): redacts the changes their ledger
   still holds of rows that no longer exist. Cheap when the workspace has no
   ledger.
+
+  `tables` scopes the search to the tables the erasure deleted rows from (an
+  erasure passes what it removed, `removed_tables/1`), so an erasure in a
+  workspace that does not replicate does not scan every replicated table.
+  `:all` (the default) is the whole workspace, as a workspace's removal needs.
   """
-  @spec redact_missing([String.t()]) :: :ok
-  def redact_missing(workspace_ids) do
+  @spec redact_missing([String.t()], :all | [String.t()]) :: :ok
+  def redact_missing(workspace_ids, tables \\ :all)
+  def redact_missing(_workspace_ids, []), do: :ok
+
+  def redact_missing(workspace_ids, tables) do
     for ws <- Enum.uniq(workspace_ids), not replicates_now?(ws), has_ledger?(ws) do
-      rows = missing(ws)
+      rows = missing(ws, tables)
       apply_backfill(rows)
       purge_missing_in_nats(rows)
     end
@@ -1461,6 +1797,77 @@ defmodule OptimalEngine.Sync.Redaction do
     error ->
       Logger.error("[Sync] could not redact the ledger of erased rows: #{Exception.message(error)}")
       :ok
+  end
+
+  @doc """
+  The replicated tables an erasure deleted rows from, from its per-step
+  counts (`%{table_or_step => count}`): the keys that name a table and
+  counted at least one row, plus `extra`.
+  """
+  @spec removed_tables(map(), [String.t()]) :: :all | [String.t()]
+  def removed_tables(removed, extra \\ []) do
+    replicated = MapSet.new(Capture.replicated_tables())
+
+    removed
+    |> Enum.filter(fn {_key, count} -> is_integer(count) and count > 0 end)
+    |> Enum.map(fn {key, _count} -> key |> to_string() |> String.replace_suffix("_deleted", "") end)
+    |> Kernel.++(extra)
+    |> with_cascades()
+    |> case do
+      :all -> :all
+      tables -> tables |> Enum.filter(&MapSet.member?(replicated, &1)) |> Enum.uniq()
+    end
+  end
+
+  # The tables and every table whose rows a foreign key deletes with theirs
+  # (a chunk's embeddings): read from the schema once per boot. A schema that
+  # cannot be read scopes nothing out (`:all`).
+  defp with_cascades(tables) do
+    case foreign_keys() do
+      {:ok, edges} -> closure(MapSet.new(tables), edges)
+      :error -> :all
+    end
+  end
+
+  defp closure(set, edges) do
+    next =
+      for {child, parent} <- edges, MapSet.member?(set, parent), into: set, do: child
+
+    if MapSet.size(next) == MapSet.size(set), do: MapSet.to_list(set), else: closure(next, edges)
+  end
+
+  defp foreign_keys do
+    key = {__MODULE__, :foreign_keys, OptimalEngine.Sync.Postgres.active?()}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        sql =
+          if OptimalEngine.Sync.Postgres.active?(),
+            do: """
+            SELECT tc.table_name, ccu.table_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.constraint_column_usage ccu
+              ON ccu.constraint_name = tc.constraint_name AND ccu.constraint_schema = tc.constraint_schema
+            WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = current_schema()
+            """,
+            else: """
+            SELECT m.name, p."table" FROM sqlite_master m, pragma_foreign_key_list(m.name) p
+            WHERE m.type = 'table'
+            """
+
+        case Store.raw_query(sql, []) do
+          {:ok, rows} ->
+            edges = Enum.map(rows, fn [child, parent] -> {child, parent} end)
+            :persistent_term.put(key, edges)
+            {:ok, edges}
+
+          _ ->
+            :error
+        end
+
+      edges ->
+        {:ok, edges}
+    end
   end
 
   defp replicates_now?(ws),
