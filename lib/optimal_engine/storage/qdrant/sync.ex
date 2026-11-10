@@ -6,12 +6,13 @@ defmodule OptimalEngine.Storage.Qdrant.Sync do
 
     1. `contexts`, `chunks`, `memories`: every row of `vectors`,
        `chunk_embeddings` and `memory_embeddings` is upserted to its collection
-       (the point id comes from the row's key, so a second run writes the same
-       points again and adds none);
+       (the point id comes from this Engine's id and the row's key, so a
+       second run writes the same points again and adds none);
     2. `orphans_contexts`, `orphans_chunks`, `orphans_memories`: every point of
        the kind's collections (in the workspace, when one is named) is read
-       back from SQLite, and a point whose row is gone, or is now in another
-       workspace or of another dimension, is deleted.
+       back from SQLite, and a point whose row is gone, is now in another
+       workspace or of another dimension, or whose id is not the one its row
+       gets now (an earlier build's), is deleted.
 
   One run handles at most `:limit` rows and points (default 2,000) and returns
   where it stopped (`next`), so a job can continue it after a restart:
@@ -21,7 +22,9 @@ defmodule OptimalEngine.Storage.Qdrant.Sync do
   compares again and reads Qdrant if they agree.
   """
 
-  alias OptimalEngine.Storage.Qdrant.Projection
+  require Logger
+
+  alias OptimalEngine.Storage.Qdrant.{Gate, Projection}
   alias OptimalEngine.Store
 
   @phases ~w(contexts chunks memories orphans_contexts orphans_chunks orphans_memories)
@@ -62,42 +65,66 @@ defmodule OptimalEngine.Storage.Qdrant.Sync do
       not reachable?() ->
         {:error, {:qdrant_unavailable, :health_check_failed}}
 
-      # Removals Qdrant refused come first; a run fails while one remains, so
-      # the job that ran it is retried.
-      (pending = Projection.retry_pending()) != :ok ->
-        {:error,
-         {:qdrant_unavailable, {:pending_removals, Projection.error_class(elem(pending, 1))}}}
-
       true ->
-        acc = %{workspace_id: workspace_id, upserted: 0, deleted: 0, skipped: 0, next: nil}
-        state = %{ws: workspace_id, budget: limit, pause: Keyword.get(opts, :pause_ms, 0)}
-        cursor = start(Keyword.get(opts, :after))
+        # Qdrant answered: an unhealthy spell cached before this run is over,
+        # and the writes below must not be refused for it.
+        Gate.reset_health()
 
-        # A pass repairs the dirty marks made before it began, and carries when
-        # that was in its cursor, so a continuation (even after a restart) does
-        # not clear a mark made during the pass.
-        started =
-          case cursor["started"] do
-            stamp when is_integer(stamp) -> stamp
-            _ -> Projection.stamp()
-          end
+        # Removals Qdrant refused come first. One that fails again stays
+        # recorded for the projection's retry timer (and is dead past its
+        # attempts); it never holds up the rest of the run.
+        case Projection.retry_pending() do
+          :ok ->
+            :ok
 
-        case walk(Map.delete(cursor, "started"), state, acc) do
-          {:ok, %{next: nil} = result} ->
-            Projection.clear_dirty(workspace_id, started)
-
-            if workspace_id,
-              do: Projection.invalidate(workspace_id),
-              else: Projection.invalidate_all()
-
-            {:ok, result}
-
-          {:ok, %{next: next} = result} ->
-            {:ok, %{result | next: Map.put(next, "started", started)}}
-
-          other ->
-            other
+          {:error, reason} ->
+            Logger.warning(
+              "[Qdrant] a recorded removal failed again (#{inspect(Projection.error_class(reason))}); " <>
+                "the sync goes on and the removal is retried on its timer"
+            )
         end
+
+        walk_all(workspace_id, limit, opts)
+    end
+  end
+
+  defp walk_all(workspace_id, limit, opts) do
+    acc = %{workspace_id: workspace_id, upserted: 0, deleted: 0, skipped: 0, next: nil}
+    state = %{ws: workspace_id, budget: limit, pause: Keyword.get(opts, :pause_ms, 0)}
+    cursor = start(Keyword.get(opts, :after))
+
+    # A pass repairs the dirty marks made before it began, and carries when
+    # that was in its cursor, so a continuation (even after a restart) does
+    # not clear a mark made during the pass.
+    started =
+      case cursor["started"] do
+        stamp when is_integer(stamp) -> stamp
+        _ -> Projection.stamp()
+      end
+
+    case walk(Map.delete(cursor, "started"), state, acc) do
+      {:ok, %{next: nil} = result} ->
+        Projection.clear_dirty(workspace_id, started)
+
+        if workspace_id do
+          Projection.invalidate(workspace_id)
+          Gate.verified(workspace_id)
+        else
+          Projection.invalidate_all()
+        end
+
+        {:ok, result}
+
+      {:ok, %{next: next} = result} ->
+        {:ok, %{result | next: Map.put(next, "started", started)}}
+
+      # Writes refused for an unhealthy spell that began during the run are a
+      # Qdrant that does not answer: the job waits for it, it does not fail.
+      {:error, :qdrant_unhealthy} ->
+        {:error, {:qdrant_unavailable, :qdrant_unhealthy}}
+
+      other ->
+        other
     end
   end
 
@@ -304,11 +331,15 @@ defmodule OptimalEngine.Storage.Qdrant.Sync do
             into: MapSet.new(),
             do: {row_key(kind, key, extra), ws}
 
+      # A point under an id other than the one its row gets now (an earlier
+      # build's, see `Projection.point_id/2`) is stale too: the upsert phases
+      # wrote the row's point under its id.
       stale =
         points
         |> Enum.zip(keys)
         |> Enum.reject(fn {point, key} ->
-          key != nil and MapSet.member?(live, {key, get_in(point, ["payload", "workspace_id"])})
+          key != nil and point["id"] == Projection.point_id(kind, key) and
+            MapSet.member?(live, {key, get_in(point, ["payload", "workspace_id"])})
         end)
         |> Enum.map(fn {point, _key} -> point["id"] end)
 

@@ -50,6 +50,8 @@ defmodule OptimalEngine.Sync do
   alias OptimalEngine.LogUrl
   alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Signal
+  alias OptimalEngine.Storage.Qdrant.Projection, as: QdrantProjection
+  alias OptimalEngine.Storage.Qdrant.Removals, as: QdrantRemovals
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.Store.Migrations
@@ -1245,6 +1247,8 @@ defmodule OptimalEngine.Sync do
   defp execute(tenant_id, workspace_id, plans, foreign_keys \\ :deferred) do
     erasing = erased_context_ids(plans)
     file_plan = plan_erased_files(tenant_id, workspace_id, erasing, erased_package_ids(plans))
+    # Read before the transaction: it reads the store.
+    qdrant? = QdrantProjection.configured?()
 
     result =
       Store.transaction(fn txn ->
@@ -1268,7 +1272,8 @@ defmodule OptimalEngine.Sync do
               # The ledger rows of the changes applied, newest first, written
               # at the end of the transaction (`record_ledger/4`).
               ledger: [],
-              ledger_ids: MapSet.new()
+              ledger_ids: MapSet.new(),
+              qdrant: []
             },
             fn
               {:skip, reason, _mutation}, acc ->
@@ -1310,8 +1315,9 @@ defmodule OptimalEngine.Sync do
           end)
 
         record_ledger(txn, tenant_id, workspace_id, Enum.reverse(outcome.ledger))
+        {:ok, removals} = record_qdrant_removals(txn, tenant_id, workspace_id, outcome, qdrant?)
         {:ok, _} = Store.txn_execute(txn, "UPDATE sync_identity SET applying = 0 WHERE id = 1", [])
-        {:ok, outcome}
+        {:ok, Map.put(outcome, :qdrant_removals, removals)}
       end)
 
     case result do
@@ -1323,6 +1329,7 @@ defmodule OptimalEngine.Sync do
         log_held(outcome.held)
         Enum.each(outcome.fact_conflicts, &raise_fact_claims(tenant_id, workspace_id, &1))
         if outcome.erased?, do: purge_erased(workspace_id, file_plan)
+        QdrantRemovals.enqueue(outcome.qdrant_removals)
 
         {:ok,
          %{
@@ -1400,6 +1407,52 @@ defmodule OptimalEngine.Sync do
   # those with the package, so they go once the batch has committed and the package row is
   # gone (`DerivedData.remove_planned_files/1`). A failure is logged and never fails an apply
   # that has already committed.
+  # The rows a peer's change deleted, or made unsearchable, take their points
+  # out of this Engine's Qdrant projection: the removal is recorded in the
+  # apply's transaction (`record_qdrant_removals/5`) and handed over once it
+  # commits. A row deleted by a cascade (a context's vectors, chunks and their
+  # embeddings) is covered by the removal of what it hung from.
+  defp note_qdrant(acc, table, %{"operation" => "delete", "payload" => payload}),
+    do: %{acc | qdrant: qdrant_deleted(table, payload["row"] || %{}) ++ acc.qdrant}
+
+  defp note_qdrant(acc, "memories", %{"payload" => %{"row" => row}}) when is_map(row) do
+    if row["is_forgotten"] in [1, true, "1"] or row["is_latest"] in [0, false, "0"],
+      do: %{acc | qdrant: qdrant_deleted("memories", row) ++ acc.qdrant},
+      else: acc
+  end
+
+  defp note_qdrant(acc, _table, _mutation), do: acc
+
+  defp qdrant_deleted("contexts", %{"id" => id}) when is_binary(id),
+    do: [{:contexts, "context_id", id}, {:chunks, "context_id", id}]
+
+  defp qdrant_deleted("vectors", %{"context_id" => id}) when is_binary(id),
+    do: [{:contexts, "context_id", id}]
+
+  defp qdrant_deleted("chunks", %{"id" => id}) when is_binary(id), do: [{:chunks, "chunk_id", id}]
+
+  defp qdrant_deleted("chunk_embeddings", %{"chunk_id" => id}) when is_binary(id),
+    do: [{:chunks, "chunk_id", id}]
+
+  defp qdrant_deleted("memories", %{"id" => id}) when is_binary(id),
+    do: [{:memories, "memory_id", id}]
+
+  defp qdrant_deleted("memory_embeddings", %{"memory_id" => id}) when is_binary(id),
+    do: [{:memories, "memory_id", id}]
+
+  defp qdrant_deleted(_table, _row), do: []
+
+  defp record_qdrant_removals(_txn, _tenant_id, _workspace_id, _outcome, false), do: {:ok, []}
+
+  defp record_qdrant_removals(txn, tenant_id, workspace_id, %{qdrant: noted}, true) do
+    removals =
+      noted
+      |> Enum.group_by(fn {kind, field, _} -> {kind, field} end, fn {_, _, value} -> value end)
+      |> Enum.map(fn {{kind, field}, values} -> {kind, field, Enum.uniq(values)} end)
+
+    QdrantRemovals.record_all_in(txn, removals, tenant_id: tenant_id, workspace_id: workspace_id)
+  end
+
   defp note_erased(acc, "contexts", %{"operation" => "delete"}), do: %{acc | erased?: true}
   defp note_erased(acc, "source_packages", %{"operation" => "delete"}), do: %{acc | erased?: true}
   defp note_erased(acc, _table, _mutation), do: acc
@@ -1522,6 +1575,7 @@ defmodule OptimalEngine.Sync do
                 ledger_ids: MapSet.put(acc.ledger_ids, mutation["id"])
             }
             |> note_erased(table, mutation)
+            |> note_qdrant(table, mutation)
 
           if conflict do
             record_conflict(

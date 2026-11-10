@@ -111,6 +111,11 @@ defmodule OptimalEngine.Storage.Qdrant.Search do
             else: pages(kind, collection, body, page, verify, n + 1, found, limit)
         end
 
+      # No collection of this dimension: nothing of this Engine is stored at
+      # it, which says nothing about Qdrant's health.
+      {:ok, 404, _} ->
+        :fallback
+
       other ->
         Projection.mark_unhealthy(Projection.failure(other))
         :fallback

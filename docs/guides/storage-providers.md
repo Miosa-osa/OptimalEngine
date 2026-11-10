@@ -360,35 +360,38 @@ What it holds:
 These are exactly the rows the embedded search can return, so what is mirrored and what is counted are the same rows; a row with no workspace is neither.
 A collection has one vector size, so each kind has one collection per dimension, with cosine distance.
 Workspaces share the collections and are kept apart by a payload filter on `workspace_id` (and `tenant_id` and `model` for memories), each with a keyword index.
-A point's id is a UUID derived from the row's key (SHA-256 of the kind and the id, and the model for a memory), and the key is in the payload, so the same row always lands on the same point.
+A point's id is a UUID derived from this Engine's id and the row's key (SHA-256 of the `engine_id`, the kind and the id, and the model for a memory), and the key is in the payload, so the same row of the same Engine always lands on the same point, and two peer-synced Engines that hold the same row never write the same point.
+An earlier build left the Engine out of the id; after an upgrade the count comparison sees each row twice, falls back to the embedded vectors and queues a sync, which writes the new ids and sweeps the old ones.
 
 ### Engines sharing a Qdrant
 
 Each Engine owns its points, by name and by payload.
 The default prefix is `oe_` and the hex of the Engine's replica id (`sync_identity.replica_id`, made once when its store is created and kept by backups), so two Engines never share a collection unless an operator gives them the same `OPTIMAL_QDRANT_COLLECTION_PREFIX`.
 Every point also carries `engine_id`, the replica id, and every count, search, orphan sweep and delete the Engine sends filters on it, so even Engines under one prefix never read, count or remove each other's points.
-A prefix must be lower case letters, digits, `_` and `-`, at most 64 characters: an invalid one stops the Engine at boot, and is never replaced by a default.
+A prefix must be lower case letters, digits, `_` and `-`, at most 64 characters: with `OPTIMAL_QDRANT_URL` set an invalid one stops the Engine at boot, and is never replaced by a default; without a URL it is unused and only reported.
 The inventory's `serving.config_error` names `invalid_prefix` (or `no_engine_identity`) when the projection cannot run.
 
 ### Writes
 
 Mirrors leave the write path.
 A stored vector, a chunk embedding batch and a memory embedding are queued after the SQLite write succeeds, and one process applies the queue in order, reading each row as it is then and upserting it; a write returns without waiting for Qdrant.
-Past 10,000 queued mirrors (`config :optimal_engine, :qdrant_projection, max_queue:`) a mirror is dropped and its workspace marked dirty, so a burst never blocks a request.
+Past 10,000 queued mirrors (`config :optimal_engine, :qdrant_projection, max_queue:`) a mirror is dropped and its workspace marked dirty, so a burst never blocks a request; a workspace already marked writes nothing more to the store, and a chunk embedding batch that spans workspaces marks each of them.
 A point written this way reaches Qdrant moments after the row; until it does, Qdrant-served search can miss that one change.
 
 A failed mirror never fails the write.
 It marks the workspace dirty and queues a `maintenance.qdrant_sync` job for it.
 A dirty workspace, and one with a sync queued or running, is searched through the embedded vectors until the sync completes, so a vector Qdrant could not replace (a re-embed during an outage, whose count stays the same) is never searched there.
 A completed sync clears only the marks made before it began; a workspace marked while it ran gets a follow-up pass from the same job.
-The mark is in memory and the job is durable: after a restart the queued job keeps the workspace on the embedded vectors until it has run.
+The mark is in memory and the job is durable: after a restart the queued job keeps the workspace on the embedded vectors until it has run. While a mark stays, the projection's retry timer queues the workspace's job again (one queued or running is found, not duplicated), so a job that died never leaves a workspace stale.
 
 Removals are durable and never wait on Qdrant.
-A deleted vector, a memory forgotten or hard deleted (every version of its chain, and the source chunk the erasure deleted with it), a memory version superseded by a new one, an archived workspace and a workspace moved to another Engine are written to `qdrant_pending_removals` (migration 89) and the request returns; the projection process applies each in order, behind the mirrors queued before it, and deletes the record once Qdrant has deleted the points.
-A removal Qdrant refuses stays recorded: the projection retries it on a timer (`retry_interval_ms`, one minute, and once at boot), queues a sync for an active workspace, and every sync retries the records first and fails while one remains.
+A deleted vector, a memory forgotten or hard deleted (every version of its chain, and the source chunk the erasure deleted with it), a memory version superseded by a new one, a context deleted (`Store.delete_context/1`), a row a peer's change deleted or made unsearchable, an archived workspace and a workspace moved to another Engine are written to `qdrant_pending_removals` (migration 89) and the request returns; the projection process applies each in order, behind the mirrors queued before it, and deletes the record once Qdrant has deleted the points.
+Where a transaction deletes the rows (a forget, a hard delete, an update, a context delete, a peer's batch, an archive), the record is written in that transaction, so the rows never go without it: a forget or an archive whose record cannot be written is not done.
+A removal Qdrant refuses stays recorded: the projection retries it on a timer (`retry_interval_ms`, one minute, and once at boot), queues a sync for an active workspace, and every sync retries the records first, then goes on whatever they answer.
+One refused `max_removal_attempts` times (100) is dead: kept with `dead_at` set, logged, and retried no more, so it never holds up the others or a sync; the orphan sweep of a full sync removes its points.
 Before a retry deletes anything it checks which of the named rows are searchable again (a vector stored anew, a workspace no longer archived) and leaves their points alone.
 Removals run whenever a Qdrant URL is configured, serving or not, and only ever name the Engine's own points.
-`OptimalEngine.Storage.Qdrant.Projection.remove_memory/1` is the durable removal of a memory's points, of every model, for any path that erases a memory.
+`OptimalEngine.Storage.Qdrant.Projection.remove_memories/2` is the durable removal of memories' points, of every model; a path that deletes rows in a transaction records it there with `OptimalEngine.Storage.Qdrant.Removals.record_in/5`.
 
 A row in an archived workspace is not searchable: it is neither mirrored nor counted, and the sync removes its points, so neither a sync nor a drift repair brings an archived workspace's vectors back.
 
@@ -402,7 +405,8 @@ After the rows are gone it records the same removal again, which takes a point a
 The comparison is kept for two minutes per scope (`config :optimal_engine, :qdrant_projection, count_ttl_ms:`); the local count reads indexes (contexts by workspace joined to the vector key, memory embeddings by scope), never the vectors.
 Every candidate is read back from SQLite in the searched workspace, with the type and node filters, and for memories only the latest and not forgotten, then scored with the same similarity over the stored vector.
 So the results have the same shape, filters and scores as the embedded search; a point whose row was deleted or moved is dropped.
-A search whose filters leave too few candidates in five pages, a request that fails, or a workspace whose counts differ reads the embedded vectors instead.
+A search whose filters leave too few candidates in five pages, a request that fails, or a workspace whose counts differ reads the embedded vectors instead; a search of a dimension Qdrant has no collection for falls back without marking Qdrant unhealthy.
+A scope the store holds no searchable rows of while Qdrant still holds points there queues a sync, and since equal counts do not prove equal sets, a workspace whose counts agree is synced anyway once a day (`verify_interval_ms`).
 Chunk reranking of the full-text candidates still reads `chunk_embeddings`: it scores only those candidates, never the whole workspace.
 
 ### Sync
@@ -416,11 +420,11 @@ bin/optimal maintenance qdrant_sync [--workspace <id>]      # in a release, Engi
 ```
 
 It upserts every searchable row, then deletes every one of the Engine's points whose row is gone, moved to another workspace, superseded, forgotten, or of another dimension.
-A completed pass clears the dirty marks made before it began.
+A completed pass clears the dirty marks made before it began. A run that finds Qdrant healthy forgets an unhealthy spell cached before it, and writes refused because Qdrant turned unhealthy during the run defer the job rather than fail it.
 Run it once after pointing an Engine that already holds vectors at Qdrant.
 
 `GET /api/storage/providers/qdrant?probe=true` reports `active` and `data_path: "serving"` (with `serves` `embedding_projection`, `vector_search`, `memory_search`) when Qdrant answered and the projection is on, and `available` with `data_path: "standby"` under `OPTIMAL_QDRANT_SERVING=off`.
-Its `serving` field gives the prefix, any configuration error, the cached health, the number of dirty workspaces and of pending removals, and counters since boot: points upserted and deleted, mirrors dropped past the queue limit, write failures, searches served and fallen back, and count differences found.
+Its `serving` field gives the prefix, any configuration error, the cached health, the number of dirty workspaces, of pending removals and of dead ones, and counters since boot: points upserted and deleted, mirrors dropped past the queue limit, write failures, searches served and fallen back, and count differences found.
 
 ## Storage Mutations
 

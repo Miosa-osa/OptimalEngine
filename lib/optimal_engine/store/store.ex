@@ -88,7 +88,35 @@ defmodule OptimalEngine.Store do
 
   def stats(), do: adapter().stats()
 
-  def delete_context(id), do: adapter().delete_context(id)
+  @doc """
+  Deletes a context by id. With the Qdrant projection configured, the removal
+  of its points (its vector's and its chunks') is recorded in the same
+  transaction as the delete and handed to the projection once it commits.
+  """
+  @spec delete_context(String.t()) :: :ok | {:error, term()}
+  def delete_context(id) when is_binary(id) do
+    if OptimalEngine.Storage.Qdrant.Projection.configured?() do
+      removals = OptimalEngine.Storage.Qdrant.Removals
+
+      result =
+        transaction(fn txn ->
+          with {:ok, _} <- txn_execute(txn, "DELETE FROM contexts WHERE id = ?1", [id]) do
+            removals.record_all_in(txn, removals.of_contexts([id]), [])
+          end
+        end)
+
+      case result do
+        {:ok, ids} ->
+          evict_cached([id])
+          removals.enqueue(ids)
+
+        {:error, _} = error ->
+          error
+      end
+    else
+      adapter().delete_context(id)
+    end
+  end
 
   def delete_signal(id), do: adapter().delete_signal(id)
 
@@ -232,15 +260,20 @@ defmodule OptimalEngine.Store do
   def insert_embeddings(rows) do
     case adapter().insert_embeddings(rows) do
       :ok ->
-        workspace =
-          Enum.find_value(rows, &(Map.get(&1, :workspace_id) || Map.get(&1, "workspace_id")))
-
+        # One mirror per workspace, so a mirror that has to be dropped marks
+        # each workspace it held dirty.
         rows
-        |> Enum.map(&(Map.get(&1, :chunk_id) || Map.get(&1, "chunk_id")))
-        |> Enum.filter(&is_binary/1)
-        |> then(
-          &OptimalEngine.Storage.Qdrant.Projection.mirror(:chunks, &1, workspace_id: workspace)
+        |> Enum.group_by(
+          &(Map.get(&1, :workspace_id) || Map.get(&1, "workspace_id")),
+          &(Map.get(&1, :chunk_id) || Map.get(&1, "chunk_id"))
         )
+        |> Enum.each(fn {workspace, chunks} ->
+          OptimalEngine.Storage.Qdrant.Projection.mirror(
+            :chunks,
+            Enum.filter(chunks, &is_binary/1),
+            workspace_id: workspace
+          )
+        end)
 
         :ok
 

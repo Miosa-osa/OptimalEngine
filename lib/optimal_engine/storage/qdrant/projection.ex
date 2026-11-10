@@ -62,6 +62,7 @@ defmodule OptimalEngine.Storage.Qdrant.Projection do
   @key_batch 500
   @max_queue 10_000
   @default_timeout 5_000
+  @default_identity_ttl 60_000
   @call_timeout 120_000
   @off ~w(0 false off no disabled)
   @prefix_env "OPTIMAL_QDRANT_COLLECTION_PREFIX"
@@ -80,10 +81,16 @@ defmodule OptimalEngine.Storage.Qdrant.Projection do
       :ok ->
         :ok
 
+      # Only an Engine that talks to Qdrant needs a valid prefix; without a URL
+      # the setting is unused, and the inventory reports it (`status/0`).
       {:error, {:invalid_prefix, _}} ->
-        raise ArgumentError,
+        if Qdrant.configured?(),
+          do:
+            raise(
+              ArgumentError,
               "#{@prefix_env} must be lower case letters, digits, _ and - (at most 64, " <>
                 "starting with a letter or digit); unset it to use this Engine's own prefix"
+            )
     end
 
     :ets.new(@table, [
@@ -118,9 +125,14 @@ defmodule OptimalEngine.Storage.Qdrant.Projection do
   def handle_info(:retry_pending, state) do
     state = %{state | retry: nil}
 
-    if configured?() and Removals.pending_count() > 0 and Removals.retry_pending() != :ok,
-      do: {:noreply, arm(state)},
-      else: {:noreply, state}
+    failed? =
+      configured?() and Removals.pending_count() > 0 and Removals.retry_pending() != :ok
+
+    # A workspace still marked dirty gets its sync job again: the one its mark
+    # queued may have died (failed past its attempts, or been removed).
+    dirty? = Gate.requeue_dirty() > 0
+
+    if failed? or dirty?, do: {:noreply, arm(state)}, else: {:noreply, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -215,21 +227,34 @@ defmodule OptimalEngine.Storage.Qdrant.Projection do
     Keyword.get(settings(), :enabled, true) != false and not serving_off?() and configured?()
   end
 
-  @doc "This Engine's id in every payload and filter: its replica id, or nil when the store has none."
+  @doc """
+  This Engine's id in every payload, point id and filter: its replica id, or
+  nil when the store has none. Read again once a minute
+  (`:identity_ttl_ms`), so a rotated replica id is noticed.
+  """
   @spec engine_id() :: String.t() | nil
   def engine_id do
+    now = System.monotonic_time(:millisecond)
+
     case lookup(:engine_id) do
-      {_, id} ->
+      {expires, id} when is_integer(expires) and expires > now ->
         id
 
-      nil ->
+      _ ->
         id =
           case Store.raw_query("SELECT replica_id FROM sync_identity WHERE id = 1", []) do
             {:ok, [[id]]} when is_binary(id) and id != "" -> id
             _ -> nil
           end
 
-        if id, do: store(:engine_id, :infinity, id)
+        if id,
+          do:
+            store(
+              :engine_id,
+              now + Keyword.get(settings(), :identity_ttl_ms, @default_identity_ttl),
+              id
+            )
+
         id
     end
   rescue
@@ -295,12 +320,24 @@ defmodule OptimalEngine.Storage.Qdrant.Projection do
   # ── ids ─────────────────────────────────────────────────────────────────
 
   @doc """
-  The Qdrant point id of an Engine row: a UUID from SHA-256 of the kind and
-  the key. A memory's key is `{memory_id, model}`.
+  The Qdrant point id of an Engine row: a UUID from SHA-256 of this Engine's
+  id, the kind and the key. A memory's key is `{memory_id, model}`. The Engine
+  is in the id because peer-synced Engines hold rows under the same keys: two
+  of them sharing a collection prefix must not write the same point.
+
+  An earlier build left the Engine out. Its points carry this Engine's
+  `engine_id` in their payload under the old ids; the orphan sweep of a full
+  sync deletes any point whose id is not the one its row gets now, after the
+  upsert phases wrote the new ones (the gate's count comparison sees the
+  doubled count first, falls back to the embedded vectors and queues that
+  sync).
   """
   @spec point_id(kind(), String.t() | {String.t(), String.t()}) :: String.t()
-  def point_id(:memories, {memory_id, model}), do: uuid("memories\0#{memory_id}\0#{model}")
-  def point_id(kind, key) when kind in @kinds and is_binary(key), do: uuid("#{kind}\0#{key}")
+  def point_id(:memories, {memory_id, model}),
+    do: uuid("#{engine_id()}\0memories\0#{memory_id}\0#{model}")
+
+  def point_id(kind, key) when kind in @kinds and is_binary(key),
+    do: uuid("#{engine_id()}\0#{kind}\0#{key}")
 
   defp uuid(text) do
     <<a::binary-4, b::binary-2, c::binary-2, d::binary-2, e::binary-6, _::binary>> =
@@ -416,6 +453,15 @@ defmodule OptimalEngine.Storage.Qdrant.Projection do
   @spec remove_memories([String.t()], keyword()) :: :ok | {:error, term()}
   def remove_memories(memory_ids, opts \\ []) when is_list(memory_ids),
     do: Removals.remove(:memories, "memory_id", memory_ids, opts)
+
+  @doc """
+  The removals of this Engine's points of a workspace, of every kind, as
+  `Removals.record_all_in/3` takes them (for an archive that records them in
+  its own transaction).
+  """
+  @spec workspace_removals(String.t()) :: [{kind(), String.t(), [String.t()]}]
+  def workspace_removals(workspace_id),
+    do: Enum.map(@kinds, &{&1, "workspace_id", [workspace_id]})
 
   @doc "The durable removal of this Engine's points of a workspace, of every kind, serving or not."
   @spec remove_workspace(String.t()) :: :ok | {:error, term()}
@@ -779,6 +825,7 @@ defmodule OptimalEngine.Storage.Qdrant.Projection do
       health: health,
       dirty_workspaces: Gate.dirty_count(),
       pending_removals: Removals.pending_count(),
+      dead_removals: Removals.dead_count(),
       counters:
         Map.new(
           ~w(upserted deleted dropped write_failures searches_served searches_fallback drift)a,

@@ -10,7 +10,9 @@ defmodule OptimalEngine.Storage.Qdrant.Gate do
   the searched scope as SQLite holds searchable rows
   (`OptimalEngine.Storage.Qdrant.Projection.from_sql/1`). The comparison is
   kept two minutes per scope by default (`:count_ttl_ms`) and reads indexes,
-  never the vectors.
+  never the vectors. A scope the store holds nothing of while Qdrant does
+  queues a sync, and equal counts are verified by a sync once a day
+  (`:verify_interval_ms`), since they do not prove equal sets.
 
   A dirty mark carries a generation (`stamp/0`), never the wall clock. A sync that
   completes clears the marks made before it began; a mark made while it ran
@@ -27,6 +29,7 @@ defmodule OptimalEngine.Storage.Qdrant.Gate do
 
   @default_health_ttl_ms 30_000
   @default_count_ttl_ms 120_000
+  @default_verify_interval_ms 86_400_000
 
   # ── health ──────────────────────────────────────────────────────────────
 
@@ -82,23 +85,58 @@ defmodule OptimalEngine.Storage.Qdrant.Gate do
   failed before its rows could be read, or one dropped past the queue limit
   without a workspace) marks every active workspace.
   """
+  #
+  # A workspace already marked only takes the newer generation: its job was
+  # queued with the first mark (and the retry timer queues it again while the
+  # mark stays, `requeue_dirty/0`), so a burst of dropped mirrors writes to the
+  # store once. `:all` lists the workspaces at most once a second.
   @spec mark_dirty(String.t() | :all) :: :ok
   def mark_dirty(:all) do
-    case Store.raw_query("SELECT id FROM workspaces WHERE status = 'active' ORDER BY id", []) do
-      {:ok, rows} ->
-        Enum.each(rows, fn [id] -> mark_dirty(id) end)
+    now = now()
 
-      {:error, reason} ->
-        Logger.error("[Qdrant] could not list workspaces to mark dirty: #{inspect(reason)}")
+    case Projection.lookup(:dirty_all) do
+      {at, _} when is_integer(at) and now - at < 1_000 ->
+        :ok
+
+      _ ->
+        Projection.store(:dirty_all, now, true)
+
+        case Store.raw_query("SELECT id FROM workspaces WHERE status = 'active' ORDER BY id", []) do
+          {:ok, rows} ->
+            Enum.each(rows, fn [id] -> mark_dirty(id) end)
+
+          {:error, reason} ->
+            Logger.error("[Qdrant] could not list workspaces to mark dirty: #{inspect(reason)}")
+        end
     end
 
     invalidate_all()
   end
 
   def mark_dirty(workspace_id) when is_binary(workspace_id) do
+    already? = dirty?(workspace_id)
     Projection.store({:dirty, workspace_id}, Projection.generation(1), true)
     invalidate(workspace_id)
-    queue_sync(workspace_id)
+
+    if already? do
+      :ok
+    else
+      Projection.schedule_retry()
+      queue_sync(workspace_id)
+    end
+  end
+
+  @doc """
+  Queues the sync job of every workspace still marked dirty (one already
+  queued or running is found, not duplicated) and returns how many are
+  marked. The projection's retry timer calls it, so a mark whose job died is
+  repaired.
+  """
+  @spec requeue_dirty() :: non_neg_integer()
+  def requeue_dirty do
+    marks = Projection.match({{:dirty, :_}, :_, :_})
+    Enum.each(marks, fn {{:dirty, workspace_id}, _, _} -> queue_sync(workspace_id) end)
+    length(marks)
   end
 
   @doc """
@@ -153,6 +191,7 @@ defmodule OptimalEngine.Storage.Qdrant.Gate do
 
         _ ->
           value = not sync_active?(workspace_id) and compare(kind, scope)
+          if value, do: verify_when_due(workspace_id, now)
           Projection.store(key, now + count_ttl(), value)
           value
       end
@@ -181,19 +220,50 @@ defmodule OptimalEngine.Storage.Qdrant.Gate do
     _, _ -> false
   end
 
+  # Equal counts do not prove equal sets (a point missing and an orphan
+  # cancel out), so a workspace whose counts agree is synced anyway once every
+  # `:verify_interval_ms` (a day by default) after it was last synced, or
+  # first compared since boot; it is searched through Qdrant meanwhile, and
+  # any candidate Qdrant proposes is read back from the store.
+  defp verify_when_due(workspace_id, now) do
+    since =
+      case Projection.lookup({:verified, workspace_id}) do
+        {at, _} when is_integer(at) ->
+          at
+
+        _ ->
+          Projection.store({:verified, workspace_id}, now, true)
+          now
+      end
+
+    if now - since >= verify_interval() do
+      Projection.store({:verified, workspace_id}, now, true)
+      queue_sync(workspace_id)
+    end
+  end
+
+  @doc false
+  # A completed sync of the workspace verified it.
+  def verified(workspace_id), do: Projection.store({:verified, workspace_id}, now(), true)
+
+  # A scope with no searchable rows is answered by the embedded search; if
+  # Qdrant still holds points there (rows removed behind the Engine's back),
+  # a sync is queued to remove them.
   defp compare(kind, scope) do
-    with {:ok, local} when local > 0 <- local_count(kind, scope),
+    with {:ok, local} <- local_count(kind, scope),
          {:ok, remote} <- remote_total(kind, scope) do
-      if local == remote do
-        true
-      else
-        drift(kind, scope, local, remote)
-        false
+      cond do
+        local == remote and local > 0 ->
+          true
+
+        local == remote ->
+          false
+
+        true ->
+          drift(kind, scope, local, remote)
+          false
       end
     else
-      {:ok, 0} ->
-        false
-
       {:error, reason} ->
         mark_unhealthy(reason)
         false
@@ -262,5 +332,9 @@ defmodule OptimalEngine.Storage.Qdrant.Gate do
   defp settings, do: Application.get_env(:optimal_engine, :qdrant_projection, [])
   defp health_ttl, do: Keyword.get(settings(), :health_ttl_ms, @default_health_ttl_ms)
   defp count_ttl, do: Keyword.get(settings(), :count_ttl_ms, @default_count_ttl_ms)
+
+  defp verify_interval,
+    do: Keyword.get(settings(), :verify_interval_ms, @default_verify_interval_ms)
+
   defp now, do: System.monotonic_time(:millisecond)
 end

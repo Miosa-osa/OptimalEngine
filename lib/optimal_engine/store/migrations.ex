@@ -807,8 +807,9 @@ defmodule OptimalEngine.Store.Migrations do
   # while Qdrant was unreachable. Each row names this Engine's points by a
   # payload field (`OptimalEngine.Storage.Qdrant.Projection`) and stays until
   # Qdrant has deleted them; the projection retries on a timer and every sync
-  # retries first. Engine state, never replicated. Additive. The version is
-  # provisional, like the ones above.
+  # retries first; one that still fails after `:max_removal_attempts` is kept
+  # with `dead_at` set and retried no more. Engine state, never replicated.
+  # Additive. The version is provisional, like the ones above.
   @qdrant_pending_removals_version 89
 
   defp migration_qdrant_pending_removals do
@@ -826,7 +827,8 @@ defmodule OptimalEngine.Store.Migrations do
           workspace_id TEXT,
           attempts INTEGER NOT NULL DEFAULT 0,
           last_error TEXT,
-          created_at TEXT NOT NULL
+          created_at TEXT NOT NULL,
+          dead_at TEXT
         )
         """},
        {"idx_qdrant_pending_removals_created",

@@ -33,6 +33,8 @@ defmodule OptimalEngine.Workspace do
   """
 
   alias OptimalEngine.Authority.Evidence
+  alias OptimalEngine.Storage.Qdrant.Projection, as: QdrantProjection
+  alias OptimalEngine.Storage.Qdrant.Removals, as: QdrantRemovals
   alias OptimalEngine.Store
   alias OptimalEngine.Store.Catalog
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
@@ -784,17 +786,15 @@ defmodule OptimalEngine.Workspace do
   """
   @spec archive(String.t()) :: :ok | {:error, term()}
   def archive(id) when is_binary(id) do
-    case Store.raw_query(
-           "UPDATE workspaces SET status = 'archived', archived_at = datetime('now') WHERE id = ?1",
-           [id]
-         ) do
-      {:ok, _} ->
+    case archive_row(id) do
+      {:ok, removals} ->
+        # The workspace's points leave the Qdrant projection with it: the
+        # removal was recorded with the archive, so it is applied (and
+        # retried until Qdrant takes it) even after a crash here.
+        QdrantProjection.invalidate(id)
+        QdrantRemovals.enqueue(removals)
         forget_in_nats(id)
         forget_unheld_connector_packages(id)
-        # The workspace's vectors leave the Qdrant projection with it. A
-        # removal that fails is logged; nothing archived is ever searched
-        # through Qdrant, and the next sync removes what is left.
-        OptimalEngine.Storage.Qdrant.Projection.remove_workspace(id)
 
         cache =
           case Cache.purge_workspace(id, :archive) do
@@ -809,6 +809,29 @@ defmodule OptimalEngine.Workspace do
       other ->
         other
     end
+  end
+
+  # The status change and, with the Qdrant projection configured, the record
+  # of the removal of the workspace's points, in one transaction: an archive
+  # whose removal cannot be recorded is not done.
+  defp archive_row(id) do
+    qdrant? = QdrantProjection.configured?()
+
+    Store.transaction(fn txn ->
+      with {:ok, _} <-
+             Store.txn_execute(
+               txn,
+               "UPDATE workspaces SET status = 'archived', archived_at = datetime('now') WHERE id = ?1",
+               [id]
+             ) do
+        if qdrant?,
+          do:
+            QdrantRemovals.record_all_in(txn, QdrantProjection.workspace_removals(id),
+              workspace_id: id
+            ),
+          else: {:ok, []}
+      end
+    end)
   end
 
   # A source package a connector's fenced ingest left in the workspace (no
