@@ -1,9 +1,14 @@
 defmodule OptimalEngine.Storage.NATS.DeadLetters do
   @moduledoc """
   Where a work-queue item goes when its handling keeps failing: stream
-  `<NAMESPACE>_DEAD_LETTERS` (limits retention, file storage, kept until an
-  operator requeues or purges it), one subject per flow
-  (`<namespace>.dead.<flow>`).
+  `<NAMESPACE>_DEAD_LETTERS` (limits retention, file storage), one subject per
+  flow (`<namespace>.dead.<flow>`). A letter stays until an operator requeues
+  it, or until it is older than `OPTIMAL_NATS_DEAD_LETTER_MAX_AGE_HOURS`
+  (720 hours, 30 days, by default; `0` keeps letters until requeued): that
+  is the stream's `max_age`, so JetStream purges an expired letter itself, and
+  an existing stream takes a changed limit when it is next provisioned.
+  `forget/4` removes the letters a match names (an erased workspace's, a
+  deleted connector's).
 
   A dead letter keeps the item's payload as it was queued and says why, in
   headers: `Optimal-Flow`, `Optimal-Subject` (where it was queued),
@@ -21,10 +26,14 @@ defmodule OptimalEngine.Storage.NATS.DeadLetters do
   `mix optimal.nats` call these for the Engine operator.
   """
 
+  require Logger
+
   alias OptimalEngine.Storage.NATS
   alias OptimalEngine.Storage.NATS.{Connection, JetStream}
 
   @default_limit 50
+  @max_age_env "OPTIMAL_NATS_DEAD_LETTER_MAX_AGE_HOURS"
+  @default_max_age_hours 720
   @max_limit 500
   @error_bytes 500
 
@@ -32,14 +41,45 @@ defmodule OptimalEngine.Storage.NATS.DeadLetters do
   @spec stream(String.t()) :: String.t()
   def stream(namespace), do: NATS.stream_name(namespace, "DEAD_LETTERS")
 
-  @doc "Makes sure the dead-letter stream exists."
-  @spec ensure(GenServer.server(), String.t()) :: :ok | {:error, term()}
-  def ensure(conn, namespace) do
+  @doc """
+  How long a dead letter is kept, in milliseconds, from
+  `OPTIMAL_NATS_DEAD_LETTER_MAX_AGE_HOURS` (default #{@default_max_age_hours});
+  `0` keeps letters until they are requeued. A value that is not a whole
+  number of hours is the default.
+  """
+  @spec max_age_ms() :: non_neg_integer()
+  def max_age_ms do
+    case System.get_env(@max_age_env) do
+      nil ->
+        @default_max_age_hours * 3_600_000
+
+      value ->
+        case Integer.parse(String.trim(value)) do
+          {hours, ""} when hours >= 0 ->
+            hours * 3_600_000
+
+          _invalid ->
+            Logger.warning(
+              "#{@max_age_env}=#{inspect(value)} is not a whole number of hours; dead letters are kept #{@default_max_age_hours} hours"
+            )
+
+            @default_max_age_hours * 3_600_000
+        end
+    end
+  end
+
+  @doc """
+  Makes sure the dead-letter stream exists, with the age limit `max_age_ms/0`
+  (or `:max_age_ms`), so an expired letter is purged by JetStream.
+  """
+  @spec ensure(GenServer.server(), String.t(), keyword()) :: :ok | {:error, term()}
+  def ensure(conn, namespace, opts \\ []) do
     config = %{
       name: stream(namespace),
       subjects: ["#{namespace}.dead.>"],
       retention: "limits",
-      storage: "file"
+      storage: "file",
+      max_age_ms: Keyword.get_lazy(opts, :max_age_ms, &max_age_ms/0)
     }
 
     with {:ok, _outcome, _info} <- JetStream.ensure_stream(conn, config), do: :ok
@@ -137,6 +177,66 @@ defmodule OptimalEngine.Storage.NATS.DeadLetters do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  @doc """
+  Removes every dead letter of `flow` whose queued payload (decoded JSON)
+  `match?` accepts. Returns how many went; a stream that does not exist has
+  none.
+  """
+  @spec forget(GenServer.server(), String.t(), String.t(), (map() -> boolean())) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def forget(conn, namespace, flow, match?) when is_function(match?, 1) do
+    scan(conn, stream(namespace), subject(namespace, flow), 1, match?, 0)
+  end
+
+  @doc false
+  # Every message of `stream` on `subject` from sequence `from`, deleted when
+  # its payload matches. Shared with the work queue's removals
+  # (`OptimalEngine.Storage.NATS.IntakeQueue.forget_workspace/4`).
+  @spec scan(
+          GenServer.server(),
+          String.t(),
+          String.t(),
+          pos_integer(),
+          (map() -> boolean()),
+          non_neg_integer()
+        ) :: {:ok, non_neg_integer()} | {:error, term()}
+  def scan(conn, stream, subject, from, match?, removed) do
+    case JetStream.get_message(conn, stream, next_by_subject: subject, from: from) do
+      {:ok, message} ->
+        with {:ok, removed} <- maybe_delete(conn, stream, message, match?, removed) do
+          scan(conn, stream, subject, message.seq + 1, match?, removed)
+        end
+
+      {:error, :not_found} ->
+        {:ok, removed}
+
+      {:error, {:jetstream, %{err_code: 10_059}}} ->
+        {:ok, removed}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp maybe_delete(conn, stream, message, match?, removed) do
+    payload =
+      case Jason.decode(message.payload) do
+        {:ok, %{} = map} -> map
+        _ -> %{}
+      end
+
+    if match?.(payload) do
+      case JetStream.delete_message(conn, stream, message.seq) do
+        :ok -> {:ok, removed + 1}
+        # Acknowledged or expired in between: gone all the same.
+        {:error, :not_found} -> {:ok, removed}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:ok, removed}
     end
   end
 

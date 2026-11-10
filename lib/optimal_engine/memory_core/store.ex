@@ -24,8 +24,83 @@ defmodule OptimalEngine.MemoryCore.Store do
     SourcePackage
   }
 
-  @spec insert_source_package(SourcePackage.t()) :: :ok | {:error, term()}
-  def insert_source_package(%SourcePackage{} = source_package) do
+  @doc """
+  Writes the source package. With `fence:` (`OptimalEngine.Connectors.IngestFence`)
+  the workspace and the connector are checked again in the same transaction,
+  and the package is not written once either is gone.
+  """
+  @spec insert_source_package(SourcePackage.t(), keyword()) ::
+          :ok | {:ok, [inserted: boolean()]} | {:error, term()}
+  def insert_source_package(%SourcePackage{} = source_package, opts \\ []) do
+    {sql, params} = source_package_insert(source_package)
+
+    case Keyword.get(opts, :fence) do
+      nil ->
+        Store.raw_execute(sql, params)
+
+      fence ->
+        Store.transaction(fn txn ->
+          with :ok <- OptimalEngine.Connectors.IngestFence.check_in(txn, fence),
+               {:ok, count} <- Store.txn_execute(txn, sql, params) do
+            {:ok, count}
+          end
+        end)
+        |> case do
+          # Whether this write inserted it (the package may already be there).
+          {:ok, count} -> {:ok, inserted: count > 0}
+          {:error, _} = error -> error
+        end
+    end
+  end
+
+  # A package no context was made from and no claim was taken from.
+  @unheld """
+  NOT EXISTS (SELECT 1 FROM contexts c
+               WHERE c.workspace_id = p.workspace_id
+                 AND (CASE WHEN json_valid(c.metadata) THEN json_extract(c.metadata, '$.source_package_id') END) = p.id)
+  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.source_package_id = p.id)
+  """
+
+  @doc "Deletes the source package `id` unless a context or a claim holds it."
+  @spec delete_unheld_source_package(String.t()) :: :ok | {:error, term()}
+  def delete_unheld_source_package(id) when is_binary(id) do
+    with {:ok, _} <-
+           Store.raw_query(
+             "DELETE FROM source_packages WHERE id IN (SELECT p.id FROM source_packages p WHERE p.id = ?1 AND #{@unheld})",
+             [id]
+           ),
+         do: :ok
+  end
+
+  @doc """
+  Deletes the source packages a connector's intake wrote (`source_system`
+  `connector:<id>`) that no context or claim holds: those a fenced ingest left
+  when its workspace or connector went. `workspace_id:` takes every
+  connector's in that workspace; `tenant_id:` with `connector_id:` takes that
+  connector's. Returns how many went.
+  """
+  @spec delete_unheld_connector_packages(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def delete_unheld_connector_packages(opts) do
+    {where, params} =
+      case {opts[:workspace_id], opts[:tenant_id], opts[:connector_id]} do
+        {workspace, _, nil} when is_binary(workspace) ->
+          {"p.workspace_id = ?1 AND p.source_system LIKE 'connector:%'", [workspace]}
+
+        {_, tenant, connector} when is_binary(tenant) and is_binary(connector) ->
+          {"p.tenant_id = ?1 AND p.source_system = ?2", [tenant, "connector:" <> connector]}
+      end
+
+    Store.raw_query(
+      "DELETE FROM source_packages WHERE id IN (SELECT p.id FROM source_packages p WHERE #{where} AND #{@unheld}) RETURNING id",
+      params
+    )
+    |> case do
+      {:ok, rows} -> {:ok, length(rows)}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp source_package_insert(%SourcePackage{} = source_package) do
     sql = """
     INSERT OR IGNORE INTO source_packages (
       id, tenant_id, workspace_id, source_type, source_class, source_system,
@@ -42,30 +117,31 @@ defmodule OptimalEngine.MemoryCore.Store do
     )
     """
 
-    Store.raw_execute(sql, [
-      source_package.id,
-      source_package.tenant_id,
-      source_package.workspace_id,
-      source_package.source_type,
-      source_package.source_class,
-      source_package.source_system,
-      source_package.source_uri,
-      source_package.source_time,
-      source_package.received_at,
-      source_package.content_hash,
-      source_package.raw_text,
-      source_package.verbatim_archive_uri,
-      source_package.trust_label,
-      source_package.retention_class,
-      source_package.access_policy_id,
-      JSON.list(source_package.security_labels),
-      JSON.list(source_package.partition_ids),
-      source_package.quarantine_state,
-      JSON.map(source_package.metadata),
-      source_package.created_by,
-      source_package.created_at,
-      source_package.updated_at
-    ])
+    {sql,
+     [
+       source_package.id,
+       source_package.tenant_id,
+       source_package.workspace_id,
+       source_package.source_type,
+       source_package.source_class,
+       source_package.source_system,
+       source_package.source_uri,
+       source_package.source_time,
+       source_package.received_at,
+       source_package.content_hash,
+       source_package.raw_text,
+       source_package.verbatim_archive_uri,
+       source_package.trust_label,
+       source_package.retention_class,
+       source_package.access_policy_id,
+       JSON.list(source_package.security_labels),
+       JSON.list(source_package.partition_ids),
+       source_package.quarantine_state,
+       JSON.map(source_package.metadata),
+       source_package.created_by,
+       source_package.created_at,
+       source_package.updated_at
+     ]}
   end
 
   @spec insert_derivation_entry(DerivationLedgerEntry.t()) :: :ok | {:error, term()}

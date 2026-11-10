@@ -28,6 +28,19 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   Refusals at consumption are not in the pull's `connector_runs` row (the
   pull has finished by then); they are in this queue's `terminated` count
   and the log.
+
+  ## What is erased leaves the queue
+
+  A queued Signal and a dead letter hold connector content that was taken in
+  and not ingested. When its workspace is archived or moved away
+  (`forget_workspace/4`) or its connector deleted (`forget_connector/3`),
+  every such item goes: the queued ones of the tenant on `<NAMESPACE>_INTAKE`
+  and the intake dead letters, each matched by the workspace and connector it
+  was queued for. The request is written first as an `events` row (`kind =
+  'nats_intake_purge_requested'`) and done at once when NATS is reachable,
+  otherwise when the queue is next provisioned (`process_requests/2`), so a
+  removal asked for during an outage, or across a restart, is not lost; each
+  one done is a `nats_purge` event.
   """
 
   @behaviour OptimalEngine.Storage.NATS.WorkQueue
@@ -36,7 +49,11 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
 
   alias OptimalEngine.Connectors.{PullScheduler, Rows}
   alias OptimalEngine.{Signal, Store}
-  alias OptimalEngine.Storage.NATS.{Protocol, WorkQueue}
+  alias OptimalEngine.Storage.NATS
+  alias OptimalEngine.Storage.NATS.{Connection, DeadLetters, Protocol, WorkQueue}
+  alias OptimalEngine.Tenancy.Tenant
+
+  @request_kind "nats_intake_purge_requested"
 
   @doc false
   def child_spec(opts), do: WorkQueue.child_spec({__MODULE__, opts})
@@ -68,10 +85,12 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   defp do_offer(_server, [], _scope, queued), do: {Enum.reverse(queued), [], nil}
 
   defp do_offer(server, [signal | more] = signals, scope, queued) do
-    tenant = Map.get(scope, :tenant_id)
+    # A scope without a tenant is the default tenant's, on the subject and in
+    # the payload, where a removal for the default tenant looks (`purge/3`).
+    tenant = Map.get(scope, :tenant_id) || Tenant.default_id()
     connector = Map.get(scope, :connector_id)
 
-    token = "#{Protocol.token(tenant || "")}.#{Protocol.token(connector || "")}"
+    token = "#{Protocol.token(tenant)}.#{Protocol.token(connector || "")}"
 
     # A Signal that cannot be put on the wire (content that is not UTF-8) is
     # left to the in-process path with the rest, in order.
@@ -97,6 +116,408 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
     "#{connector}:sha256:" <> Base.encode16(hash, case: :lower)
   end
 
+  @doc """
+  Removes what the workspace's connectors queued and did not ingest: queued
+  Signals and intake dead letters queued for `workspace_id` (or by one of its
+  connectors). `{:ok, %{queued_purged:, dead_letters_removed:}}` when done,
+  `{:ok, %{pending: true}}` when NATS is not reachable now (done on the next
+  provisioning), `{:ok, %{state: "off"}}` without the intake flow. Options:
+  `:connection`, `:namespace` (tests). Never raises.
+  """
+  @spec forget_workspace(String.t(), String.t(), String.t(), keyword()) :: {:ok, map()}
+  def forget_workspace(tenant_id, workspace_id, reason, opts \\ []) do
+    connectors =
+      case Store.raw_query(
+             "SELECT id FROM connectors WHERE tenant_id = ?1 AND workspace_id = ?2",
+             [tenant_id, workspace_id]
+           ) do
+        {:ok, rows} -> List.flatten(rows)
+        _ -> []
+      end
+
+    forget(
+      %{
+        "tenant_id" => tenant_id,
+        "workspace_id" => workspace_id,
+        "connector_ids" => connectors,
+        "reason" => reason
+      },
+      "workspace:" <> workspace_id,
+      opts
+    )
+  end
+
+  @doc "Removes what one connector queued and did not ingest, as `forget_workspace/4` does."
+  @spec forget_connector(String.t(), String.t(), keyword()) :: {:ok, map()}
+  def forget_connector(tenant_id, connector_id, opts \\ []) do
+    forget(
+      %{
+        "tenant_id" => tenant_id,
+        "workspace_id" => nil,
+        "connector_ids" => [connector_id],
+        "reason" => "connector_deleted"
+      },
+      "connector:" <> connector_id,
+      opts
+    )
+  end
+
+  defp forget(request, target, opts) do
+    with {:ok, namespace} <- namespace(opts),
+         true <- Keyword.has_key?(opts, :connection) or NATS.flow?("intake") do
+      conn = Keyword.get(opts, :connection, default_conn())
+
+      case record_request(namespace, request, target) do
+        {:ok, id} -> forget_now(conn, id, namespace, request)
+        {:error, reason} -> {:error, {:request_not_recorded, reason}}
+      end
+    else
+      _off -> {:ok, %{state: "off"}}
+    end
+  end
+
+  # Recorded: a failure from here on is retried (`periodic/2`, `on_provisioned/2`).
+  defp forget_now(conn, id, namespace, request) do
+    if Connection.connected?(conn) do
+      case purge(conn, namespace, request) do
+        {:ok, counts} ->
+          # Purged either way; a request whose completion was not written is
+          # purged again by the next run, which finds nothing more.
+          _ = done(id, namespace, request, counts)
+          {:ok, counts}
+
+        {:error, reason} ->
+          Logger.warning("[NATS] intake removal #{id} not done yet: #{inspect(reason)}")
+          {:ok, %{pending: true}}
+      end
+    else
+      {:ok, %{pending: true}}
+    end
+  rescue
+    error ->
+      Logger.warning("[NATS] intake removal #{id} not done yet: #{Exception.message(error)}")
+      {:ok, %{pending: true}}
+  catch
+    :exit, _ -> {:ok, %{pending: true}}
+  end
+
+  @doc """
+  Does every intake removal still pending in `namespace`; the result is the
+  counts of each done, by request id. One that fails stays pending.
+  """
+  @spec process_requests(GenServer.server(), String.t()) :: {:ok, map()}
+  def process_requests(conn, namespace) do
+    expire_foreign(namespace)
+    {done, skipped} = process_pages(conn, namespace, 0, %{}, 0)
+    skipped(skipped)
+    {:ok, done}
+  end
+
+  @page 500
+
+  # Every pending request of the namespace, a page at a time after the last id
+  # read: a request that stays pending (its purge failed, or it could not be
+  # set aside) is passed over, so a page of them never keeps the requests
+  # after it from being read.
+  defp process_pages(conn, namespace, after_id, done, skipped) do
+    rows =
+      case Store.raw_query(
+             """
+             SELECT r.id, r.tenant_id, r.metadata FROM events r
+             WHERE r.kind = ?1
+               AND (CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.namespace') END) = ?2
+               AND r.id > ?3
+               AND NOT EXISTS (
+                 SELECT 1 FROM events d
+                 WHERE d.kind = 'nats_purge' AND d.target_uri = 'nats-intake-purge-request:' || CAST(r.id AS TEXT)
+               )
+             ORDER BY r.id
+             LIMIT #{@page}
+             """,
+             [@request_kind, namespace, after_id]
+           ) do
+        {:ok, rows} ->
+          rows
+
+        {:error, reason} ->
+          Logger.warning("[NATS] intake removals not read: #{inspect(reason)}")
+          []
+      end
+
+    # Another namespace's requests are another Engine's: they are not read
+    # here, so they never fill this one's page. A request that cannot be read
+    # is set aside (recorded done, with why).
+    {done, skipped} =
+      Enum.reduce(rows, {done, skipped}, fn [id, row_tenant, meta], {done, skipped} ->
+        case request_of(id, row_tenant, meta) do
+          :malformed ->
+            {done, skipped}
+
+          {:malformed, :not_set_aside} ->
+            {done, skipped + 1}
+
+          request ->
+            with {:ok, counts} <- purge(conn, namespace, request),
+                 :ok <- done(id, namespace, request, counts) do
+              {Map.put(done, id, counts), skipped}
+            else
+              _ -> {done, skipped}
+            end
+        end
+      end)
+
+    case rows do
+      rows when length(rows) == @page ->
+        [[last | _] | _] = Enum.reverse(rows)
+        process_pages(conn, namespace, last, done, skipped)
+
+      _ ->
+        {done, skipped}
+    end
+  end
+
+  # A request's metadata as `purge/3` reads it, or `:malformed` (set aside).
+  defp request_of(id, row_tenant, meta) do
+    with {:ok, %{} = request} <- Jason.decode(meta || ""),
+         true <- optional_string?(request["tenant_id"]),
+         true <- optional_string?(request["workspace_id"]),
+         true <- is_nil(request["connector_ids"]) or strings?(request["connector_ids"]),
+         true <- is_binary(request["workspace_id"]) or is_list(request["connector_ids"]) do
+      request
+    else
+      _ ->
+        case set_aside(id, row_tenant, "malformed") do
+          :ok ->
+            Logger.warning("[NATS] intake removal #{id} is malformed; set aside")
+            :malformed
+
+          _ ->
+            {:malformed, :not_set_aside}
+        end
+    end
+  end
+
+  defp optional_string?(value), do: is_nil(value) or is_binary(value)
+  defp strings?(values), do: is_list(values) and Enum.all?(values, &is_binary/1)
+
+  # A namespace an operator recorded as retired (`retire_namespace/1`): no
+  # Engine will take its requests, so they are set aside ("retired"). A
+  # request of any other namespace stays pending, however old: its Engine may
+  # be down or paused, and an erasure that did not happen never reads as done.
+  @retired_kind "nats_namespace_retired"
+  @waiting_after_days 7
+
+  @doc """
+  Records that no Engine serves `namespace` any more: its pending intake
+  removals are set aside on the next pass of any Engine, with a warning.
+  Their queued Signals and dead letters are not purged by this: only an
+  Engine of that namespace can purge them.
+  """
+  @spec retire_namespace(String.t()) :: :ok | {:error, term()}
+  def retire_namespace(namespace) when is_binary(namespace) and namespace != "" do
+    case Store.raw_query(
+           "INSERT INTO events (tenant_id, principal, kind, target_uri, metadata) VALUES (?1, 'system:nats', ?2, ?3, ?4)",
+           [
+             Tenant.default_id(),
+             @retired_kind,
+             "nats-namespace:" <> namespace,
+             Jason.encode!(%{namespace: namespace})
+           ]
+         ) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  Readiness: `{:warn, {:nats_intake_removals_pending, count}}` while intake
+  removals of any namespace not retired have waited more than
+  #{@waiting_after_days} days (an Engine down, or NATS unreachable), else `:ok`.
+  """
+  @spec pending_check() :: :ok | {:warn, {:nats_intake_removals_pending, pos_integer()}}
+  def pending_check do
+    case Store.raw_query(
+           """
+           SELECT count(*) FROM events r
+           WHERE r.kind = ?1
+             AND r.ts < datetime('now', ?2)
+             AND NOT EXISTS (
+               SELECT 1 FROM events d
+               WHERE d.kind = 'nats_purge' AND d.target_uri = 'nats-intake-purge-request:' || CAST(r.id AS TEXT)
+             )
+           """,
+           [@request_kind, "-#{@waiting_after_days} days"]
+         ) do
+      {:ok, [[0]]} -> :ok
+      {:ok, [[count]]} when is_integer(count) -> {:warn, {:nats_intake_removals_pending, count}}
+      _ -> :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp expire_foreign(namespace) do
+    case Store.raw_query(
+           """
+           SELECT r.id, r.tenant_id FROM events r
+           WHERE r.kind = ?1
+             AND COALESCE((CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.namespace') END), '') != ?2
+             AND (CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.namespace') END) IN (
+               SELECT (CASE WHEN json_valid(t.metadata) THEN json_extract(t.metadata, '$.namespace') END)
+                 FROM events t WHERE t.kind = ?3
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM events d
+               WHERE d.kind = 'nats_purge' AND d.target_uri = 'nats-intake-purge-request:' || CAST(r.id AS TEXT)
+             )
+           ORDER BY r.id
+           LIMIT 500
+           """,
+           [@request_kind, namespace, @retired_kind]
+         ) do
+      {:ok, []} ->
+        :ok
+
+      {:ok, rows} ->
+        recorded = Enum.count(rows, fn [id, tenant] -> set_aside(id, tenant, "retired") == :ok end)
+
+        Logger.warning(
+          "[NATS] #{recorded} intake removal(s) of a retired namespace set aside; their Signals were not purged"
+        )
+
+        skipped(length(rows) - recorded)
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  # A request that could not be set aside (its record refused) is read again
+  # on the next pass; the count says how many, so a store that keeps refusing
+  # is seen rather than silently re-read.
+  defp skipped(0), do: :ok
+
+  defp skipped(count),
+    do:
+      Logger.warning("[NATS] #{count} intake removal(s) could not be set aside; retried next pass")
+
+  defp set_aside(id, tenant, why) do
+    Store.raw_query(
+      "INSERT INTO events (tenant_id, principal, kind, target_uri, metadata) VALUES (?1, 'system:nats', 'nats_purge', ?2, ?3)",
+      [
+        if(is_binary(tenant), do: tenant, else: Tenant.default_id()),
+        "nats-intake-purge-request:#{id}",
+        Jason.encode!(%{flow: "intake", set_aside: why})
+      ]
+    )
+    |> case do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  rescue
+    _ -> {:error, :not_recorded}
+  end
+
+  # The tenant's queued Signals and the intake dead letters this request names.
+  defp purge(conn, namespace, request) do
+    # A payload without a tenant is the default tenant's, and no other's.
+    tenant = request["tenant_id"] || Tenant.default_id()
+    connectors = request["connector_ids"] || []
+    workspace = request["workspace_id"]
+
+    match? = fn payload ->
+      (payload["tenant_id"] || Tenant.default_id()) == tenant and
+        ((is_binary(workspace) and payload["workspace_id"] == workspace) or
+           payload["connector_id"] in connectors)
+    end
+
+    stream = NATS.stream_name(namespace, "INTAKE")
+    subject = "#{namespace}.intake.#{Protocol.token(tenant || "")}.>"
+
+    with {:ok, queued} <- DeadLetters.scan(conn, stream, subject, 1, match?, 0),
+         {:ok, letters} <- DeadLetters.forget(conn, namespace, "intake", match?) do
+      {:ok, %{queued_purged: queued, dead_letters_removed: letters}}
+    end
+  end
+
+  # `{:ok, id}`, or why the request could not be written: then nothing would
+  # retry it, so the caller is told.
+  defp record_request(namespace, request, target) do
+    {:ok, insert_request(namespace, request, target)}
+  rescue
+    error -> {:error, Exception.message(error)}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  defp insert_request(namespace, request, target) do
+    {:ok, [[id]]} =
+      Store.raw_query(
+        """
+        INSERT INTO events (tenant_id, principal, kind, target_uri, metadata)
+        VALUES (?1, 'system:nats', ?2, ?3, ?4) RETURNING id
+        """,
+        [
+          request["tenant_id"],
+          @request_kind,
+          target,
+          Jason.encode!(Map.merge(request, %{"flow" => "intake", "namespace" => namespace}))
+        ]
+      )
+
+    id
+  end
+
+  defp done(id, namespace, request, counts) do
+    result =
+      Store.raw_query(
+        "INSERT INTO events (tenant_id, principal, kind, target_uri, metadata) VALUES (?1, 'system:nats', 'nats_purge', ?2, ?3)",
+        [
+          request["tenant_id"] || Tenant.default_id(),
+          "nats-intake-purge-request:#{id}",
+          Jason.encode!(
+            Map.merge(counts, %{
+              flow: "intake",
+              stream: NATS.stream_name(namespace, "INTAKE"),
+              workspace_id: request["workspace_id"],
+              connector_ids: request["connector_ids"],
+              reason: request["reason"]
+            })
+          )
+        ]
+      )
+
+    case result do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} = error ->
+        Logger.warning(
+          "[NATS] intake removal #{id} done, but its completion was not recorded: #{inspect(reason)}"
+        )
+
+        error
+    end
+  rescue
+    error ->
+      Logger.warning(
+        "[NATS] intake removal #{id} done, but its completion was not recorded: #{Exception.message(error)}"
+      )
+
+      {:error, error}
+  end
+
+  defp namespace(opts) do
+    case Keyword.fetch(opts, :namespace) do
+      {:ok, namespace} -> {:ok, namespace}
+      :error -> NATS.namespace()
+    end
+  end
+
+  defp default_conn, do: Application.get_env(:optimal_engine, :nats_connection, Connection)
+
   @doc "One pull now (tests, operators)."
   @spec drain_now(GenServer.server()) :: {:ok, map()} | {:error, term()}
   def drain_now(server \\ __MODULE__), do: WorkQueue.drain_now(server)
@@ -120,6 +541,25 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
 
   @impl WorkQueue
   def stream_options, do: %{}
+
+  # Removals asked for while NATS was down, or that failed while it was up,
+  # are retried every minute (`:purge_retry_ms`) and when the queue is up.
+  @impl WorkQueue
+  def periodic(server, context), do: on_provisioned(server, context)
+
+  @impl WorkQueue
+  def periodic_ms(context), do: Map.get(context, :purge_retry_ms, 60_000)
+
+  @impl WorkQueue
+  def on_provisioned(_server, context) do
+    with {:ok, namespace} <- namespace(Map.to_list(Map.take(context, [:namespace]))) do
+      process_requests(Map.get(context, :connection, default_conn()), namespace)
+    end
+
+    :ok
+  rescue
+    error -> Logger.warning("[NATS] pending intake removals: #{Exception.message(error)}")
+  end
 
   # Intake of one Signal can take a while (entity resolution, loops); the
   # consumer has ten minutes before an unanswered one is delivered again.
@@ -148,31 +588,105 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
 
     ingest = Map.get(context, :ingest, &PullScheduler.ingest_signal/2)
 
-    case Rows.get(tenant, connector) do
-      {:ok, row} ->
-        scope = %{
-          workspace_id: row.workspace_id,
-          tenant_id: tenant,
-          connector_id: connector,
-          kind: row.kind,
-          config: row.config || %{}
-        }
+    case {Rows.get(tenant, connector), workspace_state(tenant, decoded["workspace_id"])} do
+      # Archived, moved or gone since it was queued (or since this consumer
+      # fetched it): what was taken in for it is never ingested now. The
+      # write itself checks again, under the workspace's and the connector's
+      # row locks (`OptimalEngine.Connectors.IngestFence`), so a removal that
+      # commits after this check still wins.
+      {{:ok, row}, :active} ->
+        target = target_workspace(row, decoded)
 
-        case ingest.(decode_signal(encoded), scope) do
-          :ok ->
-            :ack
+        case workspace_state(tenant, target) do
+          :active ->
+            ingest_queued(
+              %{row | workspace_id: target},
+              tenant,
+              connector,
+              decoded,
+              encoded,
+              ingest,
+              context
+            )
 
-          :refused ->
-            refused(decoded["run_id"], connector, context)
+          :unknown ->
+            {:retry, Map.get(context, :retry_ms, 2_000)}
+
+          :gone ->
+            dropped(connector, target)
         end
 
-      {:error, :not_found} ->
+      {{:ok, _row}, :unknown} ->
+        {:retry, Map.get(context, :retry_ms, 2_000)}
+
+      {{:ok, _row}, :gone} ->
+        dropped(connector, decoded["workspace_id"])
+
+      {{:error, :not_found}, _} ->
         Logger.warning(
           "[NATS] queued Signal dropped: connector #{inspect(connector)} no longer exists"
         )
 
         :term
     end
+  end
+
+  @doc false
+  # The workspace a queued Signal is ingested into: its connector's, or, for a
+  # connector row that names none, the one the payload names, else the
+  # default workspace.
+  def target_workspace(%{workspace_id: workspace}, _decoded)
+      when is_binary(workspace) and workspace != "",
+      do: workspace
+
+  def target_workspace(_row, %{"workspace_id" => workspace})
+      when is_binary(workspace) and workspace != "",
+      do: workspace
+
+  def target_workspace(_row, _decoded), do: OptimalEngine.Workspace.default_id()
+
+  defp ingest_queued(row, tenant, connector, decoded, encoded, ingest, context) do
+    scope = %{
+      workspace_id: row.workspace_id,
+      tenant_id: tenant,
+      connector_id: connector,
+      kind: row.kind,
+      config: row.config || %{},
+      # The writes check the workspace and the connector again, under their
+      # row locks: a removal that committed since the check above wins.
+      fence: true
+    }
+
+    case ingest.(decode_signal(encoded), scope) do
+      :ok -> :ack
+      {:fenced, reason} -> dropped(connector, "#{row.workspace_id} (#{reason})")
+      :refused -> refused(decoded["run_id"], connector, context)
+    end
+  end
+
+  defp dropped(connector, workspace_id) do
+    Logger.warning(
+      "[NATS] queued Signal of connector #{inspect(connector)} dropped: workspace #{inspect(workspace_id)} is archived or gone"
+    )
+
+    :term
+  end
+
+  # `:active`, `:gone` (absent or not active), or `:unknown` when the store did
+  # not answer: then the message comes back rather than being ingested or lost.
+  # A payload that names no workspace is decided by its connector's.
+  defp workspace_state(_tenant, nil), do: :active
+
+  defp workspace_state(tenant, workspace_id) do
+    case Store.raw_query("SELECT tenant_id, status FROM workspaces WHERE id = ?1", [workspace_id]) do
+      {:ok, [[owner, "active"]]} -> if owner == tenant, do: :active, else: :gone
+      {:ok, _absent_or_inactive} -> :gone
+      {:error, _reason} -> :unknown
+    end
+  rescue
+    _ -> :unknown
+  catch
+    :exit, _ -> :unknown
   end
 
   # A refusal is counted in the run row of the pull that queued it. That row is

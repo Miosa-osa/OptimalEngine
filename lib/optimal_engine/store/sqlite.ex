@@ -278,6 +278,14 @@ defmodule OptimalEngine.Store.SQLite do
     GenServer.call(__MODULE__, {:insert_context, context}, 10_000)
   end
 
+  @impl OptimalEngine.Store.Adapter
+  def insert_context(%Context{} = context, opts) do
+    case Keyword.get(opts, :fence) do
+      nil -> insert_context(context)
+      fence -> GenServer.call(__MODULE__, {:insert_context, context, fence}, 10_000)
+    end
+  end
+
   @doc "Inserts multiple contexts in a single transaction."
   @spec insert_contexts([Context.t()]) :: {:ok, non_neg_integer()} | {:error, term()}
   @impl OptimalEngine.Store.Adapter
@@ -553,6 +561,29 @@ defmodule OptimalEngine.Store.SQLite do
       end
 
     {:reply, result, state}
+  end
+
+  # The fence is checked in the write's transaction; this process is the only
+  # writer, so nothing commits between the check and the write.
+  @impl true
+  def handle_call({:insert_context, context, fence}, _from, state) do
+    query = fn sql, params -> txn_query({:txn, state.db}, sql, params) end
+
+    result =
+      SQLiteTransaction.run(state.db, fn ->
+        with :ok <- OptimalEngine.Connectors.IngestFence.check(query, fence, :sqlite),
+             :ok <- each_row([context], &do_insert(state.db, &1)),
+             do: {:ok, 1}
+      end)
+
+    case result do
+      {:ok, _} ->
+        {:reply, :ok, state}
+
+      not_written ->
+        :ets.delete(@ets_table, context.id)
+        {:reply, not_written, state}
+    end
   end
 
   @impl true

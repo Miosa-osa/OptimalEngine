@@ -7,7 +7,7 @@ The embedding cache's own rules are in [`OPTIONS.md`](../../OPTIONS.md), Text Em
 
 | Path | Rows | Files | Cache |
 | --- | --- | --- | --- |
-| Archive a workspace (`POST /api/workspaces/:id/archive`) | None: the workspace is marked archived and its rows stay | None | Embedding entries, decomposition checkpoints and local copies of object-store assets |
+| Archive a workspace (`POST /api/workspaces/:id/archive`) | None: the workspace is marked archived and its rows stay; on NATS, the Signals its connectors queued and intake has not taken, and their dead letters | None | Embedding entries, decomposition checkpoints and local copies of object-store assets |
 | Finalize a move (`POST /api/workspaces/:id/finalize-move`) | Every row of the workspace | The workspace's directory, local assets included | As archive |
 | Erase a principal (`Compliance.Erasure`) | The principal's contexts and everything derived from them, then the principal | Signal files with their sidecars and cross-reference copies, asset files, decomposition checkpoints and the objects of the deleted assets in the configured object store | Embedding entries of each workspace that held one of the contexts (also when a batch fails, for the contexts already gone) |
 | Retention `delete` | The context and everything derived from it | As erase | Embedding entries of the workspace |
@@ -59,6 +59,7 @@ These keep erased data until they are pruned, replaced or removed by an operator
 | Replication ledgers (`sync_capture`, `sync_mutations`) | The rows of a change, in the changes' payloads | Append-only |
 | The NATS ledger stream (`OPTIMAL_NATS_FLOWS=ledger`), while NATS is down | The erased rows' earlier messages | Until NATS is back: the erasure's deletes then purge each row's subject, and the report's `nats_ledger` says `pending: true` meanwhile (see [Storage Providers](storage-providers.md#what-the-engine-forgets-leaves-the-stream)) |
 | What a NATS subscriber already read | Whatever it kept | The subscriber's own retention |
+| NATS intake dead letters of a workspace that was not archived, moved or had its connector deleted | The connector content of a Signal intake gave up on | Until requeued, or `OPTIMAL_NATS_DEAD_LETTER_MAX_AGE_HOURS` (720) after it was dead-lettered |
 | Shared canonical entities and aliases | Names that more than one context mention | Until a steward removes them |
 | The legacy `edges` table, kept unread for one release after `graph_edges` replaced it | Context and entity ids, no text | Until the table is dropped; no path reads or writes it |
 

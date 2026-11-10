@@ -266,7 +266,19 @@ defmodule OptimalEngine.Connectors.Rows do
   """
   @spec delete(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def delete(tenant_id, id, opts \\ []) do
-    with {:ok, row} <- fetch(tenant_id, id) do
+    case fetch(tenant_id, id) do
+      {:error, :not_found} = not_found ->
+        # Deleted before: a package sweep that failed then is done now.
+        if is_binary(id), do: forget_unheld_packages(tenant_id, id)
+        not_found
+
+      fetched ->
+        delete_fetched(fetched, tenant_id, id, opts)
+    end
+  end
+
+  defp delete_fetched(fetched, tenant_id, id, opts) do
+    with {:ok, row} <- fetched do
       if Runner.running?(id) do
         {:error, :already_running}
       else
@@ -280,10 +292,45 @@ defmodule OptimalEngine.Connectors.Rows do
             ])
 
           record(tenant_id, "connector.deleted", id, row.kind, row.workspace_id, opts, %{})
+
+          # What it queued on NATS and intake has not taken yet goes with it,
+          # and a package a fenced ingest of it left (no context or claim holds it).
+          OptimalEngine.Storage.NATS.IntakeQueue.forget_connector(tenant_id, id)
+          forget_unheld_packages(tenant_id, id)
           :ok
         end
       end
     end
+  end
+
+  # The connector's source packages no context or claim holds go with it: a
+  # deletion is an erasure, so this includes the evidence packages kept for
+  # its ingests that were rejected, quarantined or failed. A sweep that fails
+  # is logged, and deleting the connector again runs it again.
+  defp forget_unheld_packages(tenant_id, id) do
+    case OptimalEngine.MemoryCore.Store.delete_unheld_connector_packages(
+           tenant_id: tenant_id,
+           connector_id: id
+         ) do
+      {:ok, _count} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Connector #{id}: its unheld source packages were not removed (#{inspect(reason)}); delete it again to retry"
+        )
+    end
+
+    :ok
+  rescue
+    error ->
+      Logger.warning(
+        "Connector #{id}: its unheld source packages were not removed (#{Exception.message(error)}); delete it again to retry"
+      )
+
+      :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # Credentials removed by a change leave nothing behind in OpenBao. The row

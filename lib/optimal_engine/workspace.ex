@@ -790,6 +790,7 @@ defmodule OptimalEngine.Workspace do
          ) do
       {:ok, _} ->
         forget_in_nats(id)
+        forget_unheld_connector_packages(id)
 
         cache =
           case Cache.purge_workspace(id, :archive) do
@@ -806,6 +807,32 @@ defmodule OptimalEngine.Workspace do
     end
   end
 
+  # A source package a connector's fenced ingest left in the workspace (no
+  # context or claim holds it) goes with the archive. Never fails the archive;
+  # a sweep that fails is logged, and archiving again runs it again.
+  defp forget_unheld_connector_packages(id) do
+    case OptimalEngine.MemoryCore.Store.delete_unheld_connector_packages(workspace_id: id) do
+      {:ok, _count} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Workspace] #{id}: unheld connector source packages were not removed (#{inspect(reason)}); archiving it again retries"
+        )
+    end
+
+    :ok
+  rescue
+    error ->
+      Logger.warning(
+        "[Workspace] #{id}: unheld connector source packages were not removed (#{Exception.message(error)}); archiving it again retries"
+      )
+
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   # Its messages on the NATS ledger stream are purged (or the purge recorded
   # until NATS is reachable); off without the `ledger` flow. Never fails the
   # archive.
@@ -820,6 +847,9 @@ defmodule OptimalEngine.Workspace do
         )
 
       OptimalEngine.Storage.NATS.LedgerPublisher.forget_workspace(publisher, tenant, id, "archived")
+
+      # What its connectors queued and intake has not taken yet, and their dead letters.
+      OptimalEngine.Storage.NATS.IntakeQueue.forget_workspace(tenant, id, "archived")
     end
 
     :ok

@@ -66,6 +66,14 @@ defmodule OptimalEngine.Store do
 
   def insert_context(context), do: adapter().insert_context(context)
 
+  @doc """
+  `insert_context/1` with options: `fence:` checks a connector's workspace and
+  the connector itself in the write's transaction
+  (`OptimalEngine.Connectors.IngestFence`).
+  """
+  def insert_context(context, []), do: insert_context(context)
+  def insert_context(context, opts), do: adapter().insert_context(context, opts)
+
   def insert_contexts(contexts), do: adapter().insert_contexts(contexts)
 
   def insert_signal(signal), do: adapter().insert_signal(signal)
@@ -190,6 +198,23 @@ defmodule OptimalEngine.Store do
   @spec skip_locked() :: String.t()
   def skip_locked do
     if selected?(OptimalEngine.Store.Postgres), do: " FOR UPDATE SKIP LOCKED", else: ""
+  end
+
+  @doc """
+  Holds the row of `table` whose `column` is `key` against writers until the
+  transaction ends (`FOR SHARE` on PostgreSQL): other holders go on beside it,
+  and an update or delete of the row waits for them all. SQLite's store runs
+  one writer at a time, so there it does nothing.
+  """
+  @spec txn_share_row(term(), String.t(), String.t(), term()) :: :ok | {:error, term()}
+  def txn_share_row(txn, table, column, key) do
+    if selected?(OptimalEngine.Store.Postgres) do
+      sql = ~s|SELECT 1 FROM "#{table}" WHERE "#{column}" = $1 FOR SHARE|
+
+      with {:ok, _rows} <- OptimalEngine.Store.Postgres.txn_query_native(txn, sql, [key]), do: :ok
+    else
+      :ok
+    end
   end
 
   def insert_chunks(chunks), do: adapter().insert_chunks(chunks)

@@ -18,6 +18,8 @@ defmodule OptimalEngine.Storage.NATS.Supervisor do
   @impl Supervisor
   def init(_opts) do
     children = [
+      # The work queues' periodic runs (OptimalEngine.Storage.NATS.WorkQueue).
+      {Task.Supervisor, name: OptimalEngine.Storage.NATS.TaskSupervisor},
       OptimalEngine.Storage.NATS.Connection,
       OptimalEngine.Storage.NATS.LedgerPublisher,
       OptimalEngine.Storage.NATS.JobQueue,

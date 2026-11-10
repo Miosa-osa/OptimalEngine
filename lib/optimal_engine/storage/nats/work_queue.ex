@@ -45,8 +45,14 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   @callback on_provisioned(GenServer.server(), map()) :: :ok
   @callback dead_letter_after(map()) :: pos_integer() | nil
   @callback on_dead_letter(JetStream.message(), String.t(), map()) :: :ok
+  @callback periodic(GenServer.server(), map()) :: :ok
+  @callback periodic_ms(map()) :: pos_integer()
 
-  @optional_callbacks on_provisioned: 2, dead_letter_after: 1, on_dead_letter: 3
+  @optional_callbacks on_provisioned: 2,
+                      dead_letter_after: 1,
+                      on_dead_letter: 3,
+                      periodic: 2,
+                      periodic_ms: 1
 
   @batch 10
   @no_counts %{acked: 0, retried: 0, terminated: 0, failed: 0, dead_lettered: 0}
@@ -144,6 +150,7 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
           true -> "starting"
         end,
       consumer_pid: nil,
+      periodic_task: nil,
       # Background publishes that did not get through, oldest first.
       unsent: :queue.new(),
       unsent_count: 0,
@@ -160,7 +167,30 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
       last_error: nil
     }
 
+    schedule_periodic(state)
     {:ok, maybe_start_consumer(state)}
+  end
+
+  # A callback with periodic work (the intake queue's pending removals) gets
+  # it run off this process every `periodic_ms/1`, while the queue is on.
+  defp schedule_periodic(%{enabled: true, callback: callback, context: context}) do
+    if function_exported?(callback, :periodic, 2),
+      do: Process.send_after(self(), :periodic, callback.periodic_ms(context))
+  end
+
+  defp schedule_periodic(_state), do: nil
+
+  @task_supervisor OptimalEngine.Storage.NATS.TaskSupervisor
+
+  # The task's monitor reference. Under the NATS task supervisor when it runs;
+  # a queue started on its own (tests) monitors a process of its own instead.
+  defp start_periodic(supervisor, fun) do
+    if is_atom(supervisor) and Process.whereis(supervisor) do
+      Task.Supervisor.async_nolink(supervisor, fun).ref
+    else
+      {_pid, ref} = spawn_monitor(fun)
+      ref
+    end
   end
 
   @impl GenServer
@@ -227,6 +257,37 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   end
 
   def handle_info(:restart_consumer, state), do: {:noreply, maybe_start_consumer(state)}
+
+  # One run at a time: a tick while the last run is still going is skipped. The
+  # run is a task of the NATS task supervisor, not linked to this process, so
+  # a run that crashes is logged and the next tick runs again.
+  def handle_info(:periodic, %{periodic_task: ref} = state) when is_reference(ref) do
+    schedule_periodic(state)
+    {:noreply, state}
+  end
+
+  def handle_info(:periodic, state) do
+    {callback, name, context} = {state.callback, self_name(state), state.context}
+    supervisor = Map.get(context, :task_supervisor, @task_supervisor)
+    task = start_periodic(supervisor, fn -> callback.periodic(name, context) end)
+    schedule_periodic(state)
+    {:noreply, %{state | periodic_task: task}}
+  end
+
+  def handle_info({ref, _result}, %{periodic_task: ref} = state) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, %{state | periodic_task: nil}}
+  end
+
+  # A run under the fallback monitor (no task supervisor) ends `:normal`.
+  def handle_info({:DOWN, ref, :process, _pid, :normal}, %{periodic_task: ref} = state),
+    do: {:noreply, %{state | periodic_task: nil}}
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{periodic_task: ref} = state) do
+    Logger.warning("[NATS] #{state.callback.flow()} periodic run failed: #{inspect(reason)}")
+    {:noreply, %{state | periodic_task: nil}}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   defp handle_publish(token, payload, msg_id, state) do

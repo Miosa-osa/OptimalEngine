@@ -391,7 +391,7 @@ defmodule OptimalEngine.Connectors.PullScheduler do
   # intake does not take it. The Runner counts refusals in the run; the NATS
   # intake queue ingests through it too.
   @doc false
-  @spec ingest_signal(OptimalEngine.Signal.t(), map()) :: :ok | :refused
+  @spec ingest_signal(OptimalEngine.Signal.t(), map()) :: :ok | :refused | {:fenced, atom()}
   def ingest_signal(signal, scope) do
     content = signal.content || ""
 
@@ -403,6 +403,10 @@ defmodule OptimalEngine.Connectors.PullScheduler do
       case Routing.intake_signal(tenant_id, signal, scope) do
         {:ok, _result} ->
           :ok
+
+        # A fenced write (a queued Signal) found its workspace or connector gone.
+        {:error, {:fenced, reason}} ->
+          {:fenced, reason}
 
         {:error, reason} ->
           Logger.warning("[Connectors.PullScheduler] intake failed: #{inspect(reason)}")
