@@ -75,7 +75,7 @@ defmodule OptimalEngine.Operating.Boot do
            """
            SELECT id, title, decision, decided_by, decided_at FROM decisions
            WHERE tenant_id = ?1 AND workspace_id = ?2 AND decided_at >= ?3
-           ORDER BY decided_at DESC LIMIT 10
+           ORDER BY decided_at DESC, id DESC LIMIT 10
            """,
            [tenant_id, workspace_id, since]
          ) do

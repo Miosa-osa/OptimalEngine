@@ -861,9 +861,9 @@ defmodule OptimalEngine.Backup do
     end
   end
 
-  defp backup_id do
-    "backup_" <> (:crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower))
-  end
+  # In creation order, so a tie on the second goes to the newer backup on
+  # PostgreSQL as SQLite's rowid gives it (`newest_first/0`).
+  defp backup_id, do: OptimalEngine.Store.Catalog.ordered_id("backup_")
 
   defp checksum_sha256(path) do
     digest =
@@ -931,7 +931,7 @@ defmodule OptimalEngine.Backup do
     sql = """
     SELECT checksum_sha256 FROM backup_records
     WHERE storage_uri = ?1 AND status = 'completed' AND checksum_sha256 IS NOT NULL
-    ORDER BY created_at DESC LIMIT 1
+    ORDER BY created_at DESC, id DESC LIMIT 1
     """
 
     case postgres_catalog(sql, [Path.expand(source_path)]) do
@@ -941,7 +941,7 @@ defmodule OptimalEngine.Backup do
   end
 
   # SQLite's rowid breaks ties in insertion order; PostgreSQL rows have none,
-  # so ties fall to the id there.
+  # so ties fall to the id there, which is made in creation order.
   @doc false
   def newest_first, do: if(postgres?(), do: "id DESC", else: "rowid DESC")
 
@@ -1002,13 +1002,17 @@ defmodule OptimalEngine.Backup do
     end
   end
 
+  @doc false
+  def catalog_checksum_in(catalog_path, source_path),
+    do: catalog_checksum(source_path, catalog_path)
+
   # Read the catalog straight from the database file so restore works before
   # boot, when the Store process that normally owns it is not running.
   defp catalog_checksum(source_path, catalog_path) do
     sql = """
     SELECT checksum_sha256 FROM backup_records
     WHERE storage_uri = ?1 AND status = 'completed' AND checksum_sha256 IS NOT NULL
-    ORDER BY created_at DESC LIMIT 1
+    ORDER BY created_at DESC, rowid DESC LIMIT 1
     """
 
     with true <- is_binary(catalog_path) and File.regular?(catalog_path),

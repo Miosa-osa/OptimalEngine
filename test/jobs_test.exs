@@ -229,4 +229,26 @@ defmodule OptimalEngine.JobsTest do
     assert {:ok, nil} = claim(ws, kind)
     assert {:error, :lease_lost} = Jobs.defer(job.id, "worker-a", "again", 0)
   end
+
+  test "jobs made in the same second list newest first, on both stores", %{
+    workspace_id: ws,
+    kind: kind
+  } do
+    jobs = for n <- 1..5, do: elem(Jobs.enqueue(ws, kind, %{"n" => n}), 1)
+
+    {:ok, _} =
+      OptimalEngine.Store.raw_query(
+        "UPDATE jobs SET inserted_at = '2026-01-01 00:00:00', updated_at = '2026-01-01 00:00:00' WHERE workspace_id = ?1",
+        [ws]
+      )
+
+    newest_first = jobs |> Enum.map(& &1.id) |> Enum.reverse()
+    assert {:ok, listed} = Jobs.list(ws)
+    assert Enum.map(listed, & &1.id) == newest_first
+    assert {:ok, pending} = Jobs.list(ws, status: hd(jobs).status)
+    assert Enum.map(pending, & &1.id) == newest_first
+
+    assert {:ok, records} = OptimalEngine.StorageCatalog.records("jobs", ws)
+    assert Enum.map(records, & &1["id"]) == newest_first
+  end
 end

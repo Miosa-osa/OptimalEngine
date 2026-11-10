@@ -105,7 +105,7 @@ defmodule OptimalEngine.Optimality do
     LEFT JOIN evaluation_cases c ON c.evaluation_run_id = r.id
     WHERE r.workspace_id = ?1 AND r.benchmark_name = 'governed_reconstruction'
       AND r.status = 'completed'
-    GROUP BY r.id ORDER BY r.completed_at DESC LIMIT 1
+    GROUP BY r.id ORDER BY r.completed_at DESC, r.id DESC LIMIT 1
     """
 
     case Store.raw_query(sql, [workspace]) do

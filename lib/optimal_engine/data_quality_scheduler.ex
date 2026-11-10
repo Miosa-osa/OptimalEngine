@@ -5,7 +5,6 @@ defmodule OptimalEngine.DataQualityScheduler do
   require Logger
 
   alias OptimalEngine.{DataSteward, Store}
-  alias OptimalEngine.MemoryCore.ID
 
   @day_ms 86_400_000
 
@@ -64,7 +63,7 @@ defmodule OptimalEngine.DataQualityScheduler do
       Store.raw_execute(
         "INSERT INTO data_quality_snapshots (id,tenant_id,workspace_id,health_score,health_status,dashboard,detected_regressions) VALUES (?1,?2,?3,?4,?5,?6,?7)",
         [
-          ID.random_id("quality"),
+          OptimalEngine.Store.Catalog.ordered_id("quality_"),
           tenant,
           workspace,
           score,
@@ -84,7 +83,7 @@ defmodule OptimalEngine.DataQualityScheduler do
 
   defp previous_score(tenant, workspace) do
     case Store.raw_query(
-           "SELECT health_score FROM data_quality_snapshots WHERE tenant_id=?1 AND workspace_id=?2 ORDER BY created_at DESC LIMIT 1",
+           "SELECT health_score FROM data_quality_snapshots WHERE tenant_id=?1 AND workspace_id=?2 ORDER BY created_at DESC, #{OptimalEngine.Store.Catalog.insertion_order("id")} DESC LIMIT 1",
            [tenant, workspace]
          ) do
       {:ok, [[score]]} -> {:ok, score}

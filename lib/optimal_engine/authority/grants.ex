@@ -211,7 +211,9 @@ defmodule OptimalEngine.Authority.Grants do
 
     {:ok, rows} =
       Store.raw_query(
-        select_sql("WHERE " <> Enum.join(where, " AND ") <> " ORDER BY issued_at DESC LIMIT 500"),
+        select_sql(
+          "WHERE " <> Enum.join(where, " AND ") <> " ORDER BY issued_at DESC, jti DESC LIMIT 500"
+        ),
         [tenant_id | Enum.map(filters, &elem(&1, 1))]
       )
 

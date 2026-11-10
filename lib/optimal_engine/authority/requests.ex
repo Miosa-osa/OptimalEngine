@@ -130,7 +130,7 @@ defmodule OptimalEngine.Authority.Requests do
       end
 
     {:ok, rows} =
-      Store.raw_query(select_sql(where <> " ORDER BY requested_at DESC LIMIT 500"), params)
+      Store.raw_query(select_sql(where <> " ORDER BY requested_at DESC, id DESC LIMIT 500"), params)
 
     Enum.map(rows, &to_request/1)
   end
