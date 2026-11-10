@@ -851,7 +851,7 @@ Nothing durable lives in Valkey, and every key it holds has a TTL.
 
 **Which Engines share keys.** Without `OPTIMAL_VALKEY_KEY_PREFIX`, an Engine's keys are under `optimal:shared:` and a hash of the first of:
 
-1. `OPTIMAL_ENGINE_ID`, set by the platform per Engine;
+1. `OPTIMAL_ENGINE_ID`, which the platform sets per Engine;
 2. the store's replica id, which belongs to the database, not the Engine: a copy restored from another Engine's dump (a staging copy of production) has the same replica id, and on one Valkey the two draw on each other's buckets;
 3. on the PostgreSQL store only, `OPTIMAL_POSTGRES_URL` without user and password plus `OPTIMAL_POSTGRES_SCHEMA`, which belongs to the database and schema and moves every key when the host, pooler or URL changes.
 
@@ -864,7 +864,7 @@ A prefix is kept only once it came from one of those. A store without a `sync_id
 | `OPTIMAL_VALKEY_POOL_SIZE` | 4 | Connections per Engine process (1 to 32). |
 | `OPTIMAL_VALKEY_TIMEOUT_MS` | 500 | How long a command waits for its reply before the call is answered from ETS. |
 | `OPTIMAL_VALKEY_KEY_PREFIX` | unset: keys under `optimal:shared:<hash of the Engine's identity>` | `P` puts every key this Engine writes under `P:shared:` (1 to 64 of `A-Z a-z 0-9 : _ . -`, starting with a letter or digit; an invalid value is logged and the default used). **This is the setting that isolates Engines.** `P:shared:*` is outside an ACL written for `~optimal:shared:*`: widen the ACL to `~P:shared:*` first, or every command is refused and the Engine stays on ETS. |
-| `OPTIMAL_ENGINE_ID` | unset | An id the platform gives each Engine (MIOSA sets it to the Engine's database id). When set, it is the identity the default prefix is hashed from. |
+| `OPTIMAL_ENGINE_ID` | unset | An id the platform gives each Engine; a platform that runs Engines on a shared Valkey sets it per Engine (for MIOSA, the Engine's database id). When set, it is the identity the default prefix is hashed from. |
 | `OPTIMAL_VALKEY_OUTAGE_POLICY` | `closed` | What a bucket this process never saw on Valkey holds while Valkey is configured but down. `closed`: no tokens, refilling at its rate, so an outage can only tighten a limit, at the cost of 429s for new clients (and, after a restart mid-outage, for every client, since the mirrors are in memory). `open`: a full local bucket, as without Valkey, so clients keep working and each process may hand out a full bucket of its own. Buckets the process did see continue from their last Valkey answer either way. |
 
 Valkey being down never fails a request.

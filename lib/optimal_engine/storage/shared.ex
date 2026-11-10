@@ -496,8 +496,8 @@ defmodule OptimalEngine.Storage.Shared do
       outside a Valkey ACL written for `optimal:shared:*`.
     * Otherwise it is `optimal:shared:` and 16 hex characters of a hash of
       this Engine's identity, the first of:
-        1. `OPTIMAL_ENGINE_ID`, an id the platform gives each Engine (MIOSA
-           sets it to the Engine's database id);
+        1. `OPTIMAL_ENGINE_ID`, an id the platform gives each Engine (for
+           MIOSA, the Engine's database id);
         2. the store's replica id (`sync_identity`), which is per database:
            a copy restored from another Engine's dump has that Engine's;
         3. on the PostgreSQL store only, `OPTIMAL_POSTGRES_URL` without user
