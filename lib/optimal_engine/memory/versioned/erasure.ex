@@ -376,18 +376,22 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   end
 
   # The chunk the memory was taken from goes, unless its context still exists
-  # or a live memory outside the chain names it.
-  defp chunk_step(%{source_chunk_id: chunk}, chain_ids) when is_binary(chunk) and chunk != "" do
+  # or a live memory outside the chain names it. Only a chunk of the memory's
+  # own tenant: `source_chunk_id` is taken as a caller gives it
+  # (`POST /api/memory`), so it may name another tenant's chunk.
+  defp chunk_step(%{source_chunk_id: chunk} = memory, chain_ids)
+       when is_binary(chunk) and chunk != "" do
     [
       {:chunks,
        """
        DELETE FROM chunks
         WHERE id = ?1
+          AND tenant_id = ?3
           AND NOT EXISTS (SELECT 1 FROM contexts c WHERE c.id = chunks.signal_id)
           AND NOT EXISTS (SELECT 1 FROM memories m
                            WHERE m.source_chunk_id = ?1 AND m.is_forgotten = 0
                              AND m.id NOT IN (SELECT value FROM json_each(?2)))
-       """, [chunk, chain_ids]}
+       """, [chunk, chain_ids, memory.tenant_id || "default"]}
     ]
   end
 

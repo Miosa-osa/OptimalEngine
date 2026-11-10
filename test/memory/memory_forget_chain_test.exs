@@ -47,18 +47,88 @@ defmodule OptimalEngine.Memory.ForgetChainTest do
     assert live_with(ctx, later) == []
   end
 
+  # Both wait at a barrier, then go at once. Whichever runs first, the update
+  # is refused (the forget ran first) or its version is forgotten with the
+  # rest of the chain (the update ran first): never a live version with text.
   test "an update racing a forget never leaves a live version with text", ctx do
     for i <- 1..15 do
       {:ok, v1} = Memory.create(%{content: text(ctx, "race#{i}a"), workspace_id: ctx.workspace})
       newer = text(ctx, "race#{i}b")
+      test = self()
 
-      update = Task.async(fn -> Memory.update(v1.id, %{content: newer}) end)
-      forget = Task.async(fn -> Memory.forget(v1.id) end)
-      _ = Task.await(update, 30_000)
+      racer = fn fun ->
+        Task.async(fn ->
+          send(test, {:ready, self()})
+
+          receive do
+            :go -> fun.()
+          end
+        end)
+      end
+
+      update = racer.(fn -> Memory.update(v1.id, %{content: newer}) end)
+      forget = racer.(fn -> Memory.forget(v1.id) end)
+      for task <- [update, forget], do: assert_receive({:ready, pid} when pid == task.pid, 5_000)
+      for task <- [update, forget], do: send(task.pid, :go)
+
+      updated = Task.await(update, 30_000)
       assert :ok = Task.await(forget, 30_000)
-
+      assert_update_lost(updated, "iteration #{i}")
       assert live_with(ctx, newer) == [], "iteration #{i}"
     end
+  end
+
+  # The update ran first and its version was forgotten with the chain, or it
+  # ran second and was refused.
+  defp assert_update_lost({:error, :forgotten}, _label), do: :ok
+
+  defp assert_update_lost({:ok, %{id: id}}, label) do
+    {:ok, rows} =
+      Store.raw_query("SELECT is_forgotten, content FROM memories WHERE id = ?1", [id])
+
+    assert rows == [[1, ""]], label
+  end
+
+  defp assert_update_lost(other, label),
+    do: flunk("#{label}: the update returned #{inspect(other)}")
+
+  # A transaction holding the chain's root makes the update and the forget
+  # both wait inside their own transactions, so they overlap for certain; on
+  # release they take the root's row one after the other.
+  @tag :postgres_engine
+  test "an update and a forget both waiting on the root serialize: the update is refused or forgotten",
+       ctx do
+    {:ok, v1} = Memory.create(%{content: text(ctx, "overlap"), workspace_id: ctx.workspace})
+    newer = text(ctx, "overlapnewer")
+    test = self()
+
+    holder =
+      Task.async(fn ->
+        Store.transaction(fn txn ->
+          :ok = Store.txn_lock_row(txn, "memories", "id", v1.id)
+          send(test, :held)
+
+          receive do
+            :release -> {:ok, :released}
+          after
+            10_000 -> {:ok, :timed_out}
+          end
+        end)
+      end)
+
+    assert_receive :held, 5_000
+    update = Task.async(fn -> Memory.update(v1.id, %{content: newer}) end)
+    forget = Task.async(fn -> Memory.forget(v1.id) end)
+
+    # Both are waiting on the root's row while the holder has it.
+    assert Task.yield(update, 300) == nil
+    assert Task.yield(forget, 300) == nil
+    send(holder.pid, :release)
+    assert {:ok, :released} = Task.await(holder, 10_000)
+
+    assert :ok = Task.await(forget, 10_000)
+    assert_update_lost(Task.await(update, 10_000), "after the release")
+    assert live_with(ctx, newer) == []
   end
 
   test "a hard delete erases what a forget erases, and the chain's rows", ctx do
@@ -142,6 +212,39 @@ defmodule OptimalEngine.Memory.ForgetChainTest do
       Store.raw_query("SELECT is_forgotten FROM memories WHERE id = ?1", [their_root])
 
     assert flag == 0
+  end
+
+  # `POST /api/memory` takes `source_chunk_id` as given, so a memory can name
+  # a chunk of another tenant: forgetting it must not remove that chunk.
+  test "a forget never removes another tenant's chunk the memory names", ctx do
+    chunk = "foreign-chunk-#{ctx.n}"
+    theirs = text(ctx, "theirchunk")
+
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO chunks (id, tenant_id, signal_id, scale, text) VALUES (?1, ?2, ?3, 'paragraph', ?4)",
+        [chunk, "other-tenant-#{ctx.n}", "gone-signal-#{ctx.n}", theirs]
+      )
+
+    {:ok, mine} =
+      Memory.create(%{
+        content: text(ctx, "namesforeign"),
+        workspace_id: ctx.workspace,
+        source_chunk_id: chunk
+      })
+
+    assert :ok = Memory.forget(mine.id)
+    assert {:ok, [[^theirs]]} = Store.raw_query("SELECT text FROM chunks WHERE id = ?1", [chunk])
+
+    {:ok, again} =
+      Memory.create(%{
+        content: text(ctx, "namesforeign2"),
+        workspace_id: ctx.workspace,
+        source_chunk_id: chunk
+      })
+
+    assert :ok = Memory.delete(again.id)
+    assert {:ok, [[^theirs]]} = Store.raw_query("SELECT text FROM chunks WHERE id = ?1", [chunk])
   end
 
   # The update waits for the forget holding the chain's root, and so lands
