@@ -8,6 +8,7 @@ defmodule OptimalEngine.Maintenance do
   | `maintenance.chunk_embeddings` | embeds the workspace's chunks that have no embedding (`OptimalEngine.Embed.ChunkBackfill`) |
   | `maintenance.graph_backfill` | writes the relationship edges of the workspace's contexts and claims (`OptimalEngine.Graph.Backfill`) |
   | `maintenance.association_projection` | rebuilds the workspace's associative projection (`OptimalEngine.MemoryCore.AssociativeProjection`) once a recall finds it older than its sources |
+  | `maintenance.qdrant_sync` | brings the workspace's Qdrant projection level with its embedded vectors (`OptimalEngine.Storage.Qdrant.Sync`), queued when a search finds their counts differ |
 
   A job belongs to one workspace, and a workspace has at most one queued or
   running job of each kind: a request while one is active gets that job.
@@ -36,14 +37,18 @@ defmodule OptimalEngine.Maintenance do
   alias OptimalEngine.Graph.Backfill, as: GraphBackfill
   alias OptimalEngine.{Jobs, Store}
   alias OptimalEngine.MemoryCore.{AssociativeProjection, ScopeEnvelope}
+  alias OptimalEngine.Storage.Qdrant.Projection, as: QdrantProjection
+  alias OptimalEngine.Storage.Qdrant.Sync, as: QdrantSync
 
   @chunk_kind "maintenance.chunk_embeddings"
   @graph_kind "maintenance.graph_backfill"
   @projection_kind "maintenance.association_projection"
-  @kinds [@chunk_kind, @graph_kind, @projection_kind]
+  @qdrant_kind "maintenance.qdrant_sync"
+  @kinds [@chunk_kind, @graph_kind, @projection_kind, @qdrant_kind]
 
   @chunk_batch 500
   @graph_batch 1_000
+  @qdrant_batch 2_000
   @pause_ms 20
   @lease_seconds 900
   @sweep_priority -10
@@ -52,7 +57,7 @@ defmodule OptimalEngine.Maintenance do
   @max_deferral_s 3_600
   @keep_days 7
 
-  @type kind :: :chunk_embeddings | :graph_backfill | :association_projection
+  @type kind :: :chunk_embeddings | :graph_backfill | :association_projection | :qdrant_sync
   @type outcome :: :completed | :continued | :deferred | :retry | :dead
 
   @type sweep :: %{
@@ -67,6 +72,7 @@ defmodule OptimalEngine.Maintenance do
   def kind(:chunk_embeddings), do: @chunk_kind
   def kind(:graph_backfill), do: @graph_kind
   def kind(:association_projection), do: @projection_kind
+  def kind(:qdrant_sync), do: @qdrant_kind
 
   @doc "Every maintenance job kind."
   @spec kinds() :: [String.t()]
@@ -210,10 +216,12 @@ defmodule OptimalEngine.Maintenance do
   @spec prune(pos_integer()) :: {:ok, non_neg_integer()} | {:error, term()}
   def prune(days \\ @keep_days) when is_integer(days) and days > 0 do
     # SQLite date arithmetic; a Postgres store uses now() - interval.
+    kinds = Enum.map_join(1..length(@kinds), ", ", &"?#{&1}")
+
     sql = """
     DELETE FROM jobs
-    WHERE kind IN (?1, ?2, ?3) AND status = 'completed'
-      AND completed_at < datetime('now', '-' || ?4 || ' days')
+    WHERE kind IN (#{kinds}) AND status = 'completed'
+      AND completed_at < datetime('now', '-' || ?#{length(@kinds) + 1} || ' days')
     """
 
     Store.transaction(fn txn -> Store.txn_execute(txn, sql, @kinds ++ [days]) end)
@@ -288,6 +296,35 @@ defmodule OptimalEngine.Maintenance do
     |> AssociativeProjection.rebuild()
   end
 
+  # Qdrant that does not answer is waited for like an embedder that does not:
+  # the job is deferred, not failed.
+  defp do_perform(%{kind: @qdrant_kind, workspace_id: workspace_id, payload: payload}, opts) do
+    run_opts = [
+      workspace_id: workspace_id,
+      limit: Keyword.get(opts, :batch, @qdrant_batch),
+      after: payload["after"],
+      pause_ms: Keyword.get(opts, :pause_ms, @pause_ms)
+    ]
+
+    case QdrantSync.run(run_opts) do
+      # A workspace marked dirty while this pass ran keeps its mark; a fresh
+      # pass follows, since a job queued now would coalesce with this one.
+      {:ok, %{next: nil} = result} ->
+        if QdrantProjection.dirty?(workspace_id),
+          do: {:continue, Map.delete(payload, "after"), result},
+          else: {:ok, result}
+
+      {:ok, result} ->
+        {:continue, progress(payload, "after", result.next), result}
+
+      {:error, {:qdrant_unavailable, _}} = unavailable ->
+        {:deferred, unavailable}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
   defp do_perform(job, _opts), do: {:error, {:unknown_kind, job.kind}}
 
   defp settle(job, owner, {:ok, _result}) do
@@ -316,7 +353,7 @@ defmodule OptimalEngine.Maintenance do
       payload = Map.put(job.payload, "deferrals", deferrals + 1)
 
       with {:ok, deferred} <-
-             Jobs.defer(job.id, owner, "deferred: embedder unavailable", retry_in, payload: payload),
+             Jobs.defer(job.id, owner, deferred_note(job.kind), retry_in, payload: payload),
            do: {:ok, %{job: deferred, outcome: :deferred}}
     else
       settle(job, owner, {:error, {:embedder_unavailable_after_deferrals, deferrals, reason}})
@@ -328,6 +365,9 @@ defmodule OptimalEngine.Maintenance do
 
     Jobs.fail(job.id, owner, reason)
   end
+
+  defp deferred_note(@qdrant_kind), do: "deferred: qdrant unavailable"
+  defp deferred_note(_kind), do: "deferred: embedder unavailable"
 
   # ── payload helpers ─────────────────────────────────────────────────────
 

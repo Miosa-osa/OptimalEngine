@@ -985,6 +985,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       plan = artifact_plan(workspace_id)
       deleted = delete_rows(tenant_id, workspace_id)
       :ok = remove_files(workspace_id)
+      # The workspace's points leave this Engine's Qdrant projection with its rows.
+      OptimalEngine.Storage.Qdrant.Projection.remove_workspace(workspace_id)
 
       cache_purged =
         Cache.summary(Cache.purge_workspace(workspace_id, :move, plan_option(plan)))

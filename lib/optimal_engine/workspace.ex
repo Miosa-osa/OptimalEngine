@@ -791,6 +791,10 @@ defmodule OptimalEngine.Workspace do
       {:ok, _} ->
         forget_in_nats(id)
         forget_unheld_connector_packages(id)
+        # The workspace's vectors leave the Qdrant projection with it. A
+        # removal that fails is logged; nothing archived is ever searched
+        # through Qdrant, and the next sync removes what is left.
+        OptimalEngine.Storage.Qdrant.Projection.remove_workspace(id)
 
         cache =
           case Cache.purge_workspace(id, :archive) do

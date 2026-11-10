@@ -10,7 +10,7 @@ defmodule OptimalEngine.Storage.QdrantAdapterTest do
   alias OptimalEngine.Storage.Qdrant.Adapter
   alias OptimalEngine.TestSupport.QdrantStub
 
-  @env ~w(OPTIMAL_QDRANT_URL OPTIMAL_QDRANT_API_KEY)
+  @env ~w(OPTIMAL_QDRANT_URL OPTIMAL_QDRANT_API_KEY OPTIMAL_QDRANT_SERVING)
 
   setup do
     previous = Map.new(@env, &{&1, System.get_env(&1)})
@@ -50,14 +50,15 @@ defmodule OptimalEngine.Storage.QdrantAdapterTest do
     assert %{api_key_configured: true, lifecycle_state: "configured_unverified"} = Adapter.status()
   end
 
-  test "a server that lists collections is healthy and available; a closed port is unreachable" do
+  test "a server that lists collections is healthy and active (the Engine serves from it); a closed port is unreachable" do
     {:ok, stub} = QdrantStub.start()
     on_exit(fn -> QdrantStub.stop(stub) end)
     System.put_env("OPTIMAL_QDRANT_URL", stub.endpoint)
 
     assert Qdrant.health() == :healthy
     assert {:ok, provider} = Providers.get("qdrant", probe: true)
-    assert provider.lifecycle_state == "available"
+    assert provider.lifecycle_state == "active"
+    assert %{lifecycle_state: "active", serving: %{enabled: true}} = Adapter.status(probe: true)
     assert [{"GET", "/collections"} | _] = QdrantStub.requests(stub)
 
     QdrantStub.stop(stub)

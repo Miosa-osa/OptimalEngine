@@ -346,6 +346,7 @@ defmodule OptimalEngine.Sync.Lineage do
     "dead_letter_jobs" => {:structural, []},
     "evaluation_runs" => {:structural, []},
     "jobs" => {:structural, []},
+    "qdrant_pending_removals" => {:structural, []},
     "memory_path_priors" => {:structural, []},
     "model_adapters" => {:structural, []},
     "node_members" => {:structural, []},

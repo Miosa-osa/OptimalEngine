@@ -223,7 +223,31 @@ defmodule OptimalEngine.Store do
 
   def insert_intents(rows), do: adapter().insert_intents(rows)
 
-  def insert_embeddings(rows), do: adapter().insert_embeddings(rows)
+  @doc """
+  Upserts chunk embeddings, then mirrors them to the Qdrant projection when it
+  is enabled (`OptimalEngine.Storage.Qdrant.Projection`). The mirror never fails
+  the write.
+  """
+  @spec insert_embeddings([struct() | map()]) :: :ok | {:error, term()}
+  def insert_embeddings(rows) do
+    case adapter().insert_embeddings(rows) do
+      :ok ->
+        workspace =
+          Enum.find_value(rows, &(Map.get(&1, :workspace_id) || Map.get(&1, "workspace_id")))
+
+        rows
+        |> Enum.map(&(Map.get(&1, :chunk_id) || Map.get(&1, "chunk_id")))
+        |> Enum.filter(&is_binary/1)
+        |> then(
+          &OptimalEngine.Storage.Qdrant.Projection.mirror(:chunks, &1, workspace_id: workspace)
+        )
+
+        :ok
+
+      other ->
+        other
+    end
+  end
 
   def insert_clusters(rows), do: adapter().insert_clusters(rows)
 

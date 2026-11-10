@@ -152,7 +152,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_workspace_id_order_indexes(),
       migration_key_grants_backfill(),
       migration_triple_mirror_changes(),
-      migration_sync_history()
+      migration_sync_history(),
+      migration_qdrant_pending_removals()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -800,6 +801,38 @@ defmodule OptimalEngine.Store.Migrations do
   # a peer and `sync_identity.label` this Engine; both are optional and stay on
   # this Engine. Additive. The version is provisional, like the ones above.
   @sync_history_version 87
+
+  # Removals from the Qdrant projection that have not reached Qdrant yet: a
+  # vector or memory deleted, a memory forgotten, a workspace archived or moved
+  # while Qdrant was unreachable. Each row names this Engine's points by a
+  # payload field (`OptimalEngine.Storage.Qdrant.Projection`) and stays until
+  # Qdrant has deleted them; the projection retries on a timer and every sync
+  # retries first. Engine state, never replicated. Additive. The version is
+  # provisional, like the ones above.
+  @qdrant_pending_removals_version 88
+
+  defp migration_qdrant_pending_removals do
+    {@qdrant_pending_removals_version,
+     "qdrant pending removals: projection deletes kept until Qdrant takes them",
+     [
+       {"qdrant_pending_removals",
+        """
+        CREATE TABLE IF NOT EXISTS qdrant_pending_removals (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          field TEXT NOT NULL,
+          ids TEXT NOT NULL,
+          tenant_id TEXT,
+          workspace_id TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
+          created_at TEXT NOT NULL
+        )
+        """},
+       {"idx_qdrant_pending_removals_created",
+        "CREATE INDEX IF NOT EXISTS idx_qdrant_pending_removals_created ON qdrant_pending_removals(created_at, id)"}
+     ]}
+  end
 
   defp migration_sync_history do
     {@sync_history_version,

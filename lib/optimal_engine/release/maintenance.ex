@@ -42,6 +42,8 @@ defmodule OptimalEngine.Release.Maintenance do
      "embed chunks with no embedding (--workspace, --limit, --batch, --dry-run)"},
     {"graph_backfill", Mix.Tasks.Optimal.GraphBackfill, :stopped,
      "write the graph edges of contexts and claims (--workspace, --batch, --no-claims)"},
+    {"qdrant_sync", Mix.Tasks.Optimal.QdrantSync, :stopped,
+     "push embeddings to the Qdrant projection and remove orphans (--workspace, --batch)"},
     {"facts", Mix.Tasks.Optimal.Facts, :stopped, "list or show Memory Core facts"},
     {"claims", Mix.Tasks.Optimal.Claims, :stopped,
      "list, show, promote or reject Memory Core claims"},

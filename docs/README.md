@@ -204,7 +204,7 @@ flowchart LR
 | Postgres | Optional provider for scale, wired (`OPTIMAL_STORE=postgres` at boot), replication and the NATS flows included. |
 | NATS | Provider with an adapter and a supervised JetStream client; carries the flows named in `OPTIMAL_NATS_FLOWS`, each after the Engine stored it in its store (SQLite or PostgreSQL). |
 | Valkey, DuckDB, OpenBao | Providers with an adapter, health-checked and proved by a round trip, and in the data path when configured: Valkey the rate limits and caches, DuckDB the workspace analytics, OpenBao the secret references, connector credentials (opt in) and backup transit keys. |
-| Qdrant | Provider with an adapter, health-checked and proved by a round trip; no Engine feature uses it yet. |
+| Qdrant | Serving vector search when `OPTIMAL_QDRANT_URL` is set: a projection of every embedding, each candidate read back from the canonical store, the embedded vectors as the fallback. |
 | Fractal | Declared provider with no adapter yet. |
 | Markdown/files | Human-operable projection and editing surface. |
 | HTML/wiki/API/app views | Projection and control surfaces. |

@@ -23,13 +23,14 @@ defmodule OptimalEngine.Release.MaintenanceTest do
 
   test "the tasks are the ones a managed Engine runs, each with a Mix-free entry point" do
     assert Maintenance.tasks() ==
-             ~w(migrate health embed_backfill graph_backfill facts claims conformance)
+             ~w(migrate health embed_backfill graph_backfill qdrant_sync facts claims conformance)
 
     for module <- [
           Mix.Tasks.Optimal.Migrate,
           Mix.Tasks.Optimal.Health,
           Mix.Tasks.Optimal.EmbedBackfill,
           Mix.Tasks.Optimal.GraphBackfill,
+          Mix.Tasks.Optimal.QdrantSync,
           Mix.Tasks.Optimal.Facts,
           Mix.Tasks.Optimal.Claims,
           Mix.Tasks.Optimal.Conformance

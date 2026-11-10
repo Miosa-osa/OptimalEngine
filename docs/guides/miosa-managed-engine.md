@@ -102,11 +102,12 @@ At 70 percent of a limit on the largest embedded profile, `GET /api/storage` rec
 | --- | --- | --- |
 | `disk_bytes` | S3-compatible object storage | Wired. Assets and offsite backups move to a MIOSA bucket. |
 | `writes_per_minute` | Postgres and NATS JetStream | Postgres is wired, replication included. NATS JetStream is reached and proved over `OPTIMAL_NATS_URL` and carries the flows named in `OPTIMAL_NATS_FLOWS`, but every Engine write lands in SQLite first, so it adds no write capacity. |
-| `vectors` | Qdrant | Reached and proved over `OPTIMAL_QDRANT_URL`; the Engine's vector search still reads the embedded vectors. |
+| `vectors` | Qdrant | Serving over `OPTIMAL_QDRANT_URL`: every embedding is mirrored to it and vector search reads it, falling back to the embedded vectors. |
 | anything else | Postgres | Wired, as above. |
 
 Managed Valkey, NATS JetStream and Qdrant are reached through `OPTIMAL_VALKEY_URL`, `OPTIMAL_NATS_URL` and `OPTIMAL_QDRANT_URL`.
-Until their adapters ship, the Scale size is the biggest single Engine, with S3 for assets and backups.
+Qdrant serves vector search as soon as its URL is set, and Engines can share one managed Qdrant: each writes to collections named for its own replica id and filters every request on its `engine_id`, so no Engine reads or removes another's points; a new Engine mirrors as it writes, and an Engine that already holds vectors fills Qdrant with `bin/optimal maintenance qdrant_sync` (or on its own: the first search of a workspace whose counts differ queues a sync job for it).
+Valkey carries the shared rate limits and caches and NATS JetStream the flows named in `OPTIMAL_NATS_FLOWS`, but neither adds write capacity, so the Scale size is the biggest single Engine, with S3 for assets and backups, Qdrant for vectors and Postgres for writers.
 
 ## Operating Model
 

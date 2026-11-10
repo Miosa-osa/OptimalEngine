@@ -137,6 +137,21 @@ defmodule OptimalEngine.Storage.Qdrant do
     end
   end
 
+  @doc """
+  One request to the configured Qdrant, in the provider's own style: sent once,
+  with the `api-key` header when a key is set. Returns `{:ok, status, body}`,
+  `{:error, :not_configured}`, or `{:error, reason}` with the failure's class
+  only (never the request, which may carry the key).
+  """
+  @spec request(atom(), String.t(), map() | nil, keyword()) ::
+          {:ok, non_neg_integer(), term()} | {:error, term()}
+  def request(method, path, body \\ nil, opts \\ []) do
+    case config(opts) do
+      {:ok, config} -> call(config, method, path, body, opts)
+      {:error, _} = error -> error
+    end
+  end
+
   defp call(config, method, path, body, opts) do
     request_opts =
       [

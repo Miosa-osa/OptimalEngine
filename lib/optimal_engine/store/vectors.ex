@@ -17,11 +17,23 @@ defmodule OptimalEngine.Store.Vectors do
   acceptable for a personal knowledge store (hundreds of thousands of entries)
   and avoids a native sqlite-vec extension dependency.  If the store grows
   beyond ~50 K vectors, revisit with an approximate-nearest-neighbour index.
+
+  ## Qdrant
+
+  When the Qdrant projection is enabled (`OPTIMAL_QDRANT_URL`, see
+  `OptimalEngine.Storage.Qdrant.Projection`), every stored vector is also
+  upserted to Qdrant and every deleted one removed, and `search/2` asks Qdrant
+  for its candidates while Qdrant holds the whole workspace. The candidates are
+  read back from SQLite and scored here exactly as the embedded search scores
+  them, so the answer has the same shape, filters and scores. Any failure, or a
+  workspace whose counts differ, searches the embedded vectors.
   """
 
   require Logger
 
   alias OptimalEngine.Store
+  alias OptimalEngine.Storage.Qdrant.Projection
+  alias OptimalEngine.Storage.Qdrant.Search, as: QdrantSearch
   alias OptimalEngine.Store.Replace
 
   # ---------------------------------------------------------------------------
@@ -78,6 +90,8 @@ defmodule OptimalEngine.Store.Vectors do
     case Replace.raw_query(sql, [context_id, {:blob, blob}, dims, workspace_id, tenant_id]) do
       {:ok, _} ->
         Logger.debug("[VectorStore] Stored embedding for #{context_id} (#{dims} dims)")
+        # The projection follows the canonical write and never fails it.
+        Projection.mirror(:contexts, [context_id], workspace_id: workspace_id)
         :ok
 
       {:error, reason} = err ->
@@ -113,25 +127,55 @@ defmodule OptimalEngine.Store.Vectors do
     node_filter = Keyword.get(opts, :node_filter)
 
     {sql, params} = build_search_query(workspace_id, type_filter, node_filter)
-    query_bytes = length(query_embedding) * 4
-    query_norm = norm(query_embedding)
+    score = &scored(&1, query_embedding, norm(query_embedding), min_sim)
 
-    case Store.raw_query(sql, params) do
-      {:ok, rows} ->
-        results =
-          rows
-          |> Enum.filter(fn [_cid, blob] -> byte_size(blob) == query_bytes end)
-          |> Enum.map(fn [cid, blob] -> {cid, similarity(query_embedding, query_norm, blob)} end)
-          |> Enum.filter(fn {_cid, sim} -> sim >= min_sim end)
-          |> Enum.sort_by(fn {cid, sim} -> {0.0 - sim, cid} end)
-          |> Enum.take(limit)
+    # Qdrant proposes; the rows read back here with the same scope and filters
+    # decide, scored the same way.
+    verify = fn ids ->
+      placeholders = Enum.map_join(1..length(ids), ", ", &"?#{&1 + length(params)}")
 
+      with {:ok, rows} <-
+             Store.raw_query(sql <> " AND v.context_id IN (#{placeholders})", params ++ ids),
+           do: {:ok, score.(rows)}
+    end
+
+    case QdrantSearch.nearest(
+           :contexts,
+           query_embedding,
+           %{workspace_id: workspace_id},
+           [limit: limit, min_similarity: min_sim],
+           verify
+         ) do
+      {:ok, results} ->
         {:ok, results}
 
-      {:error, reason} = err ->
-        Logger.warning("[VectorStore] Search query failed: #{inspect(reason)}")
-        err
+      :fallback ->
+        case Store.raw_query(sql, params) do
+          {:ok, rows} ->
+            results =
+              rows
+              |> score.()
+              |> Enum.sort_by(fn {cid, sim} -> {0.0 - sim, cid} end)
+              |> Enum.take(limit)
+
+            {:ok, results}
+
+          {:error, reason} = err ->
+            Logger.warning("[VectorStore] Search query failed: #{inspect(reason)}")
+            err
+        end
     end
+  end
+
+  # Rows of `[context_id, blob]` scored against the query: a vector of another
+  # dimension is never scored, and one under the threshold is dropped.
+  defp scored(rows, query_embedding, query_norm, min_sim) do
+    query_bytes = length(query_embedding) * 4
+
+    rows
+    |> Enum.filter(fn [_cid, blob] -> byte_size(blob) == query_bytes end)
+    |> Enum.map(fn [cid, blob] -> {cid, similarity(query_embedding, query_norm, blob)} end)
+    |> Enum.filter(fn {_cid, sim} -> sim >= min_sim end)
   end
 
   @doc """
@@ -200,6 +244,7 @@ defmodule OptimalEngine.Store.Vectors do
     case Store.raw_query(sql, [context_id]) do
       {:ok, _} ->
         Logger.debug("[VectorStore] Deleted embedding for #{context_id}")
+        Projection.remove(:contexts, "context_id", [context_id])
         :ok
 
       {:error, reason} = err ->
