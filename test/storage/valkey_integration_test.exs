@@ -6,7 +6,7 @@ defmodule OptimalEngine.Storage.ValkeyIntegrationTest do
       docker run --rm -p 6390:6379 valkey/valkey:8.1
       OPTIMAL_TEST_VALKEY_URL=redis://127.0.0.1:6390/15 mix test --only valkey
 
-  It writes only under `optimal:shared:optimal_valkey_it*` and clears that.
+  It writes only under `<Shared.key_prefix()>:optimal_valkey_it*` and clears that.
   """
   use ExUnit.Case, async: false
 
@@ -99,6 +99,39 @@ defmodule OptimalEngine.Storage.ValkeyIntegrationTest do
     assert :ok = Shared.take_token(@ns, "fast", 1, 1.0, :keep, 60_000)
   end
 
+  test "after an outage the bucket script charges what this node spent, never sets its count" do
+    Local.new_table(@ns)
+    now = System.monotonic_time(:millisecond)
+
+    # A bucket this node never saw, denied during the outage: nothing spent,
+    # so the server's full bucket stays full.
+    :ets.insert(@ns, {"unseen", {0.0, now, {:fallback, 0}}, now + 60_000})
+    assert :ok = Shared.take_token(@ns, "unseen", 3, 1.0e-6, :keep, 60_000)
+    assert [{"unseen", {left, _at}, _}] = :ets.lookup(@ns, "unseen")
+    assert_in_delta left, 2.0, 0.01
+
+    # Two tokens spent locally come off the server's three: one is left, and
+    # this step takes it.
+    :ets.insert(@ns, {"spent", {1.0, now, {:fallback, 2}}, now + 60_000})
+    assert :ok = Shared.take_token(@ns, "spent", 3, 1.0e-6, :keep, 60_000)
+    assert [{"spent", {mirrored, _at}, _}] = :ets.lookup(@ns, "spent")
+    assert_in_delta mirrored, 0.0, 0.01
+    assert {:limited, _, _} = Shared.take_token(@ns, "spent", 3, 1.0e-6, :keep, 60_000)
+  end
+
+  test "the generation key carries a TTL, given again when it was written without one" do
+    :ok = Shared.clear(@ns)
+    gen_key = "#{Shared.key_prefix()}:#{@ns}:gen"
+    assert {:ok, pttl} = Pool.command(["PTTL", gen_key])
+    assert pttl > 0
+
+    assert {:ok, 1} = Pool.command(["PERSIST", gen_key])
+    assert {:ok, -1} = Pool.command(["PTTL", gen_key])
+    _ = Shared.get(@ns, "anything")
+    assert {:ok, renewed} = Pool.command(["PTTL", gen_key])
+    assert renewed > 0
+  end
+
   test "denied API checks do not refill the bucket faster than its rate" do
     RateLimiter.reset()
     key = "it-hammer:#{System.unique_integer([:positive])}"
@@ -126,7 +159,7 @@ defmodule OptimalEngine.Storage.ValkeyIntegrationTest do
   end
 
   defp gen do
-    case Pool.command(["GET", "optimal:shared:#{@ns}:gen"]) do
+    case Pool.command(["GET", "#{Shared.key_prefix()}:#{@ns}:gen"]) do
       {:ok, nil} -> 0
       {:ok, g} -> String.to_integer(g)
     end

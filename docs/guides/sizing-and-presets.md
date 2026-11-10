@@ -52,7 +52,7 @@ Over the limit the answer is 429 `{"error": "rate_limited", "retry_after_ms": N}
 A bucket lives on the node that answered the request unless `OPTIMAL_VALKEY_URL` is set.
 Behind a load balancer with several Engine processes and no Valkey, each process keeps its own buckets, so a key can spend its allowance once per process.
 With Valkey every process draws on one bucket per key, stepped atomically on the Valkey server's clock, and the same holds for the connector rate limits, the cache of verified API keys and the sync gate cache ([Valkey](storage-providers.md#valkey)).
-If Valkey stops answering, each process goes back to its own buckets until it reconnects; no request fails because Valkey is down.
+If Valkey stops answering, each process goes on from the last bucket Valkey gave it (a bucket it never saw starts empty) until it reconnects, and Valkey then keeps the lower count; no request fails because Valkey is down, and an outage never hands out a fresh bucket.
 
 ## Usage gauges
 

@@ -47,7 +47,8 @@ defmodule OptimalEngine.Sync.GateCache do
   Engine's replica id: the stamp is a set of SQLite sequences, which only
   mean something for the store they were read from, so two Engines with
   stores of their own never share an entry, while the processes on one store
-  do. Without a replica id nothing is cached on Valkey. `clear/0` reaches
+  do. Without a replica id (a store with no sync identity) the entries stay
+  in this node's table, as they do without Valkey. `clear/0` reaches
   Valkey too (deferred while it is unreachable), and a lookup Valkey cannot
   answer falls back to this table.
   """
@@ -81,21 +82,18 @@ defmodule OptimalEngine.Sync.GateCache do
   def fetch(key, stamp, build) do
     ttl = ttl_ms()
 
-    case ttl > 0 && scoped(key) do
+    case ttl > 0 && store(key) do
       false ->
         build.()
 
-      nil ->
-        build.()
-
-      scoped ->
-        case Shared.get(@table, scoped) do
+      {get, put} ->
+        case get.() do
           {:ok, {^stamp, value}} ->
             value
 
           _stale_or_none ->
             value = build.()
-            Shared.put(@table, scoped, {stamp, value}, ttl, max_entries: @max_entries)
+            put.({stamp, value}, ttl)
             value
         end
     end
@@ -105,15 +103,34 @@ defmodule OptimalEngine.Sync.GateCache do
   @spec clear() :: :ok
   def clear, do: Shared.clear(@table)
 
-  # Locally the key is the key; on Valkey it is scoped to this store.
-  defp scoped(key) do
-    case Shared.backend() do
-      :local -> key
-      :valkey -> with id when is_binary(id) <- replica_id(), do: {id, key}
+  # Where an entry is read and written. On Valkey the key is scoped to this
+  # store's replica id; without one (a store that has no sync identity, such
+  # as PostgreSQL) the entry stays in this node's table, exactly as without
+  # Valkey, instead of not being cached at all.
+  defp store(key) do
+    with :valkey <- Shared.backend(),
+         id when is_binary(id) <- replica_id() do
+      scoped = {id, key}
+
+      {fn -> Shared.get(@table, scoped) end,
+       fn value, ttl -> Shared.put(@table, scoped, value, ttl, max_entries: @max_entries) end}
+    else
+      _local_or_no_replica ->
+        {fn -> Local.get(@table, key) end,
+         fn value, ttl -> Local.put(@table, key, value, ttl, max_entries: @max_entries) end}
     end
   end
 
+  # `config :optimal_engine, :sync_gate_cache_replica_id` overrides the store's
+  # id (tests use `nil` to stand for a store without one).
   defp replica_id do
+    case Application.fetch_env(:optimal_engine, :sync_gate_cache_replica_id) do
+      {:ok, id} -> id
+      :error -> store_replica_id()
+    end
+  end
+
+  defp store_replica_id do
     case OptimalEngine.Store.raw_query("SELECT replica_id FROM sync_identity WHERE id = 1", []) do
       {:ok, [[id]]} when is_binary(id) -> id
       _ -> nil

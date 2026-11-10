@@ -2,7 +2,7 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
   @moduledoc """
   A local RESP2 server for tests: the slice of the Redis protocol the Valkey
   provider uses (`AUTH`, `SELECT`, `PING`, `SET` with `PX`/`NX`, `GET`, `DEL`,
-  `INCR`, `PEXPIRE`, `HSET`, `HMGET`, `EVAL`, `EVALSHA`), with an in-memory key
+  `EXISTS`, `INCR`, `PEXPIRE`, `HSET`, `HMGET`, `EVAL`, `EVALSHA`), with an in-memory key
   space that honours expiry and a record of every command it served. It is
   written independently of `OptimalEngine.Storage.Valkey`, parsing requests as
   they arrive on the wire. No test here talks to a real Valkey (the tagged
@@ -27,7 +27,15 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
   def start(opts \\ []) do
     {:ok, agent} =
       Agent.start_link(fn ->
-        %{keys: %{}, expires: %{}, commands: [], scripts: %{}, mode: :normal, handlers: []}
+        %{
+          keys: %{},
+          expires: %{},
+          commands: [],
+          scripts: %{},
+          mode: :normal,
+          handlers: [],
+          fail: nil
+        }
       end)
 
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
@@ -65,6 +73,11 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
     end)
   end
 
+  @doc "Removes a key's TTL, as PERSIST does (a key written before it had one)."
+  @spec persist(map(), String.t()) :: :ok
+  def persist(%{agent: agent}, key),
+    do: Agent.update(agent, &%{&1 | expires: Map.delete(&1.expires, key)})
+
   @doc "Replaces the value of a key as stored (tests tampering with Valkey)."
   @spec put_raw(map(), String.t(), term()) :: :ok
   def put_raw(%{agent: agent}, key, value),
@@ -77,6 +90,14 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
     if mode == :down, do: Enum.each(handlers, &Process.exit(&1, :kill))
     :ok
   end
+
+  @doc """
+  Makes the server answer an error to every command `fun` returns a message
+  for (`fun.(command)` gives `nil` to serve it), as an ACL that refuses a
+  key (`NOPERM`) or a failing script does; `nil` serves everything again.
+  """
+  @spec fail_when(map(), (list() -> String.t() | nil) | nil) :: :ok
+  def fail_when(%{agent: agent}, fun), do: Agent.update(agent, &%{&1 | fail: fun})
 
   @doc "Closes every open connection (as a server dropping idle clients does)."
   @spec disconnect_all(map()) :: :ok
@@ -144,7 +165,14 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
     do: {"-NOAUTH Authentication required.\r\n", false}
 
   defp respond(command, agent, _password, authed?) do
-    reply = Agent.get_and_update(agent, fn state -> run(command, purge(state)) end)
+    reply =
+      Agent.get_and_update(agent, fn state ->
+        case state.fail && state.fail.(command) do
+          message when is_binary(message) -> {{:error, message}, state}
+          _serve -> run(command, purge(state))
+        end
+      end)
+
     {encode(reply), authed?}
   end
 
@@ -180,6 +208,9 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
     end
   end
 
+  defp run(["EXISTS" | keys], state),
+    do: {Enum.count(keys, &Map.has_key?(state.keys, &1)), state}
+
   defp run(["DEL" | keys], state) do
     present = Enum.count(keys, &Map.has_key?(state.keys, &1))
     {present, %{state | keys: Map.drop(state.keys, keys), expires: Map.drop(state.expires, keys)}}
@@ -194,6 +225,28 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
     if Map.has_key?(state.keys, key),
       do: {1, expire(state, key, String.to_integer(ms))},
       else: {0, state}
+  end
+
+  defp run(["PTTL", key], state) do
+    cond do
+      not Map.has_key?(state.keys, key) -> {-2, state}
+      Map.has_key?(state.expires, key) -> {Map.fetch!(state.expires, key) - now(), state}
+      true -> {-1, state}
+    end
+  end
+
+  # One pass over every key: the cursor always comes back "0".
+  defp run(["SCAN", _cursor | options], state) do
+    upper = Enum.map(options, &String.upcase/1)
+
+    pattern =
+      case Enum.find_index(upper, &(&1 == "MATCH")) do
+        nil -> ~r/.*/s
+        i -> glob(Enum.at(options, i + 1))
+      end
+
+    {["0", state.keys |> Map.keys() |> Enum.filter(&Regex.match?(pattern, &1)) |> Enum.sort()],
+     state}
   end
 
   defp run(["HSET", key | pairs], state) do
@@ -232,15 +285,39 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
 
   defp split_args(numkeys, rest), do: Enum.split(rest, String.to_integer(numkeys))
 
+  defp glob(pattern) do
+    pattern
+    |> Regex.escape()
+    |> String.replace("\\*", ".*")
+    |> String.replace("\\?", ".")
+    |> then(&Regex.compile!("\\A" <> &1 <> "\\z", "s"))
+  end
+
   # ---------------------------------------------------------------------------
   # The Engine's scripts (OptimalEngine.Storage.Shared), line for line.
   # ---------------------------------------------------------------------------
 
-  defp script(name, {[gen_key], [prefix, key | argv]}, state) do
-    gen =
+  # As the script: INCR the generation and give it its TTL again.
+  defp script("clear", {[gen_key], [ttl]}, state) do
+    {n, state} = run(["INCR", gen_key], state)
+    {n, expire(state, gen_key, String.to_integer(ttl))}
+  end
+
+  # As @resolve: a generation in use whose TTL is missing or past half is
+  # given its full TTL again.
+  defp script(name, {[gen_key], [gen_ttl, prefix, key | argv]}, state) do
+    {gen, state} =
       case Map.get(state.keys, gen_key) do
-        nil -> "0"
-        g -> g
+        nil ->
+          {"0", state}
+
+        g ->
+          ttl = String.to_integer(gen_ttl)
+
+          case run(["PTTL", gen_key], state) do
+            {left, state} when left < div(ttl, 2) -> {g, expire(state, gen_key, ttl)}
+            {_left, state} -> {g, state}
+          end
       end
 
     run_script(name, prefix <> gen <> ":" <> key, argv, state)
@@ -272,30 +349,44 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
     if Map.get(state.keys, k) == token, do: run(["DEL", k], state), else: {0, state}
   end
 
-  defp run_script("bucket", k, [cap, rate, deny, ttl], state) do
+  defp run_script("bucket", k, [cap, rate, deny, ttl | rest], state) do
     cap = parse_number(cap)
     rate = parse_number(rate)
     now = System.os_time(:millisecond)
 
-    case Map.get(state.keys, k) do
-      %{"tokens" => tokens, "at" => at} ->
-        elapsed = max(0, now - String.to_integer(at))
-        current = min(cap, parse_number(tokens) + elapsed * rate)
+    spent =
+      case rest do
+        [text] when text != "" -> parse_number(text)
+        _ -> nil
+      end
 
-        cond do
-          current >= 1 ->
-            {[1], save_bucket(state, k, current - 1, now, ttl)}
+    {current, elapsed, exists?} =
+      case Map.get(state.keys, k) do
+        %{"tokens" => tokens, "at" => at} ->
+          elapsed = max(0, now - String.to_integer(at))
+          {min(cap, parse_number(tokens) + elapsed * rate), elapsed, true}
 
-          # As the script: a kept denial writes nothing.
-          deny == "keep" ->
-            {[0, format(current), elapsed], state}
+        _ ->
+          {cap, 0, false}
+      end
 
-          true ->
-            {[0, format(current), elapsed], save_bucket(state, k, current, now, ttl)}
-        end
+    # As the script: what this node spent during an outage is taken off the
+    # server's bucket, never set as its count.
+    {current, lowered?} =
+      if spent != nil and spent > 0,
+        do: {max(0.0, current - spent), true},
+        else: {current, false}
 
-      _ ->
-        {[1], save_bucket(state, k, cap - 1, now, ttl)}
+    cond do
+      current >= 1 ->
+        {[1, format(current - 1)], save_bucket(state, k, current - 1, now, ttl)}
+
+      # As the script: a kept denial writes nothing, unless it lowered the bucket.
+      deny == "keep" and exists? and not lowered? ->
+        {[0, format(current), elapsed], state}
+
+      true ->
+        {[0, format(current), elapsed], save_bucket(state, k, current, now, ttl)}
     end
   end
 
