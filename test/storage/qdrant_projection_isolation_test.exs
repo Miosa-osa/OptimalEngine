@@ -118,7 +118,9 @@ defmodule OptimalEngine.Storage.QdrantProjectionIsolationTest do
     test "the orphan sweep and the count never see another Engine's points", ctx do
       assert {:ok, 1} = Projection.remote_count(ctx.collection, %{workspace_id: ctx.ws})
       assert {:ok, %{deleted: 0, next: nil}} = Sync.run(workspace_id: ctx.ws)
-      assert {:ok, %{deleted: 0, next: nil}} = Sync.run()
+      # The Engine-wide pass reads every workspace while async tests change
+      # theirs, so it may sweep their orphans; never the other Engine's point.
+      assert {:ok, %{next: nil}} = Sync.run()
       assert Map.has_key?(QdrantStub.points(ctx.stub, ctx.collection), ctx.foreign)
     end
   end
