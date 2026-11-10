@@ -139,6 +139,68 @@ defmodule OptimalEngine.Analyses.ScheduleCostTest do
     assert "#{ctx.other}:w4" in workspaces
   end
 
+  # The statements the calling process sends while `fun` runs.
+  defp store_statements(fun) do
+    me = self()
+    collector = spawn(fn -> collect_statements(me, []) end)
+    mfa = {Store, :raw_query, 2}
+    :erlang.trace_pattern(mfa, true, [{:meta, collector}])
+
+    try do
+      fun.()
+      :erlang.trace_pattern(mfa, false, [:meta])
+      send(collector, {:total, me})
+
+      receive do
+        {:statements, statements} -> statements
+      after
+        5_000 -> flunk("the statement collector did not answer")
+      end
+    after
+      :erlang.trace_pattern(mfa, false, [:meta])
+    end
+  end
+
+  defp collect_statements(pid, acc) do
+    receive do
+      {:trace_ts, ^pid, :call, {_m, _f, [sql, params]}, _ts} ->
+        collect_statements(pid, [{sql, params} | acc])
+
+      {:trace, ^pid, :call, {_m, _f, [sql, params]}} ->
+        collect_statements(pid, [{sql, params} | acc])
+
+      {:total, reply} ->
+        send(reply, {:statements, Enum.reverse(acc)})
+
+      _other ->
+        collect_statements(pid, acc)
+    end
+  end
+
+  # Every job the Engine ever queued stays in `jobs` until it is pruned, so a
+  # statement that reads the whole table per batch makes the daily schedule
+  # quadratic: on a full test database it ran past a minute (#259, test-current).
+  # SQLite's plan names a full read of a table, or of all of an index, `SCAN`;
+  # a lookup is a `SEARCH`.
+  @tag :sqlite_store
+  test "no statement of the schedule reads the whole jobs table", ctx do
+    statements =
+      store_statements(fn -> Analyses.schedule(Date.utc_today(), tenant_id: ctx.other) end)
+
+    assert statements != []
+
+    scans =
+      for {sql, params} <- statements,
+          sql =~ ~r/\bjobs\b/i,
+          {:ok, plan} = Store.raw_query("EXPLAIN QUERY PLAN " <> sql, params),
+          detail = Enum.map_join(plan, "\n", &List.last/1),
+          detail =~ ~r/\bSCAN (jobs|j)\b/,
+          do: {sql, detail}
+
+    assert scans == [],
+           "statements that read the whole jobs table:\n#{inspect(scans, pretty: true)}"
+  end
+
   describe "the Engine-wide export" do
     setup do
       env = OptimalEngine.Storage.DuckDB.env_name()

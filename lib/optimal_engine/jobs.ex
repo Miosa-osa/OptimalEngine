@@ -195,22 +195,27 @@ defmodule OptimalEngine.Jobs do
   end
 
   # How many of the entries now have their job: inserted, or there already.
+  # Driven by the entries, one lookup each on the jobs' unique key: `jobs`
+  # keeps every job until it is pruned, so a read of the whole table per
+  # batch made the daily schedule quadratic.
   defp accepted(chunk) do
-    keys =
-      Jason.encode!(
-        Enum.map(chunk, fn {t, w, _k, _p, key} -> %{"t" => t, "w" => w, "k" => key} end)
-      )
+    rows =
+      chunk
+      |> Enum.with_index()
+      |> Enum.map_join(", ", fn {_entry, i} -> "(?#{i * 3 + 1}, ?#{i * 3 + 2}, ?#{i * 3 + 3})" end)
+
+    params = Enum.flat_map(chunk, fn {t, w, _k, _p, key} -> [t, w, key] end)
 
     with {:ok, [[count]]} <-
            Store.raw_query(
              """
-             SELECT count(*) FROM jobs j
-              WHERE EXISTS (SELECT 1 FROM json_each(?1) e
-                             WHERE json_extract(e.value, '$.t') = j.tenant_id
-                               AND json_extract(e.value, '$.w') = j.workspace_id
-                               AND json_extract(e.value, '$.k') = j.idempotency_key)
+             WITH v(tenant_id, workspace_id, idempotency_key) AS (VALUES #{rows})
+             SELECT count(*) FROM v
+               JOIN jobs j ON j.tenant_id = v.tenant_id
+                          AND j.workspace_id = v.workspace_id
+                          AND j.idempotency_key = v.idempotency_key
              """,
-             [keys]
+             params
            ),
          do: {:ok, count}
   end
