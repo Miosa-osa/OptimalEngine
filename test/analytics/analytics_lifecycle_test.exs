@@ -231,6 +231,30 @@ defmodule OptimalEngine.AnalyticsLifecycleTest do
       end
     end
 
+    test "a prune that fails is logged by the analysis, and the export still runs", ctx do
+      home = workspace(ctx, "prune-fails")
+
+      # The default workspace not active: the prune refuses to run.
+      {:ok, _} =
+        Store.raw_query("UPDATE workspaces SET status = 'archived' WHERE id = 'default'", [])
+
+      on_exit(fn ->
+        Store.raw_query("UPDATE workspaces SET status = 'active' WHERE id = 'default'", [])
+      end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{outcome: :completed}} =
+                   Analyses.run_now(ctx.tenant, home, "analytics_engine_export")
+        end)
+
+      {:ok, _} =
+        Store.raw_query("UPDATE workspaces SET status = 'active' WHERE id = 'default'", [])
+
+      assert log =~ "[Analyses] analytics prune failed: :no_active_workspace"
+      assert File.regular?(Path.join(Analytics.engine_dir(ctx.root), "metrics.parquet"))
+    end
+
     test "running it as an analysis exports the Engine's metrics and prunes", ctx do
       gone = Analytics.workspace_dir(ctx.root, "#{ctx.tenant}:gone")
       File.mkdir_p!(gone)

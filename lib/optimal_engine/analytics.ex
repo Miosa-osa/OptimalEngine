@@ -197,8 +197,9 @@ defmodule OptimalEngine.Analytics do
   blip) is no verdict, and the directory is kept for the next prune. A store
   that does not hold the default workspace active (a fresh or restored
   database pointed at an old `OPTIMAL_ANALYTICS_PATH`) prunes nothing:
-  `{:error, :no_active_workspace}`, with a warning. Returns how many directories went and how many were skipped. `:lookup`
-  replaces the store lookup (tests).
+  `{:error, :no_active_workspace}`, with a warning. Returns how many
+  directories went and how many were skipped. `:lookup` replaces the store
+  lookup (tests).
   """
   @spec prune_removed(keyword()) ::
           {:ok, %{removed: non_neg_integer(), skipped: non_neg_integer()}} | {:error, term()}
