@@ -6,11 +6,10 @@
 # workspace on both and pairs them. Two memories written on A reach B; then A
 # forgets one and deletes the other. After one more cycle neither Engine's
 # ledger (`sync_mutations`, `sync_capture`, `sync_conflicts`) holds either
-# memory's text in a change of the memory, B holds the forgotten memory marked
-# forgotten and no longer holds the deleted one, and A serves neither text.
-#
-# The source package and claim that writing a memory stages hold its text too;
-# they are erased with the forget by #245 and are not part of this proof.
+# memory's text in any change (the memory's own, and those of the source
+# package and claim writing a memory stages, which the forget erases with it),
+# B holds the forgotten memory marked forgotten and no longer holds the deleted
+# one, and A serves neither text.
 #
 # Usage:
 #   scripts/proof-ledger-redaction.sh                       # SQLite stores
@@ -120,13 +119,12 @@ call() {
 
 json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 
-# ledger_hits ENGINE TEXT: changes of the memory tables (and redaction
-# requests) in the Engine's ledger, capture and conflicts that hold TEXT.
-MEMORY_TABLES="memories,memory_embeddings,memory_relations,ledger_redactions"
+# ledger_hits ENGINE TEXT: changes of any table in the Engine's ledger,
+# capture and conflicts that hold TEXT.
 ledger_hits() {
   local name=$1 text=$2 port schema
   if [ "$name" = a ]; then port=$PORT_A schema=$SCHEMA_A; else port=$PORT_B schema=$SCHEMA_B; fi
-  env $(engine_env "$name" "$port" "$schema") OPTIMAL_PROOF_TOKEN="$text" OPTIMAL_PROOF_TABLES="$MEMORY_TABLES" \
+  env $(engine_env "$name" "$port" "$schema") OPTIMAL_PROOF_TOKEN="$text" OPTIMAL_PROOF_TABLES="" \
     mix run --no-compile --no-start scripts/proof_ledger_grep.exs 2>>"$DATA/grep.log" | tail -1
 }
 
@@ -212,7 +210,7 @@ import json, sys
 page = json.load(open(sys.argv[1]))
 text, ids = sys.argv[2], set(sys.argv[3:])
 for m in page["mutations"]:
-    if m["entity_type"] in ("memories", "memory_embeddings", "memory_relations", "ledger_redactions") and text in json.dumps(m):
+    if text in json.dumps(m):
         sys.exit(1)
 PY
 done
