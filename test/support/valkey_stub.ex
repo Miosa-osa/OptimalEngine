@@ -2,7 +2,7 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
   @moduledoc """
   A local RESP2 server for tests: the slice of the Redis protocol the Valkey
   provider uses (`AUTH`, `SELECT`, `PING`, `SET` with `PX`/`NX`, `GET`, `DEL`,
-  `INCR`, `PEXPIRE`, `HSET`, `HMGET`, `EVAL`, `EVALSHA`), with an in-memory key
+  `EXISTS`, `INCR`, `PEXPIRE`, `HSET`, `HMGET`, `EVAL`, `EVALSHA`), with an in-memory key
   space that honours expiry and a record of every command it served. It is
   written independently of `OptimalEngine.Storage.Valkey`, parsing requests as
   they arrive on the wire. No test here talks to a real Valkey (the tagged
@@ -27,7 +27,15 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
   def start(opts \\ []) do
     {:ok, agent} =
       Agent.start_link(fn ->
-        %{keys: %{}, expires: %{}, commands: [], scripts: %{}, mode: :normal, handlers: []}
+        %{
+          keys: %{},
+          expires: %{},
+          commands: [],
+          scripts: %{},
+          mode: :normal,
+          handlers: [],
+          fail: nil
+        }
       end)
 
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
@@ -82,6 +90,14 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
     if mode == :down, do: Enum.each(handlers, &Process.exit(&1, :kill))
     :ok
   end
+
+  @doc """
+  Makes the server answer an error to every command `fun` returns a message
+  for (`fun.(command)` gives `nil` to serve it), as an ACL that refuses a
+  key (`NOPERM`) or a failing script does; `nil` serves everything again.
+  """
+  @spec fail_when(map(), (list() -> String.t() | nil) | nil) :: :ok
+  def fail_when(%{agent: agent}, fun), do: Agent.update(agent, &%{&1 | fail: fun})
 
   @doc "Closes every open connection (as a server dropping idle clients does)."
   @spec disconnect_all(map()) :: :ok
@@ -149,7 +165,14 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
     do: {"-NOAUTH Authentication required.\r\n", false}
 
   defp respond(command, agent, _password, authed?) do
-    reply = Agent.get_and_update(agent, fn state -> run(command, purge(state)) end)
+    reply =
+      Agent.get_and_update(agent, fn state ->
+        case state.fail && state.fail.(command) do
+          message when is_binary(message) -> {{:error, message}, state}
+          _serve -> run(command, purge(state))
+        end
+      end)
+
     {encode(reply), authed?}
   end
 
@@ -184,6 +207,9 @@ defmodule OptimalEngine.TestSupport.ValkeyStub do
       _other -> {{:error, "WRONGTYPE"}, state}
     end
   end
+
+  defp run(["EXISTS" | keys], state),
+    do: {Enum.count(keys, &Map.has_key?(state.keys, &1)), state}
 
   defp run(["DEL" | keys], state) do
     present = Enum.count(keys, &Map.has_key?(state.keys, &1))

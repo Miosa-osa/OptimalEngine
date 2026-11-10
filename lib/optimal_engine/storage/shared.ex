@@ -45,7 +45,9 @@ defmodule OptimalEngine.Storage.Shared do
   `delete/2` and `clear/1` always apply locally. When Valkey cannot take them,
   they are deferred in the pool and applied, in order, before any later command
   reaches Valkey, so nothing deleted during an outage (a revoked API key) is
-  read back from Valkey after it.
+  read back from Valkey after it. The deferred queue is coalesced and bounded
+  (`OptimalEngine.Storage.Valkey.Pool.defer/1`); an Engine with no key prefix
+  defers nothing, having written nothing to Valkey.
 
   Locks are leases: a holder that outlives its TTL loses the lock. While
   Valkey is down a lock is per node, as all locks were before.
@@ -263,51 +265,118 @@ defmodule OptimalEngine.Storage.Shared do
   bucket runs on the server's clock, atomically, so every node draws on it.
 
   Valkey dropping out never hands out a fresh bucket. Each answer from Valkey
-  is mirrored into this node's table, and while Valkey is configured but
-  cannot answer, the local step continues from that mirror; a bucket this
-  node never saw opens empty and refills at its rate. When Valkey answers
-  again, the first step gives it the tokens the local bucket holds, and the
-  server keeps the lower of its own count and that one. Both choices take the
-  conservative side: an outage can only make a limit tighter, never looser.
+  is mirrored into this node's table, and during an outage (no connection up,
+  or the command timed out) the local step continues from that mirror; a
+  bucket this node never saw opens as `OPTIMAL_VALKEY_OUTAGE_POLICY` says
+  (empty by default). When Valkey answers again, the first step charges it
+  what this node spent meanwhile.
+
+  A command Valkey answers with an error (an ACL's `NOPERM`, a failing
+  script, a reply that does not parse) or one this Engine cannot address yet
+  (no key prefix) is not an outage: it is logged once per kind and the step
+  runs on this node's own bucket, which opens full as without Valkey, so a
+  misconfiguration never becomes a 429 for every new client.
   """
   @spec take_token(namespace(), term(), pos_integer(), float(), :keep | :advance, pos_integer()) ::
           :ok | {:limited, float(), non_neg_integer()}
   def take_token(ns, key, capacity, refill_per_ms, deny, ttl_ms)
       when deny in [:keep, :advance] and is_integer(ttl_ms) and ttl_ms > 0 do
-    remote(
-      fn ->
-        spent =
-          case Local.fallback_spent(ns, key) do
-            nil -> ""
-            spent -> :erlang.float_to_binary(spent * 1.0, [:short])
-          end
+    local = &Local.take_token(ns, key, capacity, refill_per_ms, deny, ttl_ms, &1)
 
-        args = [
-          Integer.to_string(capacity),
-          :erlang.float_to_binary(refill_per_ms * 1.0, [:short]),
-          Atom.to_string(deny),
-          server_ttl(ttl_ms),
-          spent
-        ]
+    case valkey_bucket(ns, key, capacity, refill_per_ms, deny, ttl_ms) do
+      {:ok, result} ->
+        result
 
-        case eval(:bucket, ns, key, args) do
-          {:ok, [1, left]} -> mirrored(ns, key, ttl_ms, left, :ok)
-          {:ok, [0, tokens, elapsed]} -> mirrored(ns, key, ttl_ms, tokens, limited(tokens, elapsed))
-          _ -> :unavailable
+      :not_configured ->
+        local.([])
+
+      :down ->
+        local.(missing: outage_missing(), mark: :fallback)
+
+      {:refused, reason} ->
+        note_refused(reason)
+        local.(mark: :fallback)
+    end
+  end
+
+  defp valkey_bucket(ns, key, capacity, refill_per_ms, deny, ttl_ms) do
+    cond do
+      not Pool.running?() ->
+        :not_configured
+
+      not Pool.serving?() ->
+        :down
+
+      true ->
+        case Pool.flush(&apply_invalidation/1) do
+          :ok -> run_bucket(ns, key, capacity, refill_per_ms, deny, ttl_ms)
+          error -> failure(error)
         end
-      end,
-      fn ->
-        # Configured but not answering: an outage, not a node without Valkey.
-        # An Engine that cannot be named shares nothing on Valkey, so its
-        # local bucket is all there is, as on a node without Valkey.
-        opts =
-          if Pool.running?() and not unidentified?(),
-            do: [missing: outage_missing(), mark: :fallback],
-            else: []
+    end
+  end
 
-        Local.take_token(ns, key, capacity, refill_per_ms, deny, ttl_ms, opts)
+  # What this node spent during an outage is claimed (unmarked atomically)
+  # before it is sent, so steps in flight together charge it once; a step
+  # that does not get an answer owes it again.
+  defp run_bucket(ns, key, capacity, refill_per_ms, deny, ttl_ms) do
+    spent = Local.claim_fallback_spent(ns, key)
+
+    args = [
+      Integer.to_string(capacity),
+      :erlang.float_to_binary(refill_per_ms * 1.0, [:short]),
+      Atom.to_string(deny),
+      server_ttl(ttl_ms),
+      if(spent, do: Integer.to_string(spent), else: "")
+    ]
+
+    outcome =
+      case eval(:bucket, ns, key, args) do
+        {:ok, [1, left]} -> mirrored(ns, key, ttl_ms, left, :ok)
+        {:ok, [0, tokens, elapsed]} -> mirrored(ns, key, ttl_ms, tokens, limited(tokens, elapsed))
+        other -> failure(other)
       end
-    )
+
+    if spent && not match?({:ok, _}, outcome),
+      do: Local.restore_fallback_spent(ns, key, spent)
+
+    outcome
+  end
+
+  # A connection that is gone or a command that timed out is an outage;
+  # anything else Valkey (or this Engine) refused is not.
+  defp failure({:error, :unavailable}), do: :down
+  defp failure({:error, {:error, _} = inner}), do: failure(inner)
+  defp failure({:error, :no_key_prefix}), do: {:refused, :no_key_prefix}
+  defp failure({:error, {:server, message}}), do: {:refused, {:server, message}}
+  defp failure(other), do: {:refused, {:malformed, other}}
+
+  # Logged once per kind (the error's first word), never per request. The
+  # missing prefix is logged where the identity is resolved.
+  defp note_refused(:no_key_prefix), do: :ok
+
+  defp note_refused(reason) do
+    kind =
+      case reason do
+        {:server, message} -> message |> to_string() |> String.split(" ", parts: 2) |> hd()
+        {:malformed, _} -> "malformed"
+      end
+
+    unless :persistent_term.get({__MODULE__, :refused, kind}, false) do
+      :persistent_term.put({__MODULE__, :refused, kind}, true)
+
+      detail =
+        case reason do
+          {:server, message} -> String.slice(to_string(message), 0, 200)
+          {:malformed, _} -> "a reply the bucket script does not give"
+        end
+
+      Logger.error(
+        "[Valkey] the rate-limit bucket command was refused (#{detail}); buckets run on this " <>
+          "node's own table until Valkey takes it. Check the Valkey ACL and #{@prefix_env}."
+      )
+    end
+
+    :ok
   end
 
   # OPTIMAL_VALKEY_OUTAGE_POLICY: `closed` (the default) opens a bucket this
@@ -326,25 +395,32 @@ defmodule OptimalEngine.Storage.Shared do
   # Every key written to Valkey expires before its namespace's generation can.
   defp server_ttl(ttl_ms), do: Integer.to_string(min(ttl_ms, @max_ttl_ms))
 
-  defp mirrored(_ns, _key, _ttl_ms, _tokens, :unavailable), do: :unavailable
+  defp mirrored(_ns, _key, _ttl_ms, _tokens, :unavailable),
+    do: {:refused, {:malformed, :limited}}
 
   defp mirrored(ns, key, ttl_ms, tokens, result) do
     case Float.parse(to_string(tokens)) do
       {value, ""} ->
         Local.mirror_bucket(ns, key, value, ttl_ms)
-        result
+        {:ok, result}
 
       _ ->
-        :unavailable
+        {:refused, {:malformed, :tokens}}
     end
   end
 
-  @doc "The Valkey key a namespace and key resolve to under `generation`."
-  @spec valkey_key(namespace(), term(), non_neg_integer()) :: String.t()
-  def valkey_key(ns, key, generation \\ 0),
-    do:
-      (key_prefix() || "") <>
+  @doc """
+  The Valkey key a namespace and key resolve to under `generation`, or
+  `{:error, :no_key_prefix}` while this Engine has no prefix.
+  """
+  @spec valkey_key(namespace(), term(), non_neg_integer()) ::
+          String.t() | {:error, :no_key_prefix}
+  def valkey_key(ns, key, generation \\ 0) do
+    with {:ok, prefix} <- keyspace() do
+      prefix <>
         ":" <> Atom.to_string(ns) <> ":" <> Integer.to_string(generation) <> ":" <> encode_key(key)
+    end
+  end
 
   # ---------------------------------------------------------------------------
 
@@ -360,9 +436,14 @@ defmodule OptimalEngine.Storage.Shared do
     end
   end
 
+  # An Engine with no prefix writes nothing to Valkey, so it has nothing there
+  # to invalidate, and an invalidation it deferred could never be applied.
   defp invalidate(operation) do
     cond do
       not Pool.running?() ->
+        :ok
+
+      keyspace() == {:error, :no_key_prefix} ->
         :ok
 
       Pool.serving?() and Pool.flush(&apply_invalidation/1) == :ok and
@@ -424,8 +505,11 @@ defmodule OptimalEngine.Storage.Shared do
   # generation keys never expired. Once per boot each such generation key is
   # removed if nothing else is left under its namespace: an Engine still on
   # the old layout keeps live keys there, and removing its generation would
-  # bring back what it cleared, so that one is left for a later boot.
+  # bring back what it cleared, so that one is left for a later boot. A scan
+  # that fails removes nothing. Once none is left a marker key says so, and
+  # later boots (for its TTL) do not scan the keyspace again.
   @legacy_generations "optimal:shared:optimal_*:gen"
+  @legacy_marker "optimal:shared:legacy-layout-cleaned"
 
   defp cleanup_legacy_once do
     unless :persistent_term.get({__MODULE__, :legacy_cleaned}, false) do
@@ -445,13 +529,19 @@ defmodule OptimalEngine.Storage.Shared do
   end
 
   defp cleanup_legacy do
-    for gen <- scan(@legacy_generations) do
-      namespace = String.trim_trailing(gen, ":gen")
+    with {:ok, 0} <- Pool.command(["EXISTS", @legacy_marker]),
+         {:ok, generations} <- scan(@legacy_generations) do
+      kept = Enum.reject(generations, &remove_legacy_generation/1)
 
-      if scan(namespace <> ":*") -- [gen] == [] do
-        Pool.command(["DEL", gen])
-        Logger.info("[Valkey] removed #{gen}, left by the key layout before the Engine prefix")
-      end
+      if kept == [],
+        do:
+          Pool.command([
+            "SET",
+            @legacy_marker,
+            "1",
+            "PX",
+            Integer.to_string(@generation_ttl_ms)
+          ])
     end
 
     :ok
@@ -459,11 +549,41 @@ defmodule OptimalEngine.Storage.Shared do
     error -> Logger.debug("[Valkey] legacy key cleanup stopped: #{Exception.message(error)}")
   end
 
-  defp scan(pattern, cursor \\ "0", acc \\ []) do
+  defp remove_legacy_generation(gen) do
+    namespace = String.replace_suffix(gen, ":gen", "")
+
+    with {:ok, false} <- other_key?(namespace <> ":*", gen),
+         {:ok, _} <- Pool.command(["DEL", gen]) do
+      Logger.info("[Valkey] removed #{gen}, left by the key layout before the Engine prefix")
+      true
+    else
+      _ -> false
+    end
+  end
+
+  # Every key matching `pattern`: `{:ok, keys}`, or `:error` when any page
+  # of the scan failed (never a partial list).
+  defp scan(pattern, cursor \\ "0", pages \\ []) do
     case Pool.command(["SCAN", cursor, "MATCH", pattern, "COUNT", "1000"]) do
-      {:ok, ["0", keys]} -> acc ++ keys
-      {:ok, [next, keys]} -> scan(pattern, next, acc ++ keys)
-      _ -> acc
+      {:ok, ["0", keys]} -> {:ok, Enum.concat(Enum.reverse([keys | pages]))}
+      {:ok, [next, keys]} -> scan(pattern, next, [keys | pages])
+      _ -> :error
+    end
+  end
+
+  # Whether a key other than `except` matches `pattern`, stopping at the
+  # first one; `:error` when the scan failed.
+  defp other_key?(pattern, except, cursor \\ "0") do
+    case Pool.command(["SCAN", cursor, "MATCH", pattern, "COUNT", "1000"]) do
+      {:ok, [next, keys]} ->
+        cond do
+          Enum.any?(keys, &(&1 != except)) -> {:ok, true}
+          next == "0" -> {:ok, false}
+          true -> other_key?(pattern, except, next)
+        end
+
+      _ ->
+        :error
     end
   end
 
@@ -493,7 +613,9 @@ defmodule OptimalEngine.Storage.Shared do
     * `OPTIMAL_VALKEY_KEY_PREFIX=P` (1 to 64 of `A-Z a-z 0-9 : _ . -`,
       starting with a letter or digit) gives `P:shared`. This is the one
       setting that isolates Engines by choice; note that `P:shared:*` is
-      outside a Valkey ACL written for `optimal:shared:*`.
+      outside a Valkey ACL written for `optimal:shared:*`. `optimal`, and
+      anything under `optimal:shared`, is refused: it is the key layout
+      before the prefix.
     * Otherwise it is `optimal:shared:` and 16 hex characters of a hash of
       this Engine's identity, the first of:
         1. `OPTIMAL_ENGINE_ID`, an id the platform gives each Engine (for
@@ -506,35 +628,42 @@ defmodule OptimalEngine.Storage.Shared do
       Engines that resolve to the same identity (one database and schema)
       share their keys on purpose.
 
-  A prefix is kept for the life of the process only once it came from one of
-  those. A store without a `sync_identity` table has no replica id. A replica
-  id read that fails otherwise is `nil` and read again on the next call
-  (that call runs on local ETS, never on a second keyspace); after
-  20 failures in a row it is logged once, read only every ten seconds,
-  and buckets stop being held closed as in an outage. With no identity at
-  all it is `nil` with a warning, once: set `OPTIMAL_VALKEY_KEY_PREFIX` or
-  `OPTIMAL_ENGINE_ID`.
+  A prefix from the first two (or the replica id) is kept for the life of the
+  process. One from the PostgreSQL URL is checked again every minute, so a
+  node that started before the store had its `sync_identity` row moves to
+  the replica id the other nodes use once it exists. A store without a
+  `sync_identity` table has no replica id. A replica id read that fails
+  otherwise is `nil` and read again on the next call (that call runs on local
+  ETS, never on a second keyspace); after 20 failures in a row it is logged
+  once and read only every ten seconds. With no identity at all it is `nil`
+  with a warning, once, and looked up again every ten seconds: set
+  `OPTIMAL_VALKEY_KEY_PREFIX` or `OPTIMAL_ENGINE_ID`.
+
+  Options (tests): `:query` (runs the replica id query: `fun.(sql, params)`
+  answering `{:ok, rows}` or `{:error, reason}`; given, a run of failed
+  reads does not throttle it), `:store` (the store implementation) and `:recheck_ms` (how long
+  a URL-derived prefix is kept before it is checked again).
   """
-  @spec key_prefix() :: String.t() | nil
-  def key_prefix do
+  @spec key_prefix(keyword()) :: String.t() | nil
+  def key_prefix(opts \\ []) do
     case :persistent_term.get({__MODULE__, :key_prefix}, nil) do
-      nil -> fresh_prefix()
-      prefix -> prefix
+      {prefix, :final} -> prefix
+      {prefix, :recheck} -> maybe_recheck(prefix, opts)
+      nil -> fresh_prefix(opts)
     end
   end
 
   @identity_failures_logged 20
   @identity_retry_ms 10_000
+  @identity_recheck_ms 60_000
 
-  defp fresh_prefix do
-    case resolve_prefix(throttled: true) do
-      {:ok, prefix} ->
-        :persistent_term.put({__MODULE__, :key_prefix}, prefix)
-        :persistent_term.erase({__MODULE__, :prefix_warned})
-        :persistent_term.erase({__MODULE__, :identity_failures})
+  defp fresh_prefix(opts) do
+    case resolve(opts) do
+      {:ok, prefix, kind} ->
+        pin(prefix, kind, opts)
         prefix
 
-      :retry ->
+      :wait ->
         nil
 
       {:retry, reason} ->
@@ -542,33 +671,74 @@ defmodule OptimalEngine.Storage.Shared do
         nil
 
       :unidentified ->
-        warn_unidentified()
+        note_unidentified()
         nil
     end
   end
 
+  defp pin(prefix, kind, opts) do
+    :persistent_term.put({__MODULE__, :key_prefix}, {prefix, kind})
+    reset_identity_state()
+
+    if kind == :recheck,
+      do: put_state(:recheck_at, now_ms() + Keyword.get(opts, :recheck_ms, @identity_recheck_ms))
+  end
+
+  # One caller per interval claims the recheck; the others keep the prefix.
+  defp maybe_recheck(prefix, opts) do
+    due = get_state(:recheck_at)
+    now = now_ms()
+    next = now + Keyword.get(opts, :recheck_ms, @identity_recheck_ms)
+
+    if now >= due and :atomics.compare_exchange(state(), slot(:recheck_at), due, next) == :ok do
+      case resolve(opts) do
+        {:ok, ^prefix, _kind} ->
+          prefix
+
+        {:ok, other, kind} ->
+          Logger.info("[Valkey] this Engine's key prefix moved to the one its identity now gives")
+          pin(other, kind, opts)
+          other
+
+        _no_better ->
+          prefix
+      end
+    else
+      prefix
+    end
+  end
+
   @doc false
-  # The prefix from the sources above, without keeping it. Options for tests:
-  # `:store` (the store implementation) and `:query` (runs the replica id
-  # query: `fun.(sql, params)` answering `{:ok, rows}` or `{:error, reason}`).
+  # The prefix from the sources above, without keeping it. Options as for
+  # `key_prefix/1`.
   @spec resolve_prefix(keyword()) ::
           {:ok, String.t()} | :retry | {:retry, term()} | :unidentified
   def resolve_prefix(opts \\ []) do
+    case resolve(opts) do
+      {:ok, prefix, _kind} -> {:ok, prefix}
+      :wait -> :retry
+      other -> other
+    end
+  end
+
+  defp resolve(opts) do
+    throttled? = not Keyword.has_key?(opts, :query)
+
     cond do
       prefix = configured_prefix() ->
-        {:ok, prefix <> ":shared"}
+        {:ok, prefix <> ":shared", :final}
 
       id = engine_id() ->
-        {:ok, "optimal:shared:" <> digest("engine:" <> id)}
+        {:ok, "optimal:shared:" <> digest("engine:" <> id), :final}
 
-      Keyword.get(opts, :throttled, false) and identity_wait?() ->
-        :retry
+      (throttled? and failure_wait?()) or unidentified_wait?() ->
+        :wait
 
       true ->
         store = Keyword.get_lazy(opts, :store, &OptimalEngine.Store.adapter/0)
 
-        case replica_identity(Keyword.get_lazy(opts, :query, &identity_query/0)) do
-          {:ok, id} -> {:ok, "optimal:shared:" <> digest(id)}
+        case replica_identity(Keyword.get(opts, :query, &OptimalEngine.Store.raw_query/2)) do
+          {:ok, id} -> {:ok, "optimal:shared:" <> digest(id), :final}
           :none -> store_identity(store)
           {:error, reason} -> {:retry, reason}
         end
@@ -605,18 +775,12 @@ defmodule OptimalEngine.Storage.Shared do
       (text =~ "sync_identity" and text =~ "does not exist")
   end
 
-  defp identity_query do
-    case Application.get_env(:optimal_engine, :valkey_identity_query) do
-      query when is_function(query, 2) -> query
-      _ -> &OptimalEngine.Store.raw_query/2
-    end
-  end
-
   # Only the store this Engine runs on names it: a leftover
-  # OPTIMAL_POSTGRES_URL on a SQLite Engine is not its identity.
+  # OPTIMAL_POSTGRES_URL on a SQLite Engine is not its identity. The URL is
+  # checked again later: the replica id may exist by then.
   defp store_identity(OptimalEngine.Store.Postgres) do
     case postgres_identity() do
-      {:ok, identity} -> {:ok, "optimal:shared:" <> digest(identity)}
+      {:ok, identity} -> {:ok, "optimal:shared:" <> digest(identity), :recheck}
       :unidentified -> :unidentified
     end
   end
@@ -630,41 +794,73 @@ defmodule OptimalEngine.Storage.Shared do
     end
   end
 
-  defp identity_wait? do
-    case :persistent_term.get({__MODULE__, :identity_failures}, nil) do
-      {count, retry_at} when count >= @identity_failures_logged ->
-        System.monotonic_time(:millisecond) < retry_at
+  # The identity lookup's state, in atomics (written on every failure, so not
+  # persistent_term): failures in a row, when to read again after them, until
+  # when "no identity" stands, whether the warning was given, and when a
+  # URL-derived prefix is checked again.
+  @slots [:failures, :retry_at, :unidentified_until, :warned, :recheck_at]
+  @never -4_611_686_018_427_387_904
 
-      _ ->
-        false
+  defp state do
+    case :persistent_term.get({__MODULE__, :identity_state}, nil) do
+      nil ->
+        ref = :atomics.new(length(@slots), signed: true)
+        for slot <- [:retry_at, :unidentified_until, :recheck_at], do: put_state(ref, slot, @never)
+        :persistent_term.put({__MODULE__, :identity_state}, ref)
+        ref
+
+      ref ->
+        ref
     end
   end
 
+  defp slot(name), do: Enum.find_index(@slots, &(&1 == name)) + 1
+  defp get_state(name), do: :atomics.get(state(), slot(name))
+  defp put_state(name, value), do: put_state(state(), name, value)
+  defp put_state(ref, name, value), do: :atomics.put(ref, slot(name), value)
+  defp now_ms, do: System.monotonic_time(:millisecond)
+
+  defp reset_identity_state do
+    ref = state()
+    put_state(ref, :failures, 0)
+    put_state(ref, :warned, 0)
+    for slot <- [:retry_at, :unidentified_until], do: put_state(ref, slot, @never)
+  end
+
+  # After 20 failed reads in a row, the data path reads every ten seconds.
+  defp failure_wait? do
+    get_state(:failures) >= @identity_failures_logged and now_ms() < get_state(:retry_at)
+  end
+
+  # An Engine found to have no identity is not looked up again for ten seconds.
+  defp unidentified_wait?, do: now_ms() < get_state(:unidentified_until)
+
   defp note_identity_failure(reason) do
-    count =
-      case :persistent_term.get({__MODULE__, :identity_failures}, nil) do
-        {count, _retry_at} -> count + 1
-        nil -> 1
-      end
+    count = :atomics.add_get(state(), slot(:failures), 1)
 
-    retry_at = System.monotonic_time(:millisecond) + @identity_retry_ms
+    if count >= @identity_failures_logged,
+      do: put_state(:retry_at, now_ms() + @identity_retry_ms)
 
-    cond do
-      count == @identity_failures_logged ->
-        :persistent_term.put({__MODULE__, :identity_failures}, {count, retry_at})
-        :persistent_term.put({__MODULE__, :prefix_warned}, true)
+    if count == @identity_failures_logged do
+      put_state(:warned, 1)
 
-        Logger.warning(
-          "[Valkey] this Engine could not read its replica id #{count} times in a row " <>
-            "(#{inspect(reason, limit: 20)}); shared state stays in local ETS and the id is read " <>
-            "again every #{div(@identity_retry_ms, 1000)}s. Set #{@prefix_env} or OPTIMAL_ENGINE_ID to name it."
-        )
+      Logger.warning(
+        "[Valkey] this Engine could not read its replica id #{count} times in a row " <>
+          "(#{inspect(reason, limit: 20)}); shared state stays in local ETS and the id is read " <>
+          "again every #{div(@identity_retry_ms, 1000)}s. Set #{@prefix_env} or OPTIMAL_ENGINE_ID to name it."
+      )
+    end
+  end
 
-      count > @identity_failures_logged ->
-        :persistent_term.put({__MODULE__, :identity_failures}, {count, retry_at})
+  defp note_unidentified do
+    put_state(:unidentified_until, now_ms() + @identity_retry_ms)
 
-      true ->
-        :persistent_term.put({__MODULE__, :identity_failures}, {count, 0})
+    if :atomics.compare_exchange(state(), slot(:warned), 0, 1) == :ok do
+      Logger.warning(
+        "[Valkey] this Engine has no OPTIMAL_ENGINE_ID, no replica id and (on the PostgreSQL store) " <>
+          "no OPTIMAL_POSTGRES_URL to name it by; set #{@prefix_env} to a value of its own. " <>
+          "Until then shared state stays in local ETS."
+      )
     end
   end
 
@@ -673,8 +869,8 @@ defmodule OptimalEngine.Storage.Shared do
   @spec reset_key_prefix() :: :ok
   def reset_key_prefix do
     :persistent_term.erase({__MODULE__, :key_prefix})
-    :persistent_term.erase({__MODULE__, :prefix_warned})
-    :persistent_term.erase({__MODULE__, :identity_failures})
+    reset_identity_state()
+    put_state(:recheck_at, @never)
     :ok
   end
 
@@ -682,20 +878,6 @@ defmodule OptimalEngine.Storage.Shared do
     :crypto.hash(:sha256, "optimal-engine valkey prefix:" <> identity)
     |> Base.encode16(case: :lower)
     |> binary_part(0, 16)
-  end
-
-  defp unidentified?, do: :persistent_term.get({__MODULE__, :prefix_warned}, false)
-
-  defp warn_unidentified do
-    unless unidentified?() do
-      :persistent_term.put({__MODULE__, :prefix_warned}, true)
-
-      Logger.warning(
-        "[Valkey] this Engine has no OPTIMAL_ENGINE_ID, no replica id and (on the PostgreSQL store) " <>
-          "no OPTIMAL_POSTGRES_URL to name it by; set #{@prefix_env} to a value of its own. " <>
-          "Until then shared state stays in local ETS."
-      )
-    end
   end
 
   defp configured_prefix do
@@ -708,6 +890,14 @@ defmodule OptimalEngine.Storage.Shared do
 
         cond do
           value == "" ->
+            nil
+
+          value == "optimal" or String.starts_with?(value, "optimal:shared") ->
+            Logger.warning(
+              "[Valkey] #{@prefix_env} must not be `optimal` or start with `optimal:shared`, " <>
+                "the key layout before the prefix; using the default prefix"
+            )
+
             nil
 
           Regex.match?(@prefix_pattern, value) ->
@@ -796,19 +986,36 @@ defmodule OptimalEngine.Storage.Shared do
   # A key derived from CONNECTOR_KEY is kept for good. A per-node key made
   # because a CONNECTOR_KEY reference could not be read is kept only for
   # @signing_key_retry_ms, so the node starts sharing entries once OpenBao
-  # answers.
+  # answers. One caller derives it while the others wait (a lock on this
+  # node), so concurrent callers never each keep a different random key.
   defp signing_key do
+    case current_signing_key() do
+      {:ok, key} ->
+        key
+
+      :stale ->
+        :global.trans({{__MODULE__, :signing_key}, self()}, &refresh_signing_key/0, [node()])
+    end
+  end
+
+  defp current_signing_key do
     now = System.monotonic_time(:millisecond)
 
     case :persistent_term.get({__MODULE__, :signing_key}, nil) do
-      {key, :final} ->
+      {key, :final} -> {:ok, key}
+      {key, {:until, until}} when until > now -> {:ok, key}
+      _none_or_expired -> :stale
+    end
+  end
+
+  defp refresh_signing_key do
+    case current_signing_key() do
+      {:ok, key} ->
         key
 
-      {key, {:until, until}} when until > now ->
-        key
-
-      _none_or_expired ->
+      :stale ->
         {key, keep} = derive_signing_key()
+        now = System.monotonic_time(:millisecond)
 
         entry =
           if keep == :final, do: {key, :final}, else: {key, {:until, now + @signing_key_retry_ms}}
@@ -826,6 +1033,11 @@ defmodule OptimalEngine.Storage.Shared do
             {:crypto.mac(:hmac, :sha256, master, "optimal-engine shared cache v1"), :final}
 
           _ ->
+            Logger.error(
+              "[Valkey] CONNECTOR_KEY is not 64 hex characters; shared cache entries are " <>
+                "signed with a key of this process's own"
+            )
+
             {:crypto.strong_rand_bytes(32), :final}
         end
 
@@ -844,15 +1056,18 @@ defmodule OptimalEngine.Storage.Shared do
 
   # CONNECTOR_KEY through the Engine's secret resolver, so an OpenBao
   # reference (`openbao:<path>#<field>`) is resolved, never decoded as the key.
+  # A resolver that raises or exits is an unavailable secret, never a failed
+  # request.
   defp connector_key do
     resolver = Application.get_env(:optimal_engine, :secrets_resolver, OptimalEngine.Secrets)
 
     if Code.ensure_loaded?(resolver) and function_exported?(resolver, :fetch, 1) do
-      case resolver.fetch("CONNECTOR_KEY") do
-        {:ok, value} -> {:ok, value}
+      case fetch_secret(resolver) do
+        {:ok, value} when is_binary(value) -> {:ok, String.trim(value)}
         {:error, :not_set} -> :unset
         {:error, {:secret_unavailable, _name, why}} -> {:error, describe(why)}
-        {:error, _other} -> {:error, "the secret resolver refused it"}
+        {:error, :resolver_failed} -> {:error, "the secret resolver failed"}
+        _other -> {:error, "the secret resolver refused it"}
       end
     else
       case System.get_env("CONNECTOR_KEY") do
@@ -861,6 +1076,14 @@ defmodule OptimalEngine.Storage.Shared do
         value -> {:ok, String.trim(value)}
       end
     end
+  end
+
+  defp fetch_secret(resolver) do
+    resolver.fetch("CONNECTOR_KEY")
+  rescue
+    _error -> {:error, :resolver_failed}
+  catch
+    :exit, _reason -> {:error, :resolver_failed}
   end
 
   defp describe(reason) when is_atom(reason), do: Atom.to_string(reason)

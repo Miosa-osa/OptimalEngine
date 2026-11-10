@@ -302,6 +302,59 @@ defmodule OptimalEngine.Storage.SharedTest do
       assert Pool.stats().pending == 0
     end
 
+    test "an Engine with no prefix defers no invalidation it could never apply" do
+      stub = stub!()
+      start_pool(stub)
+      Shared.reset_key_prefix()
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        Shared.key_prefix(
+          query: fn _sql, _params -> {:ok, []} end,
+          store: OptimalEngine.Store.SQLite
+        )
+      end)
+
+      for n <- 1..50, do: :ok = Shared.delete(@ns, "revoked-#{n}")
+      :ok = Shared.clear(@ns)
+      assert Pool.stats().pending == 0
+    after
+      Shared.reset_key_prefix()
+    end
+
+    test "deferred invalidations are coalesced and bounded" do
+      stub = stub!()
+      start_pool(stub)
+      previous = Application.fetch_env(:optimal_engine, :valkey_pending_max)
+      Application.put_env(:optimal_engine, :valkey_pending_max, 5)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:optimal_engine, :valkey_pending_max, value)
+          :error -> Application.delete_env(:optimal_engine, :valkey_pending_max)
+        end
+      end)
+
+      :ok = Shared.put(:optimal_shared_test_b, "k-1", :v, 60_000)
+      go_down(stub)
+      for _ <- 1..3, do: :ok = Shared.delete(@ns, "same")
+      assert Pool.stats().pending == 1
+
+      # A clear covers every earlier invalidation of its namespace.
+      :ok = Shared.delete(@ns, "other")
+      :ok = Shared.clear(@ns)
+      assert Pool.stats().pending == 1
+
+      # Past the bound the queue collapses to one clear per namespace.
+      for n <- 1..20, do: :ok = Shared.delete(:optimal_shared_test_b, "k-#{n}")
+      assert Pool.stats().pending <= 5
+
+      # Nothing deleted during the outage is read back afterwards.
+      ValkeyStub.set_mode(stub, :normal)
+      wait_until(&Pool.serving?/0)
+      assert Shared.get(:optimal_shared_test_b, "k-1") == :miss
+      assert Pool.stats().pending == 0
+    end
+
     test "the URL's credential authenticates every connection and is never logged" do
       {:ok, stub} = ValkeyStub.start(password: "pool-s3cret")
       on_exit(fn -> ValkeyStub.stop(stub) end)
@@ -328,7 +381,6 @@ defmodule OptimalEngine.Storage.SharedTest do
         )
 
       Enum.each(Map.keys(previous), &System.delete_env/1)
-      previous_reader = Application.fetch_env(:optimal_engine, :valkey_identity_query)
       Shared.reset_key_prefix()
 
       on_exit(fn ->
@@ -336,11 +388,6 @@ defmodule OptimalEngine.Storage.SharedTest do
           {name, nil} -> System.delete_env(name)
           {name, value} -> System.put_env(name, value)
         end)
-
-        case previous_reader do
-          {:ok, reader} -> Application.put_env(:optimal_engine, :valkey_identity_query, reader)
-          :error -> Application.delete_env(:optimal_engine, :valkey_identity_query)
-        end
 
         Shared.reset_key_prefix()
       end)
@@ -354,10 +401,11 @@ defmodule OptimalEngine.Storage.SharedTest do
         |> Base.encode16(case: :lower)
         |> binary_part(0, 16)
 
-    # What the store answers the replica id query with: {:ok, rows} or {:error, reason}.
-    defp read_identity_as(fun),
-      do:
-        Application.put_env(:optimal_engine, :valkey_identity_query, fn _sql, _params -> fun.() end)
+    # Resolves the prefix as the data path does, with the replica id query
+    # answering `answer` ({:ok, rows} or {:error, reason}) on `store`.
+    defp prefix_with(answer, store \\ OptimalEngine.Store.SQLite, opts \\ []) do
+      Shared.key_prefix([query: fn _sql, _params -> answer end, store: store] ++ opts)
+    end
 
     test "OPTIMAL_ENGINE_ID names the Engine ahead of the replica id" do
       System.put_env("OPTIMAL_ENGINE_ID", "db_prod_1")
@@ -384,11 +432,12 @@ defmodule OptimalEngine.Storage.SharedTest do
     test "a replica id read that keeps failing is warned about and stops holding buckets closed" do
       stub = stub!()
       start_pool(stub)
-      read_identity_as(fn -> {:error, :busy} end)
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
-          for _ <- 1..25, do: assert(Shared.key_prefix() == nil)
+          for _ <- 1..25, do: assert(prefix_with({:error, :busy}) == nil)
+          # Past 20 failures the data path waits instead of reading the store.
+          assert Shared.key_prefix() == nil
           # Valkey is up, but this Engine shares nothing on it: a local bucket, not an outage.
           assert :ok = Shared.take_token(@ns, "never-named", 2, 1.0e-9, :keep, 60_000)
         end)
@@ -432,28 +481,30 @@ defmodule OptimalEngine.Storage.SharedTest do
       start_pool(stub)
       parent = self()
 
-      read_identity_as(fn ->
+      busy = fn _sql, _params ->
         send(parent, :read)
         {:error, :busy}
-      end)
+      end
+
+      # Read again on the next call, never kept from the failure.
+      assert Shared.key_prefix(query: busy) == nil
+      assert_received :read
+      assert Shared.key_prefix(query: busy) == nil
+      assert_received :read
 
       # No prefix to share yet: the call runs on local ETS and writes nothing.
-      assert Shared.key_prefix() == nil
+      ExUnit.CaptureLog.capture_log(fn ->
+        for _ <- 1..20, do: Shared.key_prefix(query: busy)
+      end)
+
       :ok = Shared.put(@ns, "doc", :v, 60_000)
       assert {:ok, :v} = Shared.get(@ns, "doc")
       assert ValkeyStub.keys(stub) |> Map.keys() |> Enum.filter(&(&1 =~ "#{@ns}")) == []
 
-      # Read again on the next call, never kept from the failure.
-      assert_received :read
-      _ = Shared.key_prefix()
-      assert_received :read
-
-      read_identity_as(fn -> {:ok, [["replica-xyz"]]} end)
-      assert Shared.key_prefix() == "optimal:shared:" <> digest("replica-xyz")
+      assert prefix_with({:ok, [["replica-xyz"]]}) == "optimal:shared:" <> digest("replica-xyz")
 
       # Once read, it is kept even if a later read would fail.
-      read_identity_as(fn -> {:error, :busy} end)
-      assert Shared.key_prefix() == "optimal:shared:" <> digest("replica-xyz")
+      assert prefix_with({:error, :busy}) == "optimal:shared:" <> digest("replica-xyz")
     end
 
     test "on the PostgreSQL store without a replica id, its URL names the Engine, never its credentials" do
@@ -508,16 +559,71 @@ defmodule OptimalEngine.Storage.SharedTest do
     test "with nothing to name the Engine, it warns and keeps Valkey out of it" do
       stub = stub!()
       start_pool(stub)
-      read_identity_as(fn -> {:ok, []} end)
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
-          assert Shared.key_prefix() == nil
+          assert prefix_with({:ok, []}) == nil
           assert :ok = Shared.take_token(@ns, "bucket", 2, 1.0e-9, :keep, 60_000)
         end)
 
       assert log =~ "OPTIMAL_VALKEY_KEY_PREFIX"
       assert ValkeyStub.keys(stub) |> Map.keys() |> Enum.filter(&(&1 =~ "#{@ns}")) == []
+    end
+
+    test "an Engine with nothing to name it is not looked up again on every call" do
+      parent = self()
+
+      none = fn _sql, _params ->
+        send(parent, :read)
+        {:ok, []}
+      end
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert Shared.key_prefix(query: none, store: OptimalEngine.Store.SQLite) == nil
+        assert Shared.key_prefix(query: none, store: OptimalEngine.Store.SQLite) == nil
+        # The data path too: it answers from the cached outcome.
+        assert Shared.key_prefix() == nil
+      end)
+
+      assert_received :read
+      refute_received :read
+    end
+
+    test "with no prefix there is no Valkey key either" do
+      ExUnit.CaptureLog.capture_log(fn -> assert prefix_with({:ok, []}) == nil end)
+      assert Shared.valkey_key(@ns, "k") == {:error, :no_key_prefix}
+    end
+
+    test "a PostgreSQL Engine named by its URL moves to its replica id once the table exists" do
+      System.put_env("OPTIMAL_POSTGRES_URL", "postgres://engine:pw@db.example:5432/eng_a")
+      pg = OptimalEngine.Store.Postgres
+
+      # Booted before sync_identity existed: named by its URL, rechecked later.
+      by_url = prefix_with({:ok, []}, pg, recheck_ms: 0)
+      assert "optimal:shared:" <> _ = by_url
+
+      # Once the replica id can be read, every node ends on the same prefix.
+      assert prefix_with({:ok, [["replica-pg"]]}, pg) == "optimal:shared:" <> digest("replica-pg")
+
+      # Rechecked on a slow timer, not on every call.
+      Shared.reset_key_prefix()
+      assert prefix_with({:ok, []}, pg) == by_url
+      assert prefix_with({:ok, [["replica-pg"]]}, pg) == by_url
+    end
+
+    test "OPTIMAL_VALKEY_KEY_PREFIX=optimal, the layout before the prefix, is refused" do
+      for value <- ["optimal", "optimal:shared:x"] do
+        System.put_env("OPTIMAL_VALKEY_KEY_PREFIX", value)
+        Shared.reset_key_prefix()
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            assert "optimal:shared:" <> hash = Shared.key_prefix()
+            refute hash == "" or String.starts_with?(hash, "x") or hash =~ ":shared"
+          end)
+
+        assert log =~ "OPTIMAL_VALKEY_KEY_PREFIX"
+      end
     end
 
     test "OPTIMAL_VALKEY_KEY_PREFIX sets it, and Engines with different prefixes never collide" do
@@ -587,6 +693,32 @@ defmodule OptimalEngine.Storage.SharedTest do
       refute :ets.member(@ns, "client-1")
     end
 
+    test "eviction drops the fullest buckets first, never an exhausted one" do
+      # The exhausted buckets were written first, so they expire first.
+      for n <- 1..5, do: :ok = Local.mirror_bucket(@ns, "spent-#{n}", 0.0, 60_000 + n)
+      for n <- 1..5, do: :ok = Local.mirror_bucket(@ns, "idle-#{n}", 3.0, 90_000 + n)
+      :ok = Local.mirror_bucket(@ns, "new", 3.0, 120_000)
+
+      for n <- 1..5, do: assert(:ets.member(@ns, "spent-#{n}"))
+      assert :ets.member(@ns, "new")
+    end
+
+    test "what a node spent during an outage is claimed by one step only, and given back on failure" do
+      opts = [missing: :empty, mark: :fallback]
+      :ok = Local.mirror_bucket(@ns, "hot", 3.0, 60_000)
+      assert :ok = Local.take_token(@ns, "hot", 3, 1.0e-9, :keep, 60_000, opts)
+      assert :ok = Local.take_token(@ns, "hot", 3, 1.0e-9, :keep, 60_000, opts)
+
+      assert Local.claim_fallback_spent(@ns, "hot") == 2
+      # A second step in flight at the same time charges nothing more.
+      assert Local.claim_fallback_spent(@ns, "hot") == nil
+
+      # The step that claimed it could not reach Valkey: it is owed again.
+      :ok = Local.restore_fallback_spent(@ns, "hot", 2)
+      assert Local.fallback_spent(@ns, "hot") == 2
+      assert Local.claim_fallback_spent(@ns, "hot") == 2
+    end
+
     test "the local bucket table is bounded the same way" do
       for n <- 1..50,
           do: Local.take_token(@ns, "local-#{n}", 3, 1.0e-6, :keep, 60_000 + n)
@@ -601,9 +733,17 @@ defmodule OptimalEngine.Storage.SharedTest do
       @moduledoc false
       def fetch("CONNECTOR_KEY") do
         case System.get_env("CONNECTOR_KEY") do
-          "openbao:" <> _ref -> :persistent_term.get({__MODULE__, :answer})
-          nil -> {:error, :not_set}
-          value -> {:ok, value}
+          "openbao:" <> _ref ->
+            case :persistent_term.get({__MODULE__, :answer}) do
+              fun when is_function(fun, 0) -> fun.()
+              answer -> answer
+            end
+
+          nil ->
+            {:error, :not_set}
+
+          value ->
+            {:ok, value}
         end
       end
     end
@@ -663,6 +803,60 @@ defmodule OptimalEngine.Storage.SharedTest do
       log = ExUnit.CaptureLog.capture_log(fn -> refute shared_between_nodes?() end)
       assert log =~ "CONNECTOR_KEY"
       refute log =~ "optimal/engine#connector_key"
+    end
+
+    test "one process derives the key while the others wait for it" do
+      parent = self()
+
+      :persistent_term.put({FakeSecrets, :answer}, fn ->
+        send(parent, :resolved)
+        Process.sleep(50)
+        {:error, {:secret_unavailable, "CONNECTOR_KEY", :openbao_sealed}}
+      end)
+
+      System.put_env("CONNECTOR_KEY", "openbao:optimal/engine#connector_key")
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        1..10
+        |> Enum.map(fn n -> Task.async(fn -> Shared.put(@ns, "c-#{n}", n, 60_000) end) end)
+        |> Enum.each(&Task.await/1)
+      end)
+
+      assert_received :resolved
+      refute_received :resolved
+      # Every caller signed with the one key: each reads the others' entries.
+      for n <- 1..10, do: assert(Shared.get(@ns, "c-#{n}") == {:ok, n})
+    end
+
+    test "a resolver that raises or exits never fails the caller" do
+      System.put_env("CONNECTOR_KEY", "openbao:optimal/engine#connector_key")
+
+      for answer <- [fn -> raise "boom" end, fn -> exit(:timeout) end] do
+        :persistent_term.put({FakeSecrets, :answer}, answer)
+        Shared.reset_signing_key()
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            assert :ok = Shared.put(@ns, "doc", :v, 60_000)
+            assert {:ok, :v} = Shared.get(@ns, "doc")
+          end)
+
+        assert log =~ "CONNECTOR_KEY"
+      end
+    end
+
+    test "a resolved CONNECTOR_KEY is trimmed, and a malformed one is logged by name only" do
+      hex = Base.encode16(:crypto.strong_rand_bytes(32))
+      System.put_env("CONNECTOR_KEY", "openbao:optimal/engine#connector_key")
+      :persistent_term.put({FakeSecrets, :answer}, {:ok, "  " <> hex <> "\n"})
+      assert shared_between_nodes?()
+
+      :persistent_term.put({FakeSecrets, :answer}, {:ok, "not-a-key-value-123"})
+      Shared.reset_signing_key()
+
+      log = ExUnit.CaptureLog.capture_log(fn -> refute shared_between_nodes?() end)
+      assert log =~ "CONNECTOR_KEY"
+      refute log =~ "not-a-key-value-123"
     end
 
     test "without a resolver a reference is never taken for the key" do
@@ -788,6 +982,80 @@ defmodule OptimalEngine.Storage.SharedTest do
       # Closed, the default: an unseen client waits for its bucket to refill.
       System.put_env("OPTIMAL_VALKEY_OUTAGE_POLICY", "closed")
       assert {:rate_limited, _, _} = RateLimiter.check("key:closed", 3, 1)
+    end
+
+    test "a command Valkey refuses is not an outage: buckets stay node-local, and it is logged once",
+         %{stub: stub} do
+      ValkeyStub.fail_when(stub, fn
+        [cmd | _] when cmd in ["EVAL", "EVALSHA"] -> "NOPERM this user has no permissions"
+        _ -> nil
+      end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          # A new client gets a normal bucket, never the outage's closed one.
+          for _ <- 1..3, do: assert(:ok = RateLimiter.check("key:acl", 3, 1))
+          assert {:rate_limited, _, _} = RateLimiter.check("key:acl", 3, 1)
+          assert :ok = RateLimiter.check("key:acl-other", 3, 1)
+        end)
+
+      assert Pool.serving?()
+      assert length(String.split(log, "NOPERM")) == 2
+    end
+
+    test "steps in flight after an outage charge Valkey what was spent once, not once each",
+         %{stub: stub} do
+      take = fn -> Shared.take_token(@ns, "hot", 10, 1.0e-9, :keep, 600_000) end
+      assert :ok = take.()
+      go_down(stub)
+      assert :ok = take.()
+      ValkeyStub.set_mode(stub, :normal)
+      wait_until(&Pool.serving?/0)
+
+      # 10 - 1 - 1 (spent during the outage) - 5 = 3 left.
+      1..5 |> Enum.map(fn _ -> Task.async(take) end) |> Enum.each(&(:ok = Task.await(&1)))
+      for _ <- 1..3, do: assert(:ok = take.())
+      assert {:limited, _, _} = take.()
+    end
+
+    test "a legacy scan that fails part way never deletes a generation key", %{stub: stub} do
+      :ok = ValkeyStub.put_raw(stub, "optimal:shared:optimal_legacy_idle:gen", "3")
+
+      ValkeyStub.fail_when(stub, fn
+        ["SCAN", _cursor, "MATCH", "optimal:shared:optimal_legacy_idle:*" | _] -> "ERR busy"
+        _ -> nil
+      end)
+
+      Shared.reset_legacy_cleanup()
+      _ = Shared.get(@ns, "anything")
+
+      wait_until(fn ->
+        Enum.any?(ValkeyStub.commands(stub), &(Enum.join(&1, " ") =~ "optimal_legacy_idle:*"))
+      end)
+
+      Process.sleep(100)
+
+      assert Map.has_key?(ValkeyStub.keys(stub), "optimal:shared:optimal_legacy_idle:gen")
+    end
+
+    test "once nothing of the old layout is left, a later boot does not scan for it again",
+         %{stub: stub} do
+      :ok = ValkeyStub.put_raw(stub, "optimal:shared:optimal_legacy_once:gen", "1")
+      Shared.reset_legacy_cleanup()
+      _ = Shared.get(@ns, "anything")
+
+      wait_until(fn ->
+        not Map.has_key?(ValkeyStub.keys(stub), "optimal:shared:optimal_legacy_once:gen")
+      end)
+
+      scans = fn -> Enum.count(ValkeyStub.commands(stub), &match?(["SCAN" | _], &1)) end
+      wait_until(fn -> Enum.any?(Map.keys(ValkeyStub.keys(stub)), &(&1 =~ "legacy")) end)
+      before = scans.()
+
+      Shared.reset_legacy_cleanup()
+      _ = Shared.get(@ns, "anything")
+      Process.sleep(200)
+      assert scans.() == before
     end
 
     test "the generation key expires unless used, and a use renews it", %{stub: stub} do

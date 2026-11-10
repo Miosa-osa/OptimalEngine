@@ -131,14 +131,71 @@ defmodule OptimalEngine.Storage.Valkey.Pool do
   end
 
   @doc false
-  # An invalidation Valkey has not applied yet. Ignored without a pool: with
-  # no Valkey configured there is nothing to invalidate.
+  # An invalidation Valkey has not applied yet: `{:delete, namespace, key}` or
+  # `{:clear, namespace}`. Ignored without a pool: with no Valkey configured
+  # there is nothing to invalidate.
+  #
+  # The queue is coalesced and bounded. A delete already queued is not queued
+  # twice; a clear replaces every earlier invalidation of its namespace (it
+  # covers them). Past `config :optimal_engine, :valkey_pending_max` (1000)
+  # entries the queue collapses to one clear per namespace, which invalidates
+  # at least as much as what it replaces.
   @spec defer(term()) :: :ok
   def defer(operation) do
-    :ets.insert(@pending, {System.unique_integer([:monotonic, :positive]), operation})
+    queued? =
+      case operation do
+        {:clear, ns} ->
+          :ets.select_delete(@pending, [
+            {{:_, {:delete, ns, :_}}, [], [true]},
+            {{:_, {:clear, ns}}, [], [true]}
+          ])
+
+          false
+
+        other ->
+          :ets.select_count(@pending, [{{:_, :"$1"}, [{:"=:=", :"$1", {:const, other}}], [true]}]) >
+            0
+      end
+
+    unless queued? do
+      :ets.insert(@pending, {System.unique_integer([:monotonic, :positive]), operation})
+      if :ets.info(@pending, :size) > pending_max(), do: collapse()
+    end
+
     :ok
   rescue
     ArgumentError -> :ok
+  end
+
+  @default_pending_max 1_000
+
+  defp pending_max do
+    case Application.get_env(:optimal_engine, :valkey_pending_max) do
+      max when is_integer(max) and max > 0 -> max
+      _ -> @default_pending_max
+    end
+  end
+
+  defp collapse do
+    namespaces =
+      @pending
+      |> :ets.select([{{:_, :"$1"}, [], [:"$1"]}])
+      |> Enum.map(fn
+        {:delete, ns, _key} -> ns
+        {:clear, ns} -> ns
+      end)
+      |> Enum.uniq()
+
+    :ets.delete_all_objects(@pending)
+
+    Enum.each(namespaces, fn ns ->
+      :ets.insert(@pending, {System.unique_integer([:monotonic, :positive]), {:clear, ns}})
+    end)
+
+    Logger.warning(
+      "[Valkey] more than #{pending_max()} invalidations waited for Valkey; " <>
+        "they were folded into a clear of #{length(namespaces)} namespace(s)"
+    )
   end
 
   @doc false
@@ -146,25 +203,27 @@ defmodule OptimalEngine.Storage.Valkey.Pool do
   # `:ok` or an error. Stops at the first error and keeps the rest.
   @spec flush((term() -> :ok | {:error, term()})) :: :ok | {:error, term()}
   def flush(apply_fun) do
-    if :ets.info(@pending, :size) in [0, :undefined] do
-      :ok
-    else
-      @pending |> :ets.tab2list() |> flush_each(apply_fun)
-    end
+    flush_from(:ets.first(@pending), apply_fun)
   rescue
     ArgumentError -> :ok
   end
 
-  defp flush_each([], _apply_fun), do: :ok
+  defp flush_from(:"$end_of_table", _apply_fun), do: :ok
 
-  defp flush_each([{id, operation} | rest], apply_fun) do
-    case apply_fun.(operation) do
-      :ok ->
-        :ets.delete(@pending, id)
-        flush_each(rest, apply_fun)
+  defp flush_from(id, apply_fun) do
+    case :ets.lookup(@pending, id) do
+      [{^id, operation}] ->
+        case apply_fun.(operation) do
+          :ok ->
+            :ets.delete(@pending, id)
+            flush_from(:ets.next(@pending, id), apply_fun)
 
-      error ->
-        error
+          error ->
+            error
+        end
+
+      [] ->
+        flush_from(:ets.next(@pending, id), apply_fun)
     end
   end
 

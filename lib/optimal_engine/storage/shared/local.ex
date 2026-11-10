@@ -143,9 +143,11 @@ defmodule OptimalEngine.Storage.Shared.Local do
       taken while marked, so the first step back on Valkey charges the server
       what this node spent (`fallback_spent/2`).
 
-  The table is bounded like `put/5` with `:max_entries`
-  (`config :optimal_engine, :shared_bucket_max_entries`, 100000): a new bucket
-  in a full table first drops the expired rows, then the oldest ones.
+  The table is bounded (`config :optimal_engine, :shared_bucket_max_entries`,
+  100000): a new bucket in a full table first drops the expired rows, then the
+  buckets holding the most tokens, a tenth of the bound at a time. A bucket
+  dropped that way opens full again (as one idle long enough would), so the
+  ones closest to full go first and an exhausted bucket is dropped last.
   """
   @spec take_token(atom(), term(), number(), float(), :keep | :advance, pos_integer(), keyword()) ::
           :ok | {:limited, float(), non_neg_integer()}
@@ -223,11 +225,9 @@ defmodule OptimalEngine.Storage.Shared.Local do
     now = now()
     max = bucket_max_entries()
 
-    # Bounded like `put/5`: a new key into a full table first drops the
-    # expired rows, and every row when the live ones still fill it (a bucket
-    # dropped that way opens empty in an outage, the conservative side).
+    # A new key into a full table makes room as `take_token/7` does.
     if not :ets.member(table, key) and :ets.info(table, :size) >= max,
-      do: make_room(table, now, max)
+      do: make_bucket_room(table, now, max)
 
     :ets.insert(table, {key, {tokens * 1.0, now}, now + ttl_ms})
     :ok
@@ -260,10 +260,91 @@ defmodule OptimalEngine.Storage.Shared.Local do
     ArgumentError -> nil
   end
 
+  @doc """
+  Takes what this node spent from a bucket during an outage, for the one step
+  that charges Valkey with it: the row is unmarked atomically, so steps in
+  flight at the same time find nothing to charge. `nil` when nothing is owed.
+  A step that then cannot reach Valkey gives it back (`restore_fallback_spent/3`).
+  """
+  @spec claim_fallback_spent(atom(), term()) :: pos_integer() | nil
+  def claim_fallback_spent(table, key) do
+    now = now()
+
+    case :ets.lookup(table, key) do
+      [{^key, {tokens, stamp, {:fallback, spent}}, expires} = row] when expires > now ->
+        unmarked = {key, {tokens, stamp}, expires}
+        if spent > 0 and swap(table, row, unmarked), do: spent, else: nil
+
+      _ ->
+        nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  @doc "Owes Valkey `spent` again for a bucket, after a claim that could not be charged."
+  @spec restore_fallback_spent(atom(), term(), pos_integer()) :: :ok
+  def restore_fallback_spent(table, key, spent, tries \\ 5)
+
+  def restore_fallback_spent(_table, _key, _spent, 0), do: :ok
+
+  def restore_fallback_spent(table, key, spent, tries) do
+    case :ets.lookup(table, key) do
+      [{^key, {tokens, stamp}, expires} = row] ->
+        swap(table, row, {key, {tokens, stamp, {:fallback, spent}}, expires}) or
+          restore_fallback_spent(table, key, spent, tries - 1)
+
+      [{^key, {tokens, stamp, {:fallback, owed}}, expires} = row] ->
+        swap(table, row, {key, {tokens, stamp, {:fallback, owed + spent}}, expires}) or
+          restore_fallback_spent(table, key, spent, tries - 1)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  # Replaces `row` with `new` (same key) only if the row is still exactly
+  # `row`. The replacement keeps the matched key, as select_replace requires.
+  defp swap(table, row, {_key, value, expires}) do
+    spec = [
+      {{:"$1", :"$2", :"$3"}, [{:"=:=", {{:"$1", :"$2", :"$3"}}, {:const, row}}],
+       [{{:"$1", {:const, value}, {:const, expires}}}]}
+    ]
+
+    :ets.select_replace(table, spec) == 1
+  end
+
   defp bound(table, now) do
     max = bucket_max_entries()
-    if :ets.info(table, :size) >= max, do: make_room(table, now, max)
+    if :ets.info(table, :size) >= max, do: make_bucket_room(table, now, max)
   end
+
+  # Expired rows first; then the buckets holding the most tokens (an evicted
+  # bucket opens full again, so a full one loses nothing), a tenth of the
+  # bound at a time. A bucket that still owes Valkey an outage spend goes last.
+  defp make_bucket_room(table, now, max) do
+    :ets.select_delete(table, [{{:_, :_, :"$1"}, [{:<, :"$1", now}], [true]}])
+    size = :ets.info(table, :size)
+
+    if size >= max do
+      table
+      |> :ets.select([{{:"$1", :"$2", :_}, [], [{{:"$2", :"$1"}}]}])
+      |> Enum.map(fn {state, key} -> {eviction_rank(state), key} end)
+      |> Enum.sort()
+      |> Enum.take(size - max + max(div(max, 10), 1))
+      |> Enum.each(fn {_rank, key} -> :ets.delete(table, key) end)
+    end
+
+    :ok
+  end
+
+  defp eviction_rank({tokens, _stamp}) when is_number(tokens), do: {0, -tokens}
+  defp eviction_rank({tokens, _stamp, _mark}) when is_number(tokens), do: {1, -tokens}
+  defp eviction_rank(_other), do: {0, 0}
 
   # Expired rows first; then the rows that expire soonest (the oldest
   # written, for one TTL), a tenth of the bound at a time, so a flood of new
