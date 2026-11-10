@@ -599,6 +599,7 @@ Each row's envelope is opened with `CONNECTOR_KEY`, the credentials are written 
 Any failure (a wrong `CONNECTOR_KEY`, OpenBao sealed, a copy that reads back different) leaves that row unchanged and is listed under `failed`; the run exits non-zero.
 Running it again is safe: marked rows are `already_migrated`, and the output names connector ids, never a credential.
 A credential rotated while it runs is never lost: each row is read again just before its copy, and the copy is a KV check-and-set that writes only where nothing is stored, so a secret written meanwhile is left as it is (`skipped`, `secret_exists`).
+A copy whose row changed before it was marked is released by destroying only the version that run wrote, so a newer version a rotation wrote meanwhile stays the secret (`skipped`, `row_changed`).
 A connector a sync is running in the same VM is `skipped` until the next run; `bin/optimal eval` runs in a VM of its own and cannot see the Engine's syncs, which is why the two guards above exist.
 Keep `CONNECTOR_KEY` until every row is migrated.
 `OPTIMAL_CONNECTOR_CREDENTIAL_STORE` unset, `engine` or any other value writes database envelopes; `openbao` refuses a write when OpenBao is not configured.

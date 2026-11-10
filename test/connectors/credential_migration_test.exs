@@ -88,6 +88,58 @@ defmodule OptimalEngine.Connectors.CredentialMigrationTest do
     assert config(rotated_id) == before
   end
 
+  test "a rotation that lands while a stale copy is released keeps its secret", ctx do
+    # The copy is written and verified, then the row moves (a refresh rewrote
+    # its envelope), so the mark misses and the copy is stale. While that copy
+    # is released, a rotation in OpenBao mode writes its secret and marks the
+    # row: releasing must take only the stale copy, never the rotation's.
+    [id, _other] = ctx.ids
+    path = "optimal/connectors/default/#{id}"
+    data_path = "/v1/secret/data/#{path}"
+    {:ok, fired} = Agent.start_link(fn -> MapSet.new() end)
+
+    once = fn step, fun ->
+      unless Agent.get_and_update(fired, &{MapSet.member?(&1, step), MapSet.put(&1, step)}),
+        do: fun.()
+    end
+
+    set_config = fn config ->
+      {:ok, _} =
+        Store.raw_query("UPDATE connectors SET config = ?1 WHERE id = ?2", [
+          Jason.encode!(config),
+          id
+        ])
+    end
+
+    OpenBaoStub.on_request(ctx.stub, fn
+      # The verify read: the copy is in, the mark is next.
+      {"GET", ^data_path} ->
+        once.(:refresh, fn -> set_config.(Map.put(config(id), "refreshed", "1")) end)
+
+      # The release, whichever call it starts with.
+      {method, "/v1/secret/" <> rest} when method in ["DELETE", "POST"] ->
+        if not String.starts_with?(rest, "data/") do
+          once.(:rotate, fn ->
+            OpenBaoStub.put_secret(ctx.stub, path, %{"bot_token" => "xoxb-rotated"})
+
+            set_config.(
+              config(id)
+              |> Map.delete("credentials_ciphertext")
+              |> Map.put(CredentialVault.marker_key(), "openbao")
+            )
+          end)
+        end
+
+      _other ->
+        :ok
+    end)
+
+    assert {:ok, report} = CredentialVault.migrate()
+    assert {id, :row_changed} in report.skipped
+    assert OpenBaoStub.secrets(ctx.stub)[path] == %{"bot_token" => "xoxb-rotated"}
+    assert CredentialVault.stored?(config(id))
+  end
+
   test "a copy an interrupted run already wrote is finished, not refused", ctx do
     [id, _other] = ctx.ids
     path = "optimal/connectors/default/#{id}"

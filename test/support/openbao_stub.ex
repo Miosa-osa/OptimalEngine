@@ -8,8 +8,13 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
   read has no metadata), `delete: :forbidden` (deleting metadata is 403),
   `transit_keys:` (the names of the keys a `transit` mount holds; a data key
   is made under one and decrypted only by it) and `transit_mount:` (`transit`).
-  A KV write with `options.cas` is a check-and-set: `cas: 0` writes only
-  where nothing is stored, as KV version 2 does. `renew_ttls:` lists the
+  Each KV path keeps a version count, as KV version 2 does: a write with
+  `options.cas` is a check-and-set against it (`cas: 0` writes only where
+  nothing was ever stored), `GET metadata/<path>` answers `current_version`,
+  and `POST destroy/<path>` with `versions` destroys those versions (the path
+  then reads 404 when the latest one went). `on_request/2` installs a function
+  the stub calls with `{method, path}` before it answers each request, for a
+  test that needs something to happen between two of the Engine's calls. `renew_ttls:` lists the
   lease each successive `renew-self` answers (the last repeats), for a token
   nearing its maximum TTL.
   `token_ttl:` and `renewable:` (what `lookup-self` reports: seconds left,
@@ -31,6 +36,8 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
 
     state = %{
       secrets: %{},
+      versions: %{},
+      hook: nil,
       requests: [],
       token: token,
       sealed: Keyword.get(opts, :sealed, false),
@@ -68,8 +75,20 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
 
   @doc "Stores `data` (a map) at `path` under the KV mount, as a write through the API would."
   @spec put_secret(map(), String.t(), map()) :: :ok
-  def put_secret(%{agent: agent}, path, data),
-    do: Agent.update(agent, &put_in(&1, [:secrets, path], data))
+  def put_secret(%{agent: agent}, path, data), do: Agent.update(agent, &store(&1, path, data))
+
+  @doc "Calls `fun.({method, path})` before answering each request from now on."
+  @spec on_request(map(), (tuple() -> term())) :: :ok
+  def on_request(%{agent: agent}, fun) when is_function(fun, 1),
+    do: Agent.update(agent, &%{&1 | hook: fun})
+
+  defp store(state, path, data) do
+    %{
+      state
+      | secrets: Map.put(state.secrets, path, data),
+        versions: Map.update(state.versions, path, 1, &(&1 + 1))
+    }
+  end
 
   @doc "Seals the running stub: health says sealed and every other call is 503."
   @spec seal(map()) :: :ok
@@ -85,6 +104,8 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
   @impl Plug
   def call(conn, opts) do
     agent = Keyword.fetch!(opts, :agent)
+    hook = Agent.get(agent, & &1.hook)
+    if hook, do: hook.({conn.method, conn.request_path})
     state = Agent.get(agent, & &1)
     Agent.update(agent, &%{&1 | requests: [{conn.method, conn.request_path} | &1.requests]})
     {:ok, raw, conn} = read_body(conn)
@@ -145,13 +166,29 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
 
       {"POST", ["v1", ^mount, "data" | path]} ->
         key = Enum.join(path, "/")
+        current = Map.get(state.versions, key, 0)
+        cas = get_in(body, ["options", "cas"])
 
-        if get_in(body, ["options", "cas"]) == 0 and Map.has_key?(state.secrets, key) do
+        if cas != nil and cas != current do
           json(conn, 400, %{errors: ["check-and-set parameter did not match the current version"]})
         else
-          Agent.update(agent, &put_in(&1, [:secrets, key], body["data"]))
-          json(conn, 200, %{data: %{version: 1}})
+          Agent.update(agent, &store(&1, key, body["data"]))
+          json(conn, 200, %{data: %{version: current + 1}})
         end
+
+      {"GET", ["v1", ^mount, "metadata" | path]} ->
+        case Map.get(state.versions, Enum.join(path, "/")) do
+          nil -> json(conn, 404, %{errors: []})
+          current -> json(conn, 200, %{data: %{current_version: current}})
+        end
+
+      {"POST", ["v1", ^mount, "destroy" | path]} ->
+        key = Enum.join(path, "/")
+
+        if Map.get(state.versions, key) in List.wrap(body["versions"]),
+          do: Agent.update(agent, &%{&1 | secrets: Map.delete(&1.secrets, key)})
+
+        send_resp(conn, 204, "")
 
       {"GET", ["v1", ^mount, "data" | path]} ->
         case Map.get(state.secrets, Enum.join(path, "/")) do
@@ -160,7 +197,8 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
 
           data ->
             data = if state.read == :tampered, do: Map.put(data, "tampered", "1"), else: data
-            json(conn, 200, %{data: %{data: data, metadata: %{version: 1}}})
+            version = Map.get(state.versions, Enum.join(path, "/"), 1)
+            json(conn, 200, %{data: %{data: data, metadata: %{version: version}}})
         end
 
       {"POST", ["v1", transit, "datakey", "plaintext", name]}
@@ -184,7 +222,13 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
         json(conn, 403, %{errors: ["permission denied"]})
 
       {"DELETE", ["v1", ^mount, "metadata" | path]} ->
-        Agent.update(agent, &%{&1 | secrets: Map.delete(&1.secrets, Enum.join(path, "/"))})
+        key = Enum.join(path, "/")
+
+        Agent.update(
+          agent,
+          &%{&1 | secrets: Map.delete(&1.secrets, key), versions: Map.delete(&1.versions, key)}
+        )
+
         send_resp(conn, 204, "")
 
       _ ->
