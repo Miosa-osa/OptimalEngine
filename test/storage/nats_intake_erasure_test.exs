@@ -85,6 +85,15 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
         {workspace, id}
       end
 
+    # A request a test leaves pending (old on purpose) would make every later
+    # readiness report warn nats_intake_removals_pending (ExposureTest).
+    on_exit(fn ->
+      Store.raw_query(
+        "DELETE FROM events WHERE tenant_id = ?1 AND kind = 'nats_intake_purge_requested'",
+        [tenant]
+      )
+    end)
+
     %{tenant: tenant, ws: ws, other: other, n: n, stub: stub, conn: conn, connectors: connectors}
   end
 
@@ -675,16 +684,18 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
 
     # Another Engine's namespace, down for 8 days: its request stays pending
     # for it, and is purged when it is back. Only a namespace recorded as
-    # retired has its requests expired.
+    # retired has its requests expired. The namespace is this test's own: a
+    # pass of any queue on "optimal" (this module's queues sweep on every
+    # reconnect) would otherwise do the request before the Engine is back.
     test "a request of an Engine down for 8 days is still purged when it is back", ctx do
-      fill(ctx)
+      ns = "down#{ctx.n}"
       down = :"nats_ie_down5_#{ctx.n}"
       start_supervised!({Connection, name: down, url: nil}, id: down)
 
       assert {:ok, %{pending: true}} =
                IntakeQueue.forget_workspace(ctx.tenant, ctx.ws, "archived",
                  connection: down,
-                 namespace: "optimal"
+                 namespace: ns
                )
 
       {:ok, [[id]]} =
@@ -696,8 +707,9 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
       {:ok, _} =
         Store.raw_query("UPDATE events SET ts = datetime('now', '-8 days') WHERE id = ?1", [id])
 
-      # Another Engine's pass meanwhile (its own namespace) leaves it alone.
+      # Other Engines' passes meanwhile (their own namespaces) leave it alone.
       assert {:ok, _} = IntakeQueue.process_requests(ctx.conn, "elsewhere#{ctx.n}")
+      assert {:ok, _} = IntakeQueue.process_requests(ctx.conn, "optimal")
       refute done?(id)
 
       # It is reported as waiting.
@@ -705,9 +717,52 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
       assert waiting >= 1
 
       # Back up: purged, not set aside.
-      assert {:ok, done} = IntakeQueue.process_requests(ctx.conn, "optimal")
-      assert Map.has_key?(done, id)
-      assert held(ctx, "gone") == []
+      assert {:ok, done} = IntakeQueue.process_requests(ctx.conn, ns)
+      assert %{queued_purged: 0, dead_letters_removed: 0} = done[id]
+      assert done?(id)
+
+      {:ok, [[meta]]} =
+        Store.raw_query(
+          "SELECT metadata FROM events WHERE kind = 'nats_purge' AND target_uri = ?1",
+          ["nats-intake-purge-request:#{id}"]
+        )
+
+      refute Map.has_key?(Jason.decode!(meta), "set_aside")
+    end
+
+    # Requests that cannot be set aside stay pending and are read again every
+    # pass: a page of them must not keep a good request behind them from ever
+    # being read.
+    @tag :sqlite_store
+    test "a page of requests that cannot be set aside does not starve the one after it", ctx do
+      ns = "starve#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "CREATE TRIGGER refuse_set_aside BEFORE INSERT ON events WHEN NEW.kind = 'nats_purge' AND NEW.metadata LIKE '%set_aside%' BEGIN SELECT RAISE(ABORT, 'set aside refused'); END",
+          []
+        )
+
+      on_exit(fn -> Store.raw_query("DROP TRIGGER IF EXISTS refuse_set_aside", []) end)
+
+      malformed = Jason.encode!(%{"namespace" => ns, "tenant_id" => 7})
+
+      for _ <- 1..501, do: request!(ctx, malformed)
+
+      good =
+        request!(
+          ctx,
+          Jason.encode!(%{"namespace" => ns, "tenant_id" => ctx.tenant, "workspace_id" => ctx.ws})
+        )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, done} = IntakeQueue.process_requests(ctx.conn, ns)
+          assert Map.has_key?(done, good)
+        end)
+
+      assert done?(good)
+      assert log =~ "could not be set aside"
     end
 
     test "a request of a namespace recorded as retired expires with a warning", ctx do

@@ -208,21 +208,33 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   @spec process_requests(GenServer.server(), String.t()) :: {:ok, map()}
   def process_requests(conn, namespace) do
     expire_foreign(namespace)
+    {done, skipped} = process_pages(conn, namespace, 0, %{}, 0)
+    skipped(skipped)
+    {:ok, done}
+  end
 
+  @page 500
+
+  # Every pending request of the namespace, a page at a time after the last id
+  # read: a request that stays pending (its purge failed, or it could not be
+  # set aside) is passed over, so a page of them never keeps the requests
+  # after it from being read.
+  defp process_pages(conn, namespace, after_id, done, skipped) do
     rows =
       case Store.raw_query(
              """
              SELECT r.id, r.tenant_id, r.metadata FROM events r
              WHERE r.kind = ?1
                AND (CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.namespace') END) = ?2
+               AND r.id > ?3
                AND NOT EXISTS (
                  SELECT 1 FROM events d
                  WHERE d.kind = 'nats_purge' AND d.target_uri = 'nats-intake-purge-request:' || CAST(r.id AS TEXT)
                )
              ORDER BY r.id
-             LIMIT 500
+             LIMIT #{@page}
              """,
-             [@request_kind, namespace]
+             [@request_kind, namespace, after_id]
            ) do
         {:ok, rows} ->
           rows
@@ -234,18 +246,34 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
 
     # Another namespace's requests are another Engine's: they are not read
     # here, so they never fill this one's page. A request that cannot be read
-    # is set aside (recorded done, with why), so it never holds the page.
-    done =
-      for [id, row_tenant, meta] <- rows,
-          request <- [request_of(id, row_tenant, meta)],
-          request != :malformed,
-          {:ok, counts} <- [purge(conn, namespace, request)],
-          :ok <- [done(id, namespace, request, counts)],
-          into: %{} do
-        {id, counts}
-      end
+    # is set aside (recorded done, with why).
+    {done, skipped} =
+      Enum.reduce(rows, {done, skipped}, fn [id, row_tenant, meta], {done, skipped} ->
+        case request_of(id, row_tenant, meta) do
+          :malformed ->
+            {done, skipped}
 
-    {:ok, done}
+          {:malformed, :not_set_aside} ->
+            {done, skipped + 1}
+
+          request ->
+            with {:ok, counts} <- purge(conn, namespace, request),
+                 :ok <- done(id, namespace, request, counts) do
+              {Map.put(done, id, counts), skipped}
+            else
+              _ -> {done, skipped}
+            end
+        end
+      end)
+
+    case rows do
+      rows when length(rows) == @page ->
+        [[last | _] | _] = Enum.reverse(rows)
+        process_pages(conn, namespace, last, done, skipped)
+
+      _ ->
+        {done, skipped}
+    end
   end
 
   # A request's metadata as `purge/3` reads it, or `:malformed` (set aside).
@@ -259,11 +287,13 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
     else
       _ ->
         case set_aside(id, row_tenant, "malformed") do
-          :ok -> Logger.warning("[NATS] intake removal #{id} is malformed; set aside")
-          _ -> skipped(1)
-        end
+          :ok ->
+            Logger.warning("[NATS] intake removal #{id} is malformed; set aside")
+            :malformed
 
-        :malformed
+          _ ->
+            {:malformed, :not_set_aside}
+        end
     end
   end
 
