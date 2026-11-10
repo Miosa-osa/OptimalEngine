@@ -29,6 +29,8 @@ defmodule OptimalEngine.Jobs do
 
   alias OptimalEngine.Store
 
+  require Logger
+
   @default_lease_seconds 300
   @default_max_attempts 5
   @max_backoff_seconds 3_600
@@ -90,6 +92,132 @@ defmodule OptimalEngine.Jobs do
       end
       |> announced()
     end
+  end
+
+  @doc """
+  Enqueues many jobs at once: `entries` are `{tenant_id, workspace_id, kind,
+  payload, idempotency_key}`, each due now with priority 0 and
+  `:max_attempts` from `opts`. The rows go in batches of 100, one statement
+  each, and a row is inserted only for a workspace that is its tenant's and
+  active, as `enqueue/4` checks; an entry whose key the workspace already
+  holds is left as it is (`ON CONFLICT DO NOTHING`). A batch the store
+  refuses is logged as an error and its entries are enqueued one at a time
+  (`enqueue/4`), so one bad entry never costs the others.
+
+  `:priority`, `:run_at` and `:run_in` are refused
+  (`{:error, {:unsupported_options, keys}}`): every entry is due now.
+
+  Returns `{:ok, %{inserted: n, scheduled: m}}`: the jobs this call inserted
+  (each announced), and the entries now queued, inserted or already there.
+  """
+  @spec enqueue_many([{String.t(), String.t(), String.t(), map(), String.t()}], keyword()) ::
+          {:ok, %{inserted: non_neg_integer(), scheduled: non_neg_integer()}} | {:error, term()}
+  def enqueue_many(entries, opts \\ []) when is_list(entries) do
+    max_attempts = Keyword.get(opts, :max_attempts, @default_max_attempts)
+    unsupported = for key <- [:priority, :run_at, :run_in], Keyword.has_key?(opts, key), do: key
+
+    with [] <- unsupported,
+         :ok <- validate_max_attempts(max_attempts) do
+      {inserted, scheduled} =
+        entries
+        |> Enum.reject(fn {_tenant, _ws, kind, _payload, _key} -> validate_kind(kind) != :ok end)
+        |> Enum.chunk_every(100)
+        |> Enum.reduce({0, 0}, fn chunk, {inserted, scheduled} ->
+          {i, s} = insert_chunk(chunk, max_attempts)
+          {inserted + i, scheduled + s}
+        end)
+
+      {:ok, %{inserted: inserted, scheduled: scheduled}}
+    else
+      keys when is_list(keys) -> {:error, {:unsupported_options, keys}}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp insert_chunk(chunk, max_attempts) do
+    case insert_many(chunk, max_attempts) do
+      {:ok, jobs, accepted} ->
+        Enum.each(jobs, &announced({:ok, &1}))
+        {length(jobs), accepted}
+
+      {:error, reason} ->
+        Logger.error(
+          "[Jobs] a batch of #{length(chunk)} jobs was refused (#{inspect(reason)}); enqueueing them one at a time"
+        )
+
+        Enum.reduce(chunk, {0, 0}, fn {_tenant, workspace_id, kind, payload, key}, {i, s} ->
+          case enqueue(workspace_id, kind, payload,
+                 idempotency_key: key,
+                 max_attempts: max_attempts
+               ) do
+            {:ok, _job} -> {i + 1, s + 1}
+            {:error, _} -> {i, s}
+          end
+        end)
+    end
+  end
+
+  # One statement: the rows of workspaces that are their tenant's and active.
+  # Only text is bound; the integers are written in, validated.
+  defp insert_many(chunk, max_attempts) when is_integer(max_attempts) do
+    rows =
+      chunk
+      |> Enum.with_index()
+      |> Enum.map(fn {_entry, i} ->
+        b = i * 6
+        "(?#{b + 1}, ?#{b + 2}, ?#{b + 3}, ?#{b + 4}, ?#{b + 5}, ?#{b + 6})"
+      end)
+
+    params =
+      Enum.flat_map(chunk, fn {tenant_id, workspace_id, kind, payload, key} ->
+        [new_id("job_"), tenant_id, workspace_id, kind, Jason.encode!(payload), key]
+      end)
+
+    sql = """
+    WITH v(id, tenant_id, workspace_id, kind, payload, idempotency_key) AS (VALUES #{Enum.join(rows, ", ")})
+    INSERT INTO jobs (
+      id, tenant_id, workspace_id, kind, payload, priority, max_attempts,
+      run_at, idempotency_key
+    )
+    SELECT v.id, v.tenant_id, v.workspace_id, v.kind, v.payload, 0, #{max_attempts},
+           datetime('now'), v.idempotency_key
+      FROM v JOIN workspaces w ON w.id = v.workspace_id AND w.tenant_id = v.tenant_id
+     WHERE w.status = 'active'
+    ON CONFLICT(tenant_id, workspace_id, idempotency_key) DO NOTHING
+    RETURNING id, kind
+    """
+
+    with {:ok, inserted} <- Store.raw_query(sql, params),
+         {:ok, accepted} <- accepted(chunk) do
+      {:ok, Enum.map(inserted, fn [id, kind] -> %{id: id, kind: kind, status: "available"} end),
+       accepted}
+    end
+  end
+
+  # How many of the entries now have their job: inserted, or there already.
+  # Driven by the entries, one lookup each on the jobs' unique key: `jobs`
+  # keeps every job until it is pruned, so a read of the whole table per
+  # batch made the daily schedule quadratic.
+  defp accepted(chunk) do
+    rows =
+      chunk
+      |> Enum.with_index()
+      |> Enum.map_join(", ", fn {_entry, i} -> "(?#{i * 3 + 1}, ?#{i * 3 + 2}, ?#{i * 3 + 3})" end)
+
+    params = Enum.flat_map(chunk, fn {t, w, _k, _p, key} -> [t, w, key] end)
+
+    with {:ok, [[count]]} <-
+           Store.raw_query(
+             """
+             WITH v(tenant_id, workspace_id, idempotency_key) AS (VALUES #{rows})
+             SELECT count(*) FROM v
+               JOIN jobs j ON j.tenant_id = v.tenant_id
+                          AND j.workspace_id = v.workspace_id
+                          AND j.idempotency_key = v.idempotency_key
+             """,
+             params
+           ),
+         do: {:ok, count}
   end
 
   @doc """

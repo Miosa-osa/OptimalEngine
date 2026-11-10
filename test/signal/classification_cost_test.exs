@@ -6,9 +6,13 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
   crafted line would hold a worker for minutes: a 1 MiB line with no spaces
   took about ten minutes.
 
-  Each case runs in a task and must finish within its bound; the old patterns
-  took seconds to hours on the same inputs. The module runs alone (not
-  async), so the bounds measure this work and not the rest of the suite.
+  The bound is on how the cost grows, not on the clock: each case is run on a
+  quarter of the input and on all of it, and the whole must cost no more than
+  10 times the quarter (linear work costs 4 times, the quadratic patterns
+  cost 16 and more). Both runs share the runner's load at that moment, so a
+  busy runner slows both. A case under 50 ms on the whole input passes
+  outright, since there the timer's resolution is the ratio, and every run
+  has a 30 second ceiling that catches an exponential pattern.
   The classification time limit (`OptimalEngine.Signal.TimeLimit`), which
   caps a slow detection, is lifted here, so the bounds measure the detectors
   themselves.
@@ -121,36 +125,89 @@ defmodule OptimalEngine.Signal.ClassificationCostTest do
     end
   end
 
-  defp within(ms, label, fun) do
-    task = Task.async(fun)
+  @ceiling_ms 30_000
+  @max_ratio 10
+  @floor_ms 50
 
-    case Task.yield(task, ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, result} -> result
-      _ -> flunk("#{label} took longer than #{ms} ms")
+  # Microseconds `fun` took, in a task with the ceiling.
+  defp timed(label, fun) do
+    task = Task.async(fn -> elem(:timer.tc(fun), 0) end)
+
+    case Task.yield(task, @ceiling_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, us} -> us
+      _ -> flunk("#{label} took longer than #{@ceiling_ms} ms")
     end
   end
 
-  test "a 1 MiB line of any crafted shape is classified in well under a second" do
-    for {shape, text} <- lines(@mib) do
-      within(1_000, "Intake.classify on 1 MiB of #{shape}", fn -> Intake.classify(text) end)
+  # `run.(input)` on a quarter of the input and on all of it: the whole may
+  # cost at most @max_ratio times the quarter. Measured up to three times,
+  # keeping the fastest of each, before it fails.
+  defp grows_linearly(label, quarter, whole, run, tries \\ 3, best \\ {nil, nil}) do
+    small = min_us(elem(best, 0), timed(label, fn -> run.(quarter) end))
+    big = min_us(elem(best, 1), timed(label, fn -> run.(whole) end))
+
+    cond do
+      div(big, 1000) <= @floor_ms ->
+        :ok
+
+      big <= @max_ratio * max(small, 1) ->
+        :ok
+
+      tries > 1 ->
+        grows_linearly(label, quarter, whole, run, tries - 1, {small, big})
+
+      true ->
+        flunk(
+          "#{label}: the whole input cost #{big} us, the quarter #{small} us (more than #{@max_ratio} times)"
+        )
     end
   end
 
-  test "a 1 MiB document of any crafted shape is classified within two seconds" do
-    for {shape, text} <- documents(@mib) do
-      within(2_000, "Intake.classify on 1 MiB of #{shape}", fn -> Intake.classify(text) end)
+  defp min_us(nil, us), do: us
+  defp min_us(a, b), do: min(a, b)
+
+  defp pairs(shapes) do
+    quarters = Map.new(shapes.(div(@mib, 4)))
+    for {shape, whole} <- shapes.(@mib), do: {shape, Map.fetch!(quarters, shape), whole}
+  end
+
+  # The measure itself: work that grows with the square of the input fails it.
+  test "work quadratic in its input does not pass as linear" do
+    quadratic = fn text ->
+      chunks = div(byte_size(text), 2048)
+      for i <- 1..chunks, do: :binary.copy(binary_part(text, 0, i * 2048))
+      :ok
+    end
+
+    text = String.duplicate("a", @mib)
+
+    assert_raise ExUnit.AssertionError, ~r/more than 10 times/, fn ->
+      grows_linearly("quadratic", binary_part(text, 0, div(@mib, 4)), text, quadratic)
     end
   end
 
-  test "mode and genre detection of a 1 MiB crafted text take well under two seconds" do
-    for {shape, text} <- lines(@mib) ++ documents(@mib), {name, detect} <- detectors() do
-      within(2_000, "#{name} on 1 MiB of #{shape}", fn -> detect.(text) end)
+  test "classifying a crafted line grows linearly with its length, up to 1 MiB" do
+    for {shape, quarter, whole} <- pairs(&lines/1) do
+      grows_linearly("Intake.classify of #{shape}", quarter, whole, &Intake.classify/1)
     end
   end
 
-  test "a pre-send check of a 1 MiB crafted draft takes well under two seconds" do
-    for {shape, text} <- lines(@mib) ++ documents(@mib) do
-      within(2_000, "PreSend.check on 1 MiB of #{shape}", fn ->
+  test "classifying a crafted document grows linearly with its length, up to 1 MiB" do
+    for {shape, quarter, whole} <- pairs(&documents/1) do
+      grows_linearly("Intake.classify of #{shape}", quarter, whole, &Intake.classify/1)
+    end
+  end
+
+  test "mode and genre detection of a crafted text grow linearly with its length" do
+    for {shape, quarter, whole} <- pairs(&lines/1) ++ pairs(&documents/1),
+        {name, detect} <- detectors() do
+      grows_linearly("#{name} of #{shape}", quarter, whole, detect)
+    end
+  end
+
+  test "a pre-send check of a crafted draft grows linearly with its length" do
+    for {shape, quarter, whole} <- pairs(&lines/1) ++ pairs(&documents/1) do
+      grows_linearly("PreSend.check of #{shape}", quarter, whole, fn text ->
         PreSend.check(text, %{"channel" => "email"})
       end)
     end
