@@ -154,7 +154,7 @@ A row that can never be placed is quarantined instead of retried by every pass: 
 Its metadata gains `storage_placement_quarantined` and `storage_placement_quarantined_at`, the fallback record stays, and the pass goes on to the next asset.
 Removing the two quarantine keys from the asset's metadata queues it again.
 A row that a bundle import or a re-ingest changes while a pass is working on it is left as that change made it.
-The assets still waiting are the gauge `optimal_engine_storage_assets_pending_placement`, and the quarantined ones the gauge `optimal_engine_storage_assets_placement_quarantined`, in `GET /api/metrics` (`gauges`) and in Prometheus.
+The assets still waiting are the gauge `optimal_engine_storage_assets_pending_placement`, and the quarantined ones the gauge `optimal_engine_storage_assets_placement_quarantined`, in `GET /api/metrics` (`gauges`, for the Engine operator) and in Prometheus.
 Both are read from a count cached for a minute, so a scrape does not scan the assets table; it is dropped when an asset falls back to disk and refreshed by every pass.
 `GET /api/storage/providers?probe=1` makes an authenticated request to the bucket and reports `s3` as `unreachable` while the object store is down; without `probe` it reports configuration only.
 `scripts/proof-offsite-backup.sh` proves the outage, the recovery and the placement of the outage asset end to end against a real bucket.
@@ -541,6 +541,7 @@ Any of these variables may hold an OpenBao reference instead of the value itself
 OPTIMAL_BACKUP_KEY             OPTIMAL_AUTHORITY_KEY          CONNECTOR_KEY
 OPTIMAL_S3_ACCESS_KEY_ID       OPTIMAL_S3_SECRET_ACCESS_KEY   OPTIMAL_QDRANT_API_KEY
 OPTIMAL_VALKEY_PASSWORD        OPTIMAL_NATS_TOKEN             OPTIMAL_NATS_PASSWORD
+OPTIMAL_METRICS_TOKEN
 ```
 
 `OPTIMAL_VALKEY_PASSWORD` is sent with `AUTH` instead of a password in `OPTIMAL_VALKEY_URL`, and `OPTIMAL_NATS_TOKEN` or `OPTIMAL_NATS_PASSWORD` (with the URL's user) is sent in `CONNECT` instead of the URL's credential, so the URL can name the server alone.
@@ -597,6 +598,7 @@ Any failure (a wrong `CONNECTOR_KEY`, OpenBao sealed, a copy that reads back dif
 Running it again is safe: marked rows are `already_migrated`, a running connector is `skipped` until the next run, and the output names connector ids, never a credential.
 Keep `CONNECTOR_KEY` until every row is migrated.
 `OPTIMAL_CONNECTOR_CREDENTIAL_STORE` unset, `engine` or any other value writes database envelopes; `openbao` refuses a write when OpenBao is not configured.
+The secret's path is built from the connector's tenant and id, which must be in the form ids take (a letter or digit, then letters, digits, `.`, `_`, `:` and `-`, at most 128; no `/` or `..`): any other is refused (`invalid_connector_id`) before OpenBao is asked. A row an older build wrote with such an id is counted by readiness (`connector_ids` warns `connector_ids_invalid` with the count) and at boot, and `mix optimal.connector invalid-ids` lists them; re-register each under a valid id.
 
 A server initialised without a secrets engine (as the in-guest one is) gets its KV version 2 mount enabled by the Engine's first write, when the token may do that (the in-guest root token may); otherwise the write fails with `openbao_mount_missing`, and `bao secrets enable -path=secret -version=2 kv` fixes it.
 

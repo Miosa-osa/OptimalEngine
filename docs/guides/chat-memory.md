@@ -179,6 +179,7 @@ Routes that address a record by id answer only inside the caller's tenant and ke
 * `GET /api/signals/:id` reads only a context of the caller's tenant in the named workspace.
 * `GET /api/workspaces` lists only the workspaces in the key's `workspace_scope`, unless the key holds `*`.
 * `GET /api/health` answers any valid key without a workspace; `?full=true` reads one workspace's diagnostics, so a key limited to named workspaces passes `workspace=<id>` (400 `workspace_required` otherwise).
+* `GET /api/health` and `GET /api/status` give any key the status, `live`, `ok?`, `degraded` and `warnings` (fixed codes); the `checks` themselves (a store error's message, an open interface, counts across tenants) only to the Engine operator with the admin grant.
 
 ## CLI and MCP
 

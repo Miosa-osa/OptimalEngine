@@ -78,7 +78,16 @@ defmodule OptimalEngine.Health do
     embedder = Keyword.get(opts, :embedder, :probe)
 
     checks =
-      [:store, :migrations, :credential_key, :network_auth, :secrets, :intake_removals, :embedder]
+      [
+        :store,
+        :migrations,
+        :credential_key,
+        :network_auth,
+        :secrets,
+        :intake_removals,
+        :connector_ids,
+        :embedder
+      ]
       |> Enum.reject(&(&1 in skip))
       |> Enum.map(fn
         :embedder -> {:embedder, embedder_check(embedder)}
@@ -133,6 +142,20 @@ defmodule OptimalEngine.Health do
   # a week: an Engine down or NATS unreachable, so text that was to be erased
   # is still on the stream. A count, never what they name.
   defp run_check(:intake_removals), do: OptimalEngine.Storage.NATS.IntakeQueue.pending_check()
+
+  # Connector rows an older build wrote with an id outside the form ids take:
+  # their credentials name no OpenBao path. A count, never the ids.
+  defp run_check(:connector_ids) do
+    case CredentialVault.invalid_ids() do
+      {:ok, []} -> :ok
+      {:ok, ids} -> {:warn, {:connector_ids_invalid, length(ids)}}
+      {:error, _reason} -> :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
 
   # An API with authentication off on a network interface still serves, but
   # anyone who can reach it acts as the local operator (OptimalEngine.API.Exposure).

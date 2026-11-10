@@ -25,8 +25,9 @@ defmodule OptimalEngine.Secrets do
   it rather than running without the secret. Without OpenBao, plain values
   work as they always have.
 
-  The field read from OpenBao (only that field) is kept in an ETS table for
-  `@ttl_ms` (a minute), so a
+  The field read from OpenBao (only that field) is kept for
+  `@ttl_ms` (a minute) in a `:protected` ETS table only `OptimalEngine.Secrets.Cache`
+  writes, so no other process can plant a value, and so a
   multipart upload or a burst of connector runs does not ask OpenBao for the
   same secret on every call. A sealed or unreachable OpenBao is not asked again
   for a few seconds (`OPTIMAL_OPENBAO_RETRY_AFTER_MS`, see
@@ -51,7 +52,8 @@ defmodule OptimalEngine.Secrets do
   @engine_secrets ~w(OPTIMAL_BACKUP_KEY OPTIMAL_AUTHORITY_KEY CONNECTOR_KEY
                      OPTIMAL_S3_ACCESS_KEY_ID OPTIMAL_S3_SECRET_ACCESS_KEY
                      OPTIMAL_QDRANT_API_KEY
-                     OPTIMAL_VALKEY_PASSWORD OPTIMAL_NATS_TOKEN OPTIMAL_NATS_PASSWORD)
+                     OPTIMAL_VALKEY_PASSWORD OPTIMAL_NATS_TOKEN OPTIMAL_NATS_PASSWORD
+                     OPTIMAL_METRICS_TOKEN)
 
   @type reason ::
           :openbao_not_configured
@@ -156,25 +158,8 @@ defmodule OptimalEngine.Secrets do
   """
   @spec flush_cache() :: :ok
   def flush_cache do
-    if :ets.whereis(@cache_table) != :undefined, do: :ets.delete_all_objects(@cache_table)
+    OptimalEngine.Secrets.Cache.flush()
     OpenBao.reset_outages()
-  end
-
-  @doc """
-  Creates the table values read from OpenBao are kept in, owned by the
-  calling process (the application, at start). A fetch before it exists, or
-  after its owner went, reads OpenBao and keeps nothing.
-  """
-  @spec init_cache() :: :ok
-  def init_cache do
-    if :ets.whereis(@cache_table) == :undefined do
-      :ets.new(@cache_table, [:named_table, :public, :set, read_concurrency: true])
-    end
-
-    :ok
-  rescue
-    # Created by another process in between.
-    ArgumentError -> :ok
   end
 
   @doc false
@@ -216,6 +201,10 @@ defmodule OptimalEngine.Secrets do
   def describe(:field_not_found), do: "the secret has no such field"
   def describe(:invalid_reference), do: "the reference is not openbao:<path>#<field>"
   def describe(:invalid_secret_path), do: "the reference names an invalid path"
+
+  def describe(:invalid_connector_id),
+    do: "the connector id or tenant is not in the form ids take, so it names no OpenBao path"
+
   def describe({:openbao_status, status}), do: "OpenBao answered HTTP #{status}"
   def describe(reason), do: inspect(reason)
 
@@ -290,12 +279,9 @@ defmodule OptimalEngine.Secrets do
     ArgumentError -> :miss
   end
 
-  defp remember(key, value) do
-    :ets.insert(@cache_table, {key, System.monotonic_time(:millisecond) + @ttl_ms, value})
-    :ok
-  rescue
-    ArgumentError -> :ok
-  end
+  # Written by the table's owner (`OptimalEngine.Secrets.Cache`) only.
+  defp remember(key, value),
+    do: OptimalEngine.Secrets.Cache.put(key, System.monotonic_time(:millisecond) + @ttl_ms, value)
 
   defp env(name) do
     case System.get_env(name) do

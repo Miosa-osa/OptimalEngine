@@ -89,6 +89,7 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 | `OPTIMAL_ENGINE_WORKSPACE` | none | Workspace id served when the scope is `workspace`; required then. |
 | `OPTIMAL_RELEASE_CHANNEL` | unset | `dev`, `stable`, `beta`, or `pinned`, reported by `GET /api/version`. Any other value fails startup. |
 | `OPTIMAL_BOOTSTRAP_KEY` | none | `oe_<24 hex>_<secret of 32+ chars>`; registers the first API key at boot. |
+| `OPTIMAL_METRICS_TOKEN` | none | A bearer token that opens `GET /api/metrics/prometheus` and no other route, for a scraper that holds no API key; may be an `openbao:<path>#<field>` reference. Without it the route needs the Engine operator's key (an admin key of the default tenant whose workspace scope is `*`); on an Engine that requires no key, a request without one is served. |
 | `OPTIMAL_BOOTSTRAP_TENANT`, `OPTIMAL_BOOTSTRAP_SCOPES`, `OPTIMAL_BOOTSTRAP_WORKSPACES` | `default`, `read,write`, `*` | Tenant, operation scopes, and workspace allowlist of the bootstrap key. |
 | `OPTIMAL_KNOWLEDGE_BACKEND` | `ets` | Mirror backend: `ets`, `rocksdb`, or `mnesia` (`ram_copies` only). |
 | `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` | `.optimal/knowledge-rocksdb` | Where RocksDB keeps the mirror, relative to the working directory; set an absolute path on the data volume. |
@@ -285,5 +286,6 @@ An Engine that listens beyond loopback without them is reported as open, and ref
 Only the interface the Engine binds is checked: a loopback Engine that a proxy, tunnel or port map publishes to the network is not detected, and needs `OPTIMAL_AUTH_REQUIRED=true` as well.
 The container image and the compose files listen on all the container's interfaces and set `OPTIMAL_AUTH_REQUIRED=true`.
 The default local mode is trusted and permits anonymous requests; HTTP grants do not sandbox local CLI or SQL access.
+With `OPTIMAL_AUTH_REQUIRED=false` a request without a key is the Engine operator (`OptimalEngine.API.Actor.engine_operator?/1`): it reads every tenant's data, the Engine log and the Engine-wide metrics. Never run that mode where anyone but the operator can reach the port: not on a shared network, not behind a proxy or port map others can reach.
 Applications must supply intended scope, while legacy API defaults remain documented compatibility behavior.
 Never silently share memory across tenants, organizations, or workspaces.

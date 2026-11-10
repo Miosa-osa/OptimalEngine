@@ -1319,16 +1319,19 @@ defmodule OptimalEngine.API.Router do
         report = Health.ready(embedder: :recent)
         live? = Health.live?()
 
-        json(conn, %{
-          # From the report shown below, so the status cannot disagree with its own checks.
-          status: if(live?, do: Health.status_of(report), else: :down),
-          live: live?,
-          ok?: report.ok?,
-          release: OptimalEngine.Version.info(),
-          degraded: report.degraded,
-          warnings: Health.warnings(report),
-          checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end)
-        })
+        conn
+        |> json(
+          %{
+            # From the report shown below, so the status cannot disagree with its own checks.
+            status: if(live?, do: Health.status_of(report), else: :down),
+            live: live?,
+            ok?: report.ok?,
+            release: OptimalEngine.Version.info(),
+            degraded: report.degraded,
+            warnings: Health.warnings(report)
+          }
+          |> with_checks(conn, report)
+        )
     end
   end
 
@@ -1342,31 +1345,68 @@ defmodule OptimalEngine.API.Router do
   get "/api/status" do
     report = Health.ready(embedder: :recent)
 
-    json(conn, %{
-      status: Health.status_of(report),
-      ok?: report.ok?,
-      checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end),
-      degraded: report.degraded,
-      warnings: Health.warnings(report),
-      api_version: "v1",
-      release: OptimalEngine.Version.info()
-    })
+    json(
+      conn,
+      %{
+        status: Health.status_of(report),
+        ok?: report.ok?,
+        degraded: report.degraded,
+        warnings: Health.warnings(report),
+        api_version: "v1",
+        release: OptimalEngine.Version.info()
+      }
+      |> with_checks(conn, report)
+    )
   end
 
-  # Prometheus text exposition format — not rate-limited, no auth required.
+  # The checks' details (a store error's message, the interface an open API
+  # binds, counts across tenants) are the Engine's: the Engine operator with
+  # the admin grant gets them. Any other key gets the status, the booleans and
+  # the fixed codes (`degraded`, `warnings`).
+  defp with_checks(body, conn, report) do
+    if OptimalEngine.API.Actor.engine_admin?(conn),
+      do: Map.put(body, :checks, Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end)),
+      else: body
+  end
+
+  # Prometheus text exposition format, not rate-limited. The counters are the
+  # whole Engine's, every tenant's, so only the Engine operator reads them (an
+  # admin key of the default tenant whose workspace scope is "*"), or a
+  # scraper holding OPTIMAL_METRICS_TOKEN (OptimalEngine.API.AuthPlug). On an
+  # Engine that requires no key, a request without one is the local operator.
   # MUST appear before the JSON /api/metrics route (first-match routing).
   get "/api/metrics/prometheus" do
     alias OptimalEngine.Telemetry.Prometheus
 
-    body = Prometheus.render()
-
-    conn
-    |> put_resp_content_type("text/plain; version=0.0.4; charset=utf-8")
-    |> send_resp(200, body)
+    if conn.assigns[:metrics_token] == true or engine_operator?(conn) do
+      conn
+      |> put_resp_content_type("text/plain; version=0.0.4; charset=utf-8")
+      |> send_resp(200, Prometheus.render())
+    else
+      conn
+      |> put_status(403)
+      |> json(%{
+        error: "operator_only",
+        message:
+          "the metrics cover every tenant; they need an admin key of the default tenant whose workspace scope is *, or OPTIMAL_METRICS_TOKEN"
+      })
+    end
   end
 
   # Runtime metrics snapshot (Phase 10 Telemetry module).
+  # Runtime metrics. The counters, histograms, sizing and gauges are the whole
+  # Engine's, every tenant's, so only the Engine operator with the admin grant
+  # gets them (OptimalEngine.API.Actor.engine_admin?/1); any other key gets its
+  # own tenant's connector metrics alone.
   get "/api/metrics" do
+    if OptimalEngine.API.Actor.engine_admin?(conn) do
+      engine_metrics(conn)
+    else
+      json(conn, %{connectors: OptimalEngine.API.ConnectorsAPI.metrics(conn)})
+    end
+  end
+
+  defp engine_metrics(conn) do
     # `try/rescue` doesn't catch GenServer exits (they aren't exceptions).
     # `try/catch :exit` does. Without this, a downed Telemetry GenServer
     # would crash this request handler instead of returning the fallback.
