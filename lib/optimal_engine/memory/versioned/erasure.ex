@@ -30,6 +30,13 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   A package another live memory or a context of the workspace still holds the
   same text in is shared, and stays: that text is theirs.
 
+  After the commit, `OptimalEngine.Memory.Versioned` records the removal of the
+  versions' points, and of the deleted source chunks' points, from the Qdrant
+  projection (`OptimalEngine.Storage.Qdrant.Projection.remove_memories/2`): a
+  durable record, applied in order and retried until Qdrant takes it. A
+  removal that cannot be recorded is the forget's error
+  (`{:memory_erasure_failed, :qdrant_removal, reason}`).
+
   On PostgreSQL the posting lists are rewritten after the commit. The row
   trigger queued each version's key in the forget's own transaction
   (`optimal_fts_queue`), so the rewrite is on record before the forget

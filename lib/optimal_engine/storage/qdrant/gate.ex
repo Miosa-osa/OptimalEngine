@@ -12,7 +12,7 @@ defmodule OptimalEngine.Storage.Qdrant.Gate do
   kept two minutes per scope by default (`:count_ttl_ms`) and reads indexes,
   never the vectors.
 
-  A dirty mark is made with the wall-clock time (`stamp/0`). A sync that
+  A dirty mark carries a generation (`stamp/0`), never the wall clock. A sync that
   completes clears the marks made before it began; a mark made while it ran
   stays, and the job that ran it queues a follow-up
   (`OptimalEngine.Maintenance`). Every mark queues a sync job for its
@@ -62,9 +62,16 @@ defmodule OptimalEngine.Storage.Qdrant.Gate do
 
   # ── dirty marks ─────────────────────────────────────────────────────────
 
-  @doc "The wall-clock milliseconds a dirty mark and a sync's start are compared by."
+  @doc """
+  The generation a dirty mark and a sync's start are compared by: a counter
+  every mark advances, so a mark made after a sync started, in the same
+  millisecond or after the wall clock stepped back, is always later than the
+  start. It begins at the wall clock in microseconds when the projection's
+  table is created, so a start carried in a job's cursor across a restart is
+  earlier than every mark made since.
+  """
   @spec stamp() :: integer()
-  def stamp, do: System.system_time(:millisecond)
+  def stamp, do: Projection.generation(0)
 
   @doc "Whether a mirror into the workspace failed since the last sync that completed for it."
   @spec dirty?(String.t()) :: boolean()
@@ -89,7 +96,7 @@ defmodule OptimalEngine.Storage.Qdrant.Gate do
   end
 
   def mark_dirty(workspace_id) when is_binary(workspace_id) do
-    Projection.store({:dirty, workspace_id}, stamp(), true)
+    Projection.store({:dirty, workspace_id}, Projection.generation(1), true)
     invalidate(workspace_id)
     queue_sync(workspace_id)
   end

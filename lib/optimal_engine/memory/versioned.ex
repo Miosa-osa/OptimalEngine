@@ -50,6 +50,7 @@ defmodule OptimalEngine.Memory.Versioned do
   alias OptimalEngine.MemoryCore.SecurityLabels
   alias OptimalEngine.Tenancy.Tenant
   alias OptimalEngine.Workspace
+  alias OptimalEngine.Storage.Qdrant.Projection
 
   @valid_relations ~w(updates extends derives contradicts cites)
 
@@ -274,7 +275,20 @@ defmodule OptimalEngine.Memory.Versioned do
         {:error, _} = error -> error
       end
     end)
+    |> superseded()
   end
+
+  # The update committed: the version it superseded is no longer searchable,
+  # and its points leave the Qdrant projection through the durable removal
+  # (recorded, retried until Qdrant takes it). A removal that cannot be
+  # recorded is logged; the point is never served (every candidate is read
+  # back from the store) and the next sync removes it.
+  defp superseded({:ok, %__MODULE__{parent_memory_id: old} = new} = ok) when is_binary(old) do
+    Projection.remove_memories([old], tenant_id: new.tenant_id, workspace_id: new.workspace_id)
+    ok
+  end
+
+  defp superseded(other), do: other
 
   defp read(txn, id) do
     case Store.txn_query(txn, "SELECT #{VStore.select_cols()} FROM memories WHERE id = ?1", [id]) do
@@ -388,13 +402,37 @@ defmodule OptimalEngine.Memory.Versioned do
   defp erased({:ok, %{memories: memories, refresh: refresh}}) do
     Enum.each(memories, &forget_cached_embedding/1)
 
-    case refresh do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:memory_erasure_failed, :fts_refresh, reason}}
+    with :ok <- unproject(memories) do
+      case refresh do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:memory_erasure_failed, :fts_refresh, reason}}
+      end
     end
   end
 
   defp erased({:error, _reason} = error), do: error
+
+  # The erased versions' points, and those of the source chunks the erasure
+  # deleted, leave the Qdrant projection through its durable removal: recorded
+  # now, after the commit (so a retry never finds the rows searchable again),
+  # applied in order behind any mirror queued before it, and retried until
+  # Qdrant takes it. A removal that cannot be recorded is the caller's error;
+  # the rows are erased, and forgetting again records it again.
+  defp unproject([]), do: :ok
+
+  defp unproject([first | _] = memories) do
+    opts = [tenant_id: first.tenant_id, workspace_id: first.workspace_id]
+
+    chunks =
+      for %{source_chunk_id: chunk} when is_binary(chunk) and chunk != "" <- memories, do: chunk
+
+    with :ok <- Projection.remove_memories(Enum.map(memories, & &1.id), opts),
+         :ok <- Projection.remove(:chunks, "chunk_id", Enum.uniq(chunks), opts) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:memory_erasure_failed, :qdrant_removal, reason}}
+    end
+  end
 
   defp forget_cached_embedding(nil), do: :ok
   defp forget_cached_embedding(memory), do: MemoryEmbeddings.forget_cache(memory)

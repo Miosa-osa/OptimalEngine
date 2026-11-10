@@ -191,6 +191,7 @@ defmodule OptimalEngine.Storage.Qdrant.Removals do
   defp column(:contexts, "context_id"), do: "v.context_id"
   defp column(:contexts, "workspace_id"), do: "c.workspace_id"
   defp column(:chunks, "context_id"), do: "ch.signal_id"
+  defp column(:chunks, "chunk_id"), do: "ce.chunk_id"
   defp column(:chunks, "workspace_id"), do: "ce.workspace_id"
   defp column(:memories, "memory_id"), do: "me.memory_id"
   defp column(:memories, "workspace_id"), do: "me.workspace_id"

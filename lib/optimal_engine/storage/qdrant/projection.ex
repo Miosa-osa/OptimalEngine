@@ -410,7 +410,12 @@ defmodule OptimalEngine.Storage.Qdrant.Projection do
   """
   @spec remove_memory(String.t(), keyword()) :: :ok | {:error, term()}
   def remove_memory(memory_id, opts \\ []) when is_binary(memory_id),
-    do: Removals.remove(:memories, "memory_id", [memory_id], opts)
+    do: remove_memories([memory_id], opts)
+
+  @doc "`remove_memory/2` for several memories, in one record."
+  @spec remove_memories([String.t()], keyword()) :: :ok | {:error, term()}
+  def remove_memories(memory_ids, opts \\ []) when is_list(memory_ids),
+    do: Removals.remove(:memories, "memory_id", memory_ids, opts)
 
   @doc "The durable removal of this Engine's points of a workspace, of every kind, serving or not."
   @spec remove_workspace(String.t()) :: :ok | {:error, term()}
@@ -878,6 +883,21 @@ defmodule OptimalEngine.Storage.Qdrant.Projection do
   def match_delete(pattern) do
     if table?(), do: :ets.match_delete(@table, pattern)
     :ok
+  end
+
+  @doc false
+  # Advances the dirty-mark generation by `by` and returns it (`Gate.stamp/0`).
+  @spec generation(non_neg_integer()) :: integer()
+  def generation(by) do
+    if table?(),
+      do:
+        :ets.update_counter(
+          @table,
+          :dirty_generation,
+          {2, by},
+          {:dirty_generation, System.system_time(:microsecond), nil}
+        ),
+      else: System.system_time(:microsecond)
   end
 
   defp table?, do: :ets.whereis(@table) != :undefined

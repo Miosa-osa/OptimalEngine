@@ -105,6 +105,53 @@ defmodule OptimalEngine.Storage.QdrantIntegrationTest do
     assert {:ok, 0} = Projection.remote_count(collection, %{workspace_id: ctx.ws})
   end
 
+  test "forget and hard delete remove a memory's points through the durable removal, Qdrant down or up",
+       ctx do
+    {:ok, _} = Store.raw_query("DELETE FROM qdrant_pending_removals", [])
+    collection = Projection.collection(:memories, 3)
+    count = fn -> Projection.remote_count(collection, %{workspace_id: ctx.ws}) end
+
+    # Two chains of two versions; only each latest version is mirrored.
+    [forgotten, deleted] =
+      for tag <- ["forget", "delete"] do
+        {:ok, v1} = Versioned.create(%{content: "it #{tag} #{ctx.n}", workspace_id: ctx.ws})
+        :ok = MemoryEmbeddings.put(v1, [1.0, 0.0, 0.0], model: "it")
+        {:ok, v2} = Versioned.update(v1.id, %{content: "it #{tag} two #{ctx.n}"})
+        :ok = MemoryEmbeddings.put(v2, [0.0, 1.0, 0.0], model: "it")
+        {v1, v2}
+      end
+
+    :ok = Projection.flush()
+    assert {:ok, 2} = count.()
+
+    # Qdrant unreachable: the forget and the hard delete commit, and each
+    # records its removal.
+    url = System.get_env("OPTIMAL_QDRANT_URL")
+    System.put_env("OPTIMAL_QDRANT_URL", "http://127.0.0.1:1")
+    assert :ok = Versioned.forget(elem(forgotten, 0).id)
+    assert :ok = Versioned.delete(elem(deleted, 1).id)
+    :ok = Projection.flush()
+    System.put_env("OPTIMAL_QDRANT_URL", url)
+    Projection.reset_health()
+
+    assert {:ok, [[2]]} = Store.raw_query("SELECT COUNT(*) FROM qdrant_pending_removals", [])
+    assert {:ok, 2} = count.()
+
+    # Qdrant back: the records are applied and the points are gone.
+    assert :ok = Projection.retry_pending()
+    assert {:ok, [[0]]} = Store.raw_query("SELECT COUNT(*) FROM qdrant_pending_removals", [])
+    assert {:ok, 0} = count.()
+
+    # With Qdrant up the removal is applied in order, without a retry.
+    {:ok, m} = Versioned.create(%{content: "it live #{ctx.n}", workspace_id: ctx.ws})
+    :ok = MemoryEmbeddings.put(m, [0.0, 0.0, 1.0], model: "it")
+    :ok = Projection.flush()
+    assert {:ok, 1} = count.()
+    assert :ok = Versioned.forget(m.id)
+    :ok = Projection.flush()
+    assert {:ok, 0} = count.()
+  end
+
   defp context!(id, workspace_id) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 

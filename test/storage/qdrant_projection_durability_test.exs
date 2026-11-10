@@ -263,6 +263,19 @@ defmodule OptimalEngine.Storage.QdrantProjectionDurabilityTest do
       assert Projection.dirty?(ctx.ws)
     end
 
+    test "a mark made in the instant a sync starts is not cleared by that sync", ctx do
+      # Marks and starts are ordered by a generation, not the wall clock: a
+      # mark made after the start, in the same millisecond, stays.
+      for _ <- 1..50 do
+        started = Projection.stamp()
+        :ok = Projection.mark_dirty(ctx.ws)
+        :ok = Projection.clear_dirty(ctx.ws, started)
+        assert Projection.dirty?(ctx.ws)
+        :ok = Projection.clear_dirty(ctx.ws, Projection.stamp())
+        refute Projection.dirty?(ctx.ws)
+      end
+    end
+
     test "the all-workspaces mark marks each active workspace and queues its job", ctx do
       :ok = Projection.mark_dirty(:all)
       assert Projection.dirty?(ctx.ws)
@@ -270,7 +283,109 @@ defmodule OptimalEngine.Storage.QdrantProjectionDurabilityTest do
     end
   end
 
+  describe "a memory forgotten or hard deleted (#245, #258)" do
+    test "an update removes the superseded version's points", ctx do
+      {:ok, v1} = Versioned.create(%{content: "upd #{ctx.n}", workspace_id: ctx.ws})
+      :ok = MemoryEmbeddings.put(v1, [1.0, 0.0], model: "m")
+      assert map_size(pts(ctx, :memories, 2)) == 1
+
+      {:ok, v2} = Versioned.update(v1.id, %{content: "upd two #{ctx.n}"})
+      :ok = MemoryEmbeddings.put(v2, [0.0, 1.0], model: "m")
+
+      assert [%{"payload" => %{"memory_id" => left}}] = Map.values(pts(ctx, :memories, 2))
+      assert left == v2.id
+    end
+
+    test "forget records the removal of every version's points and applies it once Qdrant answers",
+         ctx do
+      {v1, v2} = chain!(ctx, "fgt")
+      QdrantStub.set_fail(ctx.stub, :points)
+
+      assert :ok = Versioned.forget(v1.id)
+      :ok = Projection.flush()
+      assert pending() == 1
+      assert pending_ids() == Enum.sort([v1.id, v2.id])
+      assert map_size(pts(ctx, :memories, 2)) == 1
+
+      QdrantStub.set_fail(ctx.stub, nil)
+      Projection.reset_health()
+      assert :ok = Projection.retry_pending()
+      assert pending() == 0
+      assert pts(ctx, :memories, 2) == %{}
+    end
+
+    test "a hard delete records the removal of every version's points and applies it once Qdrant answers",
+         ctx do
+      {v1, v2} = chain!(ctx, "hdel")
+      QdrantStub.set_fail(ctx.stub, :points)
+
+      assert :ok = Versioned.delete(v2.id)
+
+      assert {:ok, []} =
+               Store.raw_query("SELECT id FROM memories WHERE id IN (?1, ?2)", [v1.id, v2.id])
+
+      :ok = Projection.flush()
+      assert pending() == 1
+      assert pending_ids() == Enum.sort([v1.id, v2.id])
+
+      QdrantStub.set_fail(ctx.stub, nil)
+      Projection.reset_health()
+      assert :ok = Projection.retry_pending()
+      assert pending() == 0
+      assert pts(ctx, :memories, 2) == %{}
+    end
+
+    test "the source chunk a forget erases leaves Qdrant with it", ctx do
+      chunk = "qdsrc#{ctx.n}"
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO chunks (id, tenant_id, signal_id, scale, text, workspace_id) " <>
+            "VALUES (?1, ?2, ?3, 'chunk', ?4, ?5)",
+          [chunk, ctx.tenant, "gone-#{ctx.n}", "source #{ctx.n}", ctx.ws]
+        )
+
+      :ok =
+        Store.insert_embeddings([
+          %{
+            chunk_id: chunk,
+            tenant_id: ctx.tenant,
+            workspace_id: ctx.ws,
+            model: "m",
+            modality: :text,
+            dim: 2,
+            vector: [1.0, 0.0]
+          }
+        ])
+
+      assert map_size(pts(ctx, :chunks, 2)) == 1
+
+      {:ok, m} =
+        Versioned.create(%{content: "src #{ctx.n}", workspace_id: ctx.ws, source_chunk_id: chunk})
+
+      assert :ok = Versioned.forget(m.id)
+      assert {:ok, []} = Store.raw_query("SELECT id FROM chunks WHERE id = ?1", [chunk])
+      assert pts(ctx, :chunks, 2) == %{}
+      assert pending() == 0
+    end
+  end
+
   # ── helpers ─────────────────────────────────────────────────────────────
+
+  # A memory updated once, both versions embedded: only the latest is mirrored.
+  defp chain!(ctx, tag) do
+    {:ok, v1} = Versioned.create(%{content: "#{tag} #{ctx.n}", workspace_id: ctx.ws})
+    :ok = MemoryEmbeddings.put(v1, [1.0, 0.0], model: "m")
+    {:ok, v2} = Versioned.update(v1.id, %{content: "#{tag} two #{ctx.n}"})
+    :ok = MemoryEmbeddings.put(v2, [0.0, 1.0], model: "m")
+    :ok = Projection.flush()
+    {v1, v2}
+  end
+
+  defp pending_ids do
+    {:ok, rows} = Store.raw_query("SELECT ids FROM qdrant_pending_removals", [])
+    rows |> Enum.flat_map(fn [ids] -> Jason.decode!(ids) end) |> Enum.sort()
+  end
 
   defp eventually(fun, tries \\ 60) do
     cond do
