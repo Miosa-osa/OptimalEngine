@@ -240,7 +240,8 @@ defmodule OptimalEngine.Memory.Versioned do
     # does (`Erasure.forget/3`): a forget runs wholly before (and the update
     # is refused) or after (and erases the new version too).
     Store.transaction(fn txn ->
-      with {:ok, root} when is_binary(root) <- Erasure.root(txn, id),
+      with :ok <- Store.txn_lock_row(txn, "memories", "id", id),
+           {:ok, root} when is_binary(root) <- Erasure.root(txn, id),
            :ok <- Store.txn_lock_row(txn, "memories", "id", root),
            {:ok, old} <- read(txn, id),
            :ok <- if(old.is_forgotten, do: {:error, :forgotten}, else: :ok) do

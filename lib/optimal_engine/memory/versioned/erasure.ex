@@ -53,6 +53,9 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
 
   @timeout 60_000
 
+  # The most versions a chain's parent links are followed through.
+  @max_depth 1_000
+
   # The metadata keys a forgotten row keeps: they decide who may see the row.
   @governed_keys ["security_labels", "partition_ids"]
 
@@ -130,7 +133,10 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   @doc """
   The root a memory's chain is held by: its `root_memory_id`, or for a chain
   an older build wrote without one, the first version up its
-  `parent_memory_id` links. `{:ok, nil}` when there is no such memory.
+  `parent_memory_id` links within the memory's workspace (a link into
+  another workspace ends the walk there). `{:ok, nil}` when there is no such
+  memory; `{:error, :memory_chain_broken}` when the links loop, or run past
+  #{@max_depth} versions, without reaching a root.
   """
   @spec root(term(), String.t()) :: {:ok, String.t() | nil} | {:error, term()}
   def root(txn, id) do
@@ -138,32 +144,46 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
            query(
              txn,
              """
-             WITH RECURSIVE up(id, parent, root, depth) AS (
-               SELECT id, parent_memory_id, root_memory_id, 0 FROM memories WHERE id = ?1
-               UNION ALL
-               SELECT m.id, m.parent_memory_id, m.root_memory_id, up.depth + 1
-                 FROM memories m JOIN up ON m.id = up.parent
-                WHERE up.root IS NULL AND up.depth < 10000
+             WITH RECURSIVE up(id, parent, root, workspace, depth) AS (
+               SELECT id, parent_memory_id, root_memory_id, workspace_id, 0 FROM memories WHERE id = ?1
+               UNION
+               SELECT m.id, m.parent_memory_id, m.root_memory_id, m.workspace_id, up.depth + 1
+                 FROM memories m JOIN up ON m.id = up.parent AND m.workspace_id = up.workspace
+                WHERE up.root IS NULL AND up.depth < #{@max_depth}
              )
-             SELECT COALESCE(root, id) FROM up WHERE root IS NOT NULL OR parent IS NULL
-             ORDER BY depth ASC LIMIT 1
+             SELECT COALESCE(root, id), (SELECT count(*) FROM up) FROM up
+              WHERE root IS NOT NULL OR parent IS NULL
+                 OR parent NOT IN (SELECT id FROM memories WHERE workspace_id = up.workspace)
+              ORDER BY depth ASC LIMIT 1
              """,
              [id]
            ) do
       case rows do
-        [[root]] -> {:ok, root}
-        [] -> {:ok, nil}
+        [[root, _walked]] ->
+          {:ok, root}
+
+        [] ->
+          # No such memory, or a chain whose parent links loop (or run past
+          # @max_depth) without reaching a root: nothing to hold, so nothing is
+          # erased, and the caller is told.
+          case query(txn, "SELECT 1 FROM memories WHERE id = ?1", [id]) do
+            {:ok, []} -> {:ok, nil}
+            {:ok, _} -> {:error, :memory_chain_broken}
+            {:error, _} = error -> error
+          end
       end
     end
   end
 
   # The memory and every version of its chain, in its workspace: those that
   # share its root, and those linked to the root through `parent_memory_id`
-  # (a chain an older build wrote without `root_memory_id`). The root's row is
-  # held first (`FOR UPDATE` on PostgreSQL), so an update of the chain
-  # (`Versioned.update/2`, which holds it too) runs wholly before or after.
+  # (a chain an older build wrote without `root_memory_id`). The memory's own
+  # row is held first, then the root's (`FOR UPDATE` on PostgreSQL), so an
+  # update of the chain (`Versioned.update/2`, which holds the root too) runs
+  # wholly before or after. Links never leave the memory's workspace.
   defp chain(txn, id) do
-    with {:ok, root} when is_binary(root) <- root(txn, id),
+    with :ok <- Store.txn_lock_row(txn, "memories", "id", id),
+         {:ok, root} when is_binary(root) <- root(txn, id),
          :ok <- Store.txn_lock_row(txn, "memories", "id", root),
          {:ok, [[workspace]]} <-
            query(txn, "SELECT workspace_id FROM memories WHERE id = ?1", [id]),
@@ -172,10 +192,10 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
              txn,
              """
              WITH RECURSIVE down(id, depth) AS (
-               SELECT id, 0 FROM memories WHERE id = ?2
-               UNION ALL
+               SELECT id, 0 FROM memories WHERE id = ?2 AND workspace_id = ?1
+               UNION
                SELECT m.id, down.depth + 1 FROM memories m JOIN down ON m.parent_memory_id = down.id
-                WHERE down.depth < 10000
+                WHERE m.workspace_id = ?1 AND down.depth < #{@max_depth}
              )
              SELECT #{VStore.select_cols()} FROM memories
               WHERE workspace_id = ?1
@@ -356,18 +376,22 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   end
 
   # The chunk the memory was taken from goes, unless its context still exists
-  # or a live memory outside the chain names it.
-  defp chunk_step(%{source_chunk_id: chunk}, chain_ids) when is_binary(chunk) and chunk != "" do
+  # or a live memory outside the chain names it. Only a chunk of the memory's
+  # own tenant: `source_chunk_id` is taken as a caller gives it
+  # (`POST /api/memory`), so it may name another tenant's chunk.
+  defp chunk_step(%{source_chunk_id: chunk} = memory, chain_ids)
+       when is_binary(chunk) and chunk != "" do
     [
       {:chunks,
        """
        DELETE FROM chunks
         WHERE id = ?1
+          AND tenant_id = ?3
           AND NOT EXISTS (SELECT 1 FROM contexts c WHERE c.id = chunks.signal_id)
           AND NOT EXISTS (SELECT 1 FROM memories m
                            WHERE m.source_chunk_id = ?1 AND m.is_forgotten = 0
                              AND m.id NOT IN (SELECT value FROM json_each(?2)))
-       """, [chunk, chain_ids]}
+       """, [chunk, chain_ids, memory.tenant_id || "default"]}
     ]
   end
 
