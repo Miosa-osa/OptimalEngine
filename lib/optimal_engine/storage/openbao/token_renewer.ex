@@ -12,12 +12,13 @@ defmodule OptimalEngine.Storage.OpenBao.TokenRenewer do
     * expiring and not renewable: a warning is logged once, saying when it
       runs out, so the operator replaces it before secrets stop resolving.
 
-  A renewal that answers a shorter lease than the one before means the token
-  is nearing its maximum TTL: it is renewed no more, and that is logged once.
-  Nothing is ever scheduled sooner than 30 seconds ahead (`config
-  :optimal_engine, :openbao_renew_floor_ms`), so a lease that keeps shrinking
-  never turns into a renewal loop; a token with less left than that is left to
-  expire. OpenBao sealed or unreachable is tried again in 30 seconds, without a log
+  A token with a cap of its own (`explicit_max_ttl`) whose renewal answers a
+  shorter lease than the one before is nearing that cap: it is renewed no
+  more, and that is logged once. Nothing is ever scheduled sooner than 30
+  seconds ahead (`config :optimal_engine, :openbao_renew_floor_ms`), so a
+  lease that keeps shrinking never turns into a renewal loop: a renewable lease
+  shorter than twice the floor is renewed at the floor, and one shorter than
+  the floor is left to expire, which is logged once. OpenBao sealed or unreachable is tried again in 30 seconds, without a log
   line each time. The token is never logged. Not started without OpenBao
   configured (`:ignore`).
   """
@@ -57,8 +58,16 @@ defmodule OptimalEngine.Storage.OpenBao.TokenRenewer do
 
   @impl true
   def init(_opts) do
-    {:ok, %{timer: nil, ttl: nil, renewable: nil, warned: false, problem: nil, stopped: false},
-     {:continue, :check}}
+    {:ok,
+     %{
+       timer: nil,
+       ttl: nil,
+       renewable: nil,
+       max_ttl: 0,
+       warned: false,
+       warned_short: false,
+       problem: nil
+     }, {:continue, :check}}
   end
 
   @impl true
@@ -79,8 +88,10 @@ defmodule OptimalEngine.Storage.OpenBao.TokenRenewer do
       {:ok, %{ttl: 0} = token} ->
         schedule(%{state | ttl: 0, renewable: token.renewable, problem: nil}, @idle_ms)
 
-      {:ok, %{renewable: true, ttl: ttl}} ->
-        schedule(%{state | ttl: ttl, renewable: true, problem: nil}, half(ttl), :renew)
+      {:ok, %{renewable: true, ttl: ttl} = token} ->
+        state
+        |> Map.merge(%{ttl: ttl, renewable: true, max_ttl: token.explicit_max_ttl, problem: nil})
+        |> schedule_renewal(ttl)
 
       {:ok, %{renewable: false, ttl: ttl}} ->
         state
@@ -95,16 +106,19 @@ defmodule OptimalEngine.Storage.OpenBao.TokenRenewer do
 
   defp renew(state) do
     case OpenBao.token_renew() do
-      {:ok, ttl} when is_integer(state.ttl) and ttl < state.ttl ->
+      # Only a token with a cap of its own (explicit_max_ttl) is known to be
+      # running into it; a lease cut by a mount's or the server's maximum is
+      # renewed on (at the floor at most) until it expires.
+      {:ok, ttl} when state.max_ttl > 0 and is_integer(state.ttl) and ttl < state.ttl ->
         Logger.warning(
           "OpenBao: OPTIMAL_OPENBAO_TOKEN stopped growing on renewal (#{ttl}s left): it is reaching its maximum TTL and will expire. It is renewed no more; replace it with a periodic token or a fresh one before then."
         )
 
-        %{state | ttl: ttl, problem: nil, stopped: true}
+        %{state | ttl: ttl, problem: nil}
 
       {:ok, ttl} ->
         Logger.debug("OpenBao: OPTIMAL_OPENBAO_TOKEN renewed for #{ttl}s.")
-        schedule(%{state | ttl: ttl, problem: nil}, half(ttl), :renew)
+        schedule_renewal(%{state | ttl: ttl, problem: nil}, ttl)
 
       {:error, :openbao_token_not_renewable} ->
         state |> Map.merge(%{renewable: false}) |> warn_once(state.ttl) |> schedule(@retry_ms)
@@ -129,6 +143,34 @@ defmodule OptimalEngine.Storage.OpenBao.TokenRenewer do
   end
 
   defp half(ttl), do: div(ttl * 1000, 2)
+
+  # A renewable lease is renewed at half its time, and never sooner than the
+  # floor. A lease that runs out before the floor is not renewed at all (no
+  # renewal loop): said once, so the operator gives the token a longer one.
+  defp schedule_renewal(state, ttl) do
+    floor = floor_ms()
+
+    cond do
+      half(ttl) >= floor ->
+        schedule(state, half(ttl), :renew)
+
+      ttl * 1000 > floor ->
+        schedule(state, floor, :renew)
+
+      true ->
+        state = schedule(state, 0)
+
+        if state.warned_short do
+          state
+        else
+          Logger.warning(
+            "OpenBao: OPTIMAL_OPENBAO_TOKEN's lease (#{ttl}s) is too short to renew (renewals are at least #{div(floor, 1000)}s apart): it will expire. Give it a longer TTL or period."
+          )
+
+          %{state | warned_short: true}
+        end
+    end
+  end
 
   defp floor_ms do
     case Application.get_env(:optimal_engine, :openbao_renew_floor_ms) do

@@ -23,9 +23,13 @@ defmodule OptimalEngine.Connectors.CredentialVault.Migration do
   read again just before its copy (`row_changed` when it moved), and the copy
   is a KV check-and-set at version 0, written only where nothing is stored: a
   secret a rotation in OpenBao mode wrote meanwhile is newer, so the row is
-  skipped (`secret_exists`) and both are left as they are. A copy whose row
-  changed before it was marked is released by destroying the one version this
-  run wrote, so a newer version a rotation wrote meanwhile stays the secret.
+  skipped (`secret_exists`) and both are left as they are, unless that secret
+  was last written more than 15 minutes ago while the row is still unmarked:
+  that is an orphan an earlier run left, and it is written over. A copy that
+  does not read back, or whose row moved or could not be marked, is released
+  by destroying the one version this run wrote, so a newer version a rotation
+  wrote meanwhile stays the secret; a secret an earlier run wrote is adopted
+  and never destroyed.
 
   A connector this VM is running is skipped (`running`) and moves on the next
   run. That check sees only this VM's runs: `bin/optimal eval` starts a VM of
@@ -164,9 +168,8 @@ defmodule OptimalEngine.Connectors.CredentialVault.Migration do
     with {:ok, path} <- CredentialVault.path(tenant_id, id),
          {:ok, credentials} <- open_envelope(envelope),
          :ok <- still_unchanged(id, tenant_id, raw),
-         {:ok, version} <- copy(path, credentials),
-         :ok <- verify(path, credentials),
-         :ok <- mark_or_release(id, tenant_id, raw, config, path, version) do
+         {:ok, copied} <- copy(path, credentials),
+         :ok <- verify_and_mark(id, tenant_id, raw, config, path, credentials, copied) do
       push(report, :migrated, id)
     else
       {:error, :secret_exists} ->
@@ -177,7 +180,7 @@ defmodule OptimalEngine.Connectors.CredentialVault.Migration do
 
       {:error, :row_changed} ->
         # The row changed (or went) after it was read. Whatever this run
-        # copied is already released (mark_or_release/6); the next run
+        # copied is already released (verify_and_mark/7); the next run
         # migrates whatever the row holds by then.
         push(report, :skipped, {id, :row_changed})
 
@@ -205,21 +208,31 @@ defmodule OptimalEngine.Connectors.CredentialVault.Migration do
 
   # Check-and-set at version 0: written only where nothing is stored, so a
   # secret a rotation wrote meanwhile is never overwritten with the older
-  # credentials. A secret already holding exactly these (an earlier run that
-  # stopped before marking the row) is finished, not refused, and one whose
-  # latest version an earlier run released is written at the version it is
-  # at, so a release never blocks the row for good. Answers the version that
-  # now holds these credentials: the only one a release may take.
+  # credentials. Answers `{:created, version}` for a version this run wrote
+  # (the only kind a release may destroy) or `:adopted` for a secret already
+  # holding exactly these credentials (an earlier run that stopped before
+  # marking the row), which is finished, never destroyed.
+  #
+  # A secret holding other credentials while the row (just read again) is
+  # still unmarked is either a rotation in OpenBao mode between its write and
+  # its mark, which takes milliseconds, or an orphan an earlier run left (a
+  # crash, a failed release) after which the row was rotated in engine mode.
+  # One last written more than @orphan_age_s ago is the orphan: it is
+  # written over at the version it is at, so it never blocks its row for
+  # good. A newer one is `secret_exists`, tried again on the next run. A path
+  # whose latest version an earlier run destroyed is written over the same way.
+  @orphan_age_s 900
+
   defp copy(path, credentials) do
     case OpenBao.kv_write_version(path, credentials, cas: 0) do
       {:ok, version} ->
-        {:ok, version}
+        {:ok, {:created, version}}
 
       {:error, :openbao_cas_mismatch} ->
         case OpenBao.kv_read_version(path) do
-          {:ok, ^credentials, version} -> {:ok, version}
-          {:ok, _newer, _version} -> {:error, :secret_exists}
-          {:error, :not_found} -> copy_over_released(path, credentials)
+          {:ok, ^credentials, _version} -> {:ok, :adopted}
+          {:ok, _other, _version} -> copy_over(path, credentials, :orphan_only)
+          {:error, :not_found} -> copy_over(path, credentials, :released)
           {:error, reason} -> {:error, reason}
         end
 
@@ -228,14 +241,54 @@ defmodule OptimalEngine.Connectors.CredentialVault.Migration do
     end
   end
 
-  defp copy_over_released(path, credentials) do
-    with {:ok, current} <- OpenBao.kv_current_version(path) do
-      case OpenBao.kv_write_version(path, credentials, cas: current) do
-        {:error, :openbao_cas_mismatch} -> {:error, :secret_exists}
-        other -> other
+  defp copy_over(path, credentials, kind) do
+    with {:ok, meta} <- OpenBao.kv_metadata(path) do
+      if kind == :released or orphan?(meta) do
+        case OpenBao.kv_write_version(path, credentials, cas: meta.current_version) do
+          {:ok, version} -> {:ok, {:created, version}}
+          {:error, :openbao_cas_mismatch} -> {:error, :secret_exists}
+          {:error, reason} -> {:error, reason}
+        end
+      else
+        {:error, :secret_exists}
       end
     end
   end
+
+  defp orphan?(%{updated_time: %DateTime{} = written}),
+    do: DateTime.diff(DateTime.utc_now(), written) > @orphan_age_s
+
+  defp orphan?(_meta), do: false
+
+  # A copy that does not read back, or whose row could not be marked (moved,
+  # or the store failed), holds credentials no row points at: the version
+  # this run wrote is destroyed, and only that one, so a newer version a
+  # rotation wrote meanwhile stays the secret whatever order the two land in.
+  # An adopted secret, or a version nobody can say (an old server), is left.
+  defp verify_and_mark(id, tenant_id, raw, config, path, credentials, copied) do
+    with :ok <- verify(path, credentials),
+         :ok <- mark(id, tenant_id, raw, config) do
+      :ok
+    else
+      error ->
+        release(id, path, copied)
+        error
+    end
+  end
+
+  defp release(id, path, {:created, version}) when is_integer(version) do
+    case OpenBao.kv_destroy_version(path, version) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Connector #{id}: the copy of credentials no row points at was not removed from OpenBao: #{OptimalEngine.Secrets.describe(reason)}. The next run writes over it."
+        )
+    end
+  end
+
+  defp release(_id, _path, _copied), do: :ok
 
   defp open_envelope(envelope) do
     case Credential.decrypt(envelope) do
@@ -269,34 +322,6 @@ defmodule OptimalEngine.Connectors.CredentialVault.Migration do
       {:ok, [[^id]]} -> :ok
       {:ok, []} -> {:error, :row_changed}
       {:error, reason} -> {:error, {:store_failed, reason}}
-    end
-  end
-
-  # The row moved after the copy, so the copy holds credentials the row no
-  # longer has: it is released. Only the version this run wrote is
-  # destroyed, never the secret as a whole: a rotation in OpenBao mode that
-  # wrote a newer version meanwhile (and marks the row) keeps its secret
-  # whatever order the two land in. A version nobody can say (an old server)
-  # is left in place rather than guessed.
-  defp mark_or_release(id, tenant_id, raw, config, path, version) do
-    case mark(id, tenant_id, raw, config) do
-      {:error, :row_changed} = changed ->
-        if is_integer(version) do
-          case OpenBao.kv_destroy_version(path, version) do
-            :ok ->
-              :ok
-
-            {:error, reason} ->
-              Logger.warning(
-                "Connector #{id}: the copy of credentials its row no longer holds was not removed from OpenBao: #{OptimalEngine.Secrets.describe(reason)}."
-              )
-          end
-        end
-
-        changed
-
-      other ->
-        other
     end
   end
 

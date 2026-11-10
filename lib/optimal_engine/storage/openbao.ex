@@ -212,15 +212,24 @@ defmodule OptimalEngine.Storage.OpenBao do
 
   @doc """
   What OpenBao says about the configured token: `{:ok, %{ttl: seconds,
-  renewable: boolean}}`; a `ttl` of 0 never expires (a root token).
+  renewable: boolean, explicit_max_ttl: seconds}}`; a `ttl` of 0 never
+  expires (a root token), and an `explicit_max_ttl` of 0 is no cap of the
+  token's own.
   """
   @spec token_lookup(keyword()) ::
-          {:ok, %{ttl: non_neg_integer(), renewable: boolean()}} | {:error, term()}
+          {:ok,
+           %{ttl: non_neg_integer(), renewable: boolean(), explicit_max_ttl: non_neg_integer()}}
+          | {:error, term()}
   def token_lookup(opts \\ []) do
     with {:ok, config} <- data_config(opts) do
       case guarded_call(config, :get, "/v1/auth/token/lookup-self", nil, opts) do
         {:ok, 200, %{"data" => data}} when is_map(data) ->
-          {:ok, %{ttl: non_negative(data["ttl"]), renewable: data["renewable"] == true}}
+          {:ok,
+           %{
+             ttl: non_negative(data["ttl"]),
+             renewable: data["renewable"] == true,
+             explicit_max_ttl: non_negative(data["explicit_max_ttl"])
+           }}
 
         other ->
           failure(other)
@@ -334,15 +343,40 @@ defmodule OptimalEngine.Storage.OpenBao do
   """
   @spec kv_current_version(String.t(), keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def kv_current_version(path, opts \\ []) do
+    with {:ok, meta} <- kv_metadata(path, opts), do: {:ok, meta.current_version}
+  end
+
+  @doc """
+  The secret's metadata: `%{current_version: n, updated_time: DateTime | nil}`
+  (when its latest version was written), or `{:error, :not_found}`.
+  """
+  @spec kv_metadata(String.t(), keyword()) ::
+          {:ok, %{current_version: non_neg_integer(), updated_time: DateTime.t() | nil}}
+          | {:error, term()}
+  def kv_metadata(path, opts \\ []) do
     with {:ok, config} <- data_config(opts),
          {:ok, segments} <- secret_path(path) do
       case guarded_call(config, :get, "/v1/#{config.mount}/metadata/#{segments}", nil, opts) do
-        {:ok, 200, %{"data" => %{"current_version" => n}}} when is_integer(n) -> {:ok, n}
-        {:ok, 404, _body} -> {:error, :not_found}
-        other -> failure(other)
+        {:ok, 200, %{"data" => %{"current_version" => n} = data}} when is_integer(n) ->
+          {:ok, %{current_version: n, updated_time: timestamp(data["updated_time"])}}
+
+        {:ok, 404, _body} ->
+          {:error, :not_found}
+
+        other ->
+          failure(other)
       end
     end
   end
+
+  defp timestamp(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, at, _offset} -> at
+      _ -> nil
+    end
+  end
+
+  defp timestamp(_value), do: nil
 
   @doc """
   Destroys one version of the secret at `path` for good, leaving every other
@@ -454,11 +488,19 @@ defmodule OptimalEngine.Storage.OpenBao do
         {:ok, written_version(body)}
 
       {:ok, status, body} = other when status in [400, 404] ->
-        if no_route?(body) and attempts > 0 do
-          Process.sleep(100)
-          retry_write(write, attempts - 1)
-        else
-          if no_route?(body), do: {:error, :openbao_mount_missing}, else: failure(other)
+        cond do
+          no_route?(body) and attempts > 0 ->
+            Process.sleep(100)
+            retry_write(write, attempts - 1)
+
+          no_route?(body) ->
+            {:error, :openbao_mount_missing}
+
+          cas_mismatch?(body) ->
+            {:error, :openbao_cas_mismatch}
+
+          true ->
+            failure(other)
         end
 
       other ->

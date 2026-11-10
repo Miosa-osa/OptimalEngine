@@ -133,6 +133,7 @@ defmodule OptimalEngine.Storage.OpenBaoLiveTest do
     assert {:error, :not_found} = OpenBao.kv_read(path)
     assert {:ok, 2} = OpenBao.kv_current_version(path)
     assert {:ok, 3} = OpenBao.kv_write_version(path, old, cas: 2)
+    assert {:ok, %{current_version: 3, updated_time: %DateTime{}}} = OpenBao.kv_metadata(path)
     assert {:error, :not_found} = OpenBao.kv_current_version("optimal/connectors/none")
   end
 

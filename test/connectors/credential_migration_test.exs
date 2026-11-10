@@ -140,6 +140,71 @@ defmodule OptimalEngine.Connectors.CredentialMigrationTest do
     assert CredentialVault.stored?(config(id))
   end
 
+  test "an orphaned copy with older credentials does not block its row for good", ctx do
+    # An earlier run copied, then crashed (or its release failed), and the row
+    # was rotated in engine mode since: the secret is old, the row unmarked.
+    [id, _other] = ctx.ids
+    path = "optimal/connectors/default/#{id}"
+    an_hour_ago = DateTime.add(DateTime.utc_now(), -3600)
+
+    OpenBaoStub.put_secret(ctx.stub, path, %{"bot_token" => "xoxb-before"}, written_at: an_hour_ago)
+
+    assert {:ok, report} = CredentialVault.migrate()
+    assert id in report.migrated
+
+    assert OpenBaoStub.secrets(ctx.stub)[path] == %{
+             "bot_token" => "xoxb-1",
+             "oauth" => %{"refresh" => "r-1"}
+           }
+
+    assert CredentialVault.stored?(config(id))
+  end
+
+  test "a copy that does not read back is released, and the row is unchanged", ctx do
+    {:ok, tampered} = OpenBaoStub.start(read: :tampered)
+    on_exit(fn -> OpenBaoStub.stop(tampered) end)
+    System.put_env("OPTIMAL_OPENBAO_ADDR", tampered.endpoint)
+    System.put_env("OPTIMAL_OPENBAO_TOKEN", tampered.token)
+    Secrets.flush_cache()
+    [id, _other] = ctx.ids
+    before = config(id)
+
+    assert {:ok, report} = CredentialVault.migrate()
+    assert id in Enum.map(report.failed, &id_of/1)
+    assert OpenBaoStub.secrets(tampered)["optimal/connectors/default/#{id}"] == nil
+    assert config(id) == before
+  end
+
+  test "a copy this run adopted is never destroyed when its row moves", ctx do
+    # The secret was already there with exactly the row's credentials (an
+    # earlier run): this run did not write it, so it does not take it.
+    [id, _other] = ctx.ids
+    path = "optimal/connectors/default/#{id}"
+    creds = %{"bot_token" => "xoxb-1", "oauth" => %{"refresh" => "r-1"}}
+    OpenBaoStub.put_secret(ctx.stub, path, creds)
+    data_path = "/v1/secret/data/#{path}"
+    {:ok, fired} = Agent.start_link(fn -> false end)
+
+    OpenBaoStub.on_request(ctx.stub, fn
+      {"GET", ^data_path} ->
+        # The verify read: the row moves before the mark.
+        unless Agent.get_and_update(fired, &{&1, true}) do
+          {:ok, _} =
+            Store.raw_query("UPDATE connectors SET config = ?1 WHERE id = ?2", [
+              Jason.encode!(Map.put(config(id), "refreshed", "1")),
+              id
+            ])
+        end
+
+      _other ->
+        :ok
+    end)
+
+    assert {:ok, report} = CredentialVault.migrate()
+    assert {id, :row_changed} in report.skipped
+    assert OpenBaoStub.secrets(ctx.stub)[path] == creds
+  end
+
   test "a copy an interrupted run already wrote is finished, not refused", ctx do
     [id, _other] = ctx.ids
     path = "optimal/connectors/default/#{id}"

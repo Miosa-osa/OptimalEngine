@@ -15,9 +15,6 @@ defmodule OptimalEngine.Analytics.Slots do
   runs with a lower memory limit (256 MB) and spills the rest to disk, and a
   second export queues behind it instead of failing. A slot is released when
   its holder says so or exits, so a killed caller never strands one.
-
-  When the server starts it removes the spill and staging directories a
-  killed Engine left behind (`OptimalEngine.Analytics.sweep_leftovers/0`).
   """
 
   use GenServer
@@ -86,15 +83,12 @@ defmodule OptimalEngine.Analytics.Slots do
   # holders: monitor ref => {pid, class}; waiters: queue of {from, pid, class, timer ref}
 
   @impl true
-  def init(:ok) do
-    OptimalEngine.Analytics.sweep_leftovers()
-    {:ok, %{holders: %{}, waiters: :queue.new()}}
-  end
+  def init(:ok), do: {:ok, %{holders: %{}, waiters: :queue.new()}}
 
   @impl true
   def handle_call({:acquire, pid, class, wait_ms}, from, state) do
     cond do
-      free?(state, class) ->
+      free?(state, class, limit(class)) ->
         {:reply, :ok, hold(state, pid, class)}
 
       wait_ms == 0 ->
@@ -130,8 +124,8 @@ defmodule OptimalEngine.Analytics.Slots do
     {:noreply, %{state | waiters: :queue.from_list(waiting)}}
   end
 
-  defp free?(state, class),
-    do: Enum.count(state.holders, fn {_ref, {_pid, held}} -> held == class end) < limit(class)
+  defp free?(state, class, cap),
+    do: Enum.count(state.holders, fn {_ref, {_pid, held}} -> held == class end) < cap
 
   defp hold(state, pid, class), do: put_in(state.holders[Process.monitor(pid)], {pid, class})
 
@@ -139,6 +133,9 @@ defmodule OptimalEngine.Analytics.Slots do
 
   # Hands free slots to the oldest waiters of each class that are still alive.
   defp grant(state) do
+    # The environment is read once per grant, not once per waiter.
+    caps = %{query: limit(:query), export: limit(:export)}
+
     {granted, waiting} =
       state.waiters
       |> :queue.to_list()
@@ -148,7 +145,7 @@ defmodule OptimalEngine.Analytics.Slots do
             Process.cancel_timer(timer)
             {state, keep}
 
-          free?(state, class) ->
+          free?(state, class, Map.fetch!(caps, class)) ->
             Process.cancel_timer(timer)
             GenServer.reply(from, :ok)
             {hold(state, pid, class), keep}

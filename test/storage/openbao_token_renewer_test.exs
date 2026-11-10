@@ -54,7 +54,8 @@ defmodule OptimalEngine.Storage.OpenBaoTokenRenewerTest do
 
   test "a lease that stops growing is renewed no more, and that is said once" do
     # Near its maximum TTL each renewal answers less than the last.
-    stub = start(token_ttl: 2, renewable: true, renew_ttls: [2, 1, 1, 1])
+    stub =
+      start(token_ttl: 2, renewable: true, renew_ttls: [2, 1, 1, 1], explicit_max_ttl: 4)
 
     log =
       capture_log(fn ->
@@ -68,12 +69,41 @@ defmodule OptimalEngine.Storage.OpenBaoTokenRenewerTest do
     refute log =~ stub.token
   end
 
-  test "nothing is scheduled below the floor, whatever the lease" do
+  test "a shrinking lease with no cap of its own is renewed on, never given up" do
+    # A lease cut by the mount's or the server's maximum, not the token's own.
+    stub = start(token_ttl: 2, renewable: true, renew_ttls: [2, 1, 1, 1])
+
+    pid = start_supervised!({TokenRenewer, name: nil})
+    Process.sleep(3_300)
+
+    # Still renewing: the next renewal is scheduled. (Judged on this renewer's
+    # own state, not the log, which any other process may write to.)
+    assert renewals(stub) >= 4
+    assert is_reference(:sys.get_state(pid).timer)
+  end
+
+  test "a renewable lease shorter than twice the floor is renewed at the floor" do
+    Application.put_env(:optimal_engine, :openbao_renew_floor_ms, 1_500)
+    stub = start(token_ttl: 2, renewable: true)
+    _pid = start_supervised!({TokenRenewer, name: nil})
+    Process.sleep(1_900)
+    assert renewals(stub) >= 1
+  end
+
+  test "a lease shorter than the floor is never renewed in a loop, and that is said once" do
     Application.put_env(:optimal_engine, :openbao_renew_floor_ms, 30_000)
     stub = start(token_ttl: 1, renewable: true)
-    _pid = start_supervised!({TokenRenewer, name: nil})
-    Process.sleep(1_200)
+
+    log =
+      capture_log(fn ->
+        pid = start_supervised!({TokenRenewer, name: nil})
+        TokenRenewer.check(pid)
+        Process.sleep(1_200)
+      end)
+
     assert renewals(stub) == 0
+    assert length(String.split(log, "too short to renew")) == 2
+    refute log =~ stub.token
   end
 
   test "a token that cannot be renewed is logged once, and never renewed" do

@@ -391,11 +391,7 @@ defmodule OptimalEngine.Analytics do
       memory = if slot == :export, do: @export_memory_limit, else: @memory_limit
 
       Slots.run(slot, Keyword.get(opts, :wait, 0), fn ->
-        temp =
-          Path.join(
-            Path.expand(dir),
-            "~duckdb-tmp-" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
-          )
+        temp = Path.join(Path.expand(dir), leftover_name("~duckdb-tmp", owner_tag()))
 
         try do
           DuckDB.query(
@@ -410,23 +406,121 @@ defmodule OptimalEngine.Analytics do
     end
   end
 
+  # A spill or staging directory names the OS process that made it (its pid
+  # and the time it started, so a reused pid is told apart), and a sweep takes
+  # only one whose owner is gone: another VM beside the Engine (`bin/optimal
+  # eval`) or a restarted slots server never removes a live Engine's. One
+  # naming no owner (an older release's, or a system without /proc) goes only
+  # once it is older than any statement or export can run.
+  @leftover_prefixes ["~duckdb-tmp-", ".staging-"]
+  @ownerless_max_age_s 3600
+
   @doc """
-  Removes what a statement or an export leaves only when it was killed with
-  the Engine: `~duckdb-tmp-*` spill directories and `.staging-*` export
-  directories in every workspace's directory. Run when the slots server
-  starts, before any statement can hold one. Nothing configured is `:ok`.
+  This OS process as the owner of the directories it makes: `"o<pid>x<start>"`,
+  where `<start>` is the process start time from `/proc` (0 where there is no
+  `/proc`). `owner_tag/1` and `owner_tag/2` name another process.
   """
-  @spec sweep_leftovers() :: :ok
-  def sweep_leftovers do
-    with {:ok, config} <- DuckDB.config() do
-      [config.path, "workspaces", "*", "{~duckdb-tmp-*,.staging-*}"]
-      |> Path.join()
-      |> Path.expand()
-      |> Path.wildcard(match_dot: true)
-      |> Enum.each(&File.rm_rf/1)
+  @spec owner_tag() :: String.t()
+  def owner_tag do
+    case :persistent_term.get({__MODULE__, :owner_tag}, nil) do
+      nil ->
+        tag = owner_tag(String.to_integer(System.pid()))
+        :persistent_term.put({__MODULE__, :owner_tag}, tag)
+        tag
+
+      tag ->
+        tag
+    end
+  end
+
+  @spec owner_tag(pos_integer(), non_neg_integer() | nil) :: String.t()
+  def owner_tag(os_pid, started \\ nil) when is_integer(os_pid) do
+    "o#{os_pid}x#{started || process_start(os_pid) || 0}"
+  end
+
+  @doc """
+  Whether the process a tag names still runs: `true`, `false`, or `nil` when
+  it cannot be told (no `/proc`, or a tag that names no start time).
+  """
+  @spec owner_alive?(String.t()) :: boolean() | nil
+  def owner_alive?(tag) do
+    with [_, pid, started] <- Regex.run(~r/\Ao(\d+)x(\d+)\z/, tag),
+         true <- started != "0" and File.dir?("/proc/self") do
+      process_start(String.to_integer(pid)) == String.to_integer(started)
+    else
+      _ -> nil
+    end
+  end
+
+  @doc "The name of a spill (`~duckdb-tmp`) or staging (`.staging`) directory `tag` owns."
+  @spec leftover_name(String.t(), String.t()) :: String.t()
+  def leftover_name(prefix, tag),
+    do: "#{prefix}-#{tag}-" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
+
+  # The start time (field 22 of /proc/<pid>/stat), or nil for a process that
+  # is not there or is a zombie (it has exited and only waits to be reaped).
+  defp process_start(os_pid) do
+    with {:ok, stat} <- File.read("/proc/#{os_pid}/stat"),
+         [_, after_name] <- String.split(stat, ") ", parts: 2),
+         [state | fields] <- String.split(after_name, " "),
+         true <- state not in ["Z", "X"],
+         {started, _} <- Integer.parse(Enum.at(fields, 18, "")) do
+      started
+    else
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Removes from `dir` (a workspace's or the Engine's analytics directory) the
+  spill (`~duckdb-tmp-*`) and staging (`.staging-*`) directories a killed
+  Engine left: those whose owner process is gone, and those naming no owner
+  that are older than an hour. A live owner's, this VM's or another's, are
+  kept. Symbolic links are never followed or removed. Each export sweeps the
+  directory it writes into first. A directory that is not there is `:ok`.
+  """
+  @spec sweep_leftovers(Path.t()) :: :ok
+  def sweep_leftovers(dir) do
+    case File.ls(dir) do
+      {:ok, names} ->
+        names
+        |> Enum.filter(fn name -> Enum.any?(@leftover_prefixes, &String.starts_with?(name, &1)) end)
+        |> Enum.each(&sweep_one(Path.join(dir, &1), &1))
+
+      {:error, _} ->
+        :ok
     end
 
     :ok
+  end
+
+  defp sweep_one(path, name) do
+    with {:ok, %File.Stat{type: :directory, mtime: mtime}} <- File.lstat(path, time: :posix),
+         true <- abandoned?(name, mtime) do
+      case File.rm_rf(path) do
+        {:ok, _} ->
+          :ok
+
+        {:error, reason, file} ->
+          Logger.warning(
+            "[Analytics] could not remove the leftover #{file}: #{:file.format_error(reason)}"
+          )
+      end
+    end
+  end
+
+  defp abandoned?(name, mtime) do
+    tag =
+      case Regex.run(~r/\A(?:~duckdb-tmp|\.staging)-(o\d+x\d+)-[0-9a-f]+\z/, name) do
+        [_, tag] -> tag
+        nil -> nil
+      end
+
+    case tag && owner_alive?(tag) do
+      false -> true
+      true -> false
+      nil -> System.os_time(:second) - mtime > @ownerless_max_age_s
+    end
   end
 
   @doc """

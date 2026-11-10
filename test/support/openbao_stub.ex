@@ -17,6 +17,8 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
   test that needs something to happen between two of the Engine's calls. `renew_ttls:` lists the
   lease each successive `renew-self` answers (the last repeats), for a token
   nearing its maximum TTL.
+  `explicit_max_ttl:` (seconds, 0 by default) is what `lookup-self` reports
+  as the token's own cap.
   `token_ttl:` and `renewable:` (what `lookup-self` reports: seconds left,
   0 by default as a root token has, and whether `renew-self` extends it),
   `read: :tampered` (every KV read answers with one field changed, as a
@@ -37,7 +39,9 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
     state = %{
       secrets: %{},
       versions: %{},
+      written_at: %{},
       hook: nil,
+      explicit_max_ttl: Keyword.get(opts, :explicit_max_ttl, 0),
       requests: [],
       token: token,
       sealed: Keyword.get(opts, :sealed, false),
@@ -73,9 +77,19 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
   @spec secrets(map()) :: map()
   def secrets(%{agent: agent}), do: Agent.get(agent, & &1.secrets)
 
-  @doc "Stores `data` (a map) at `path` under the KV mount, as a write through the API would."
-  @spec put_secret(map(), String.t(), map()) :: :ok
-  def put_secret(%{agent: agent}, path, data), do: Agent.update(agent, &store(&1, path, data))
+  @doc """
+  Stores `data` (a map) at `path` under the KV mount, as a write through the
+  API would. `written_at:` (a `DateTime`, now by default) is the time the
+  metadata reports for it.
+  """
+  @spec put_secret(map(), String.t(), map(), keyword()) :: :ok
+  def put_secret(%{agent: agent}, path, data, opts \\ []) do
+    Agent.update(agent, fn state ->
+      state
+      |> store(path, data)
+      |> put_in([:written_at, path], Keyword.get(opts, :written_at, DateTime.utc_now()))
+    end)
+  end
 
   @doc "Calls `fun.({method, path})` before answering each request from now on."
   @spec on_request(map(), (tuple() -> term())) :: :ok
@@ -86,7 +100,8 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
     %{
       state
       | secrets: Map.put(state.secrets, path, data),
-        versions: Map.update(state.versions, path, 1, &(&1 + 1))
+        versions: Map.update(state.versions, path, 1, &(&1 + 1)),
+        written_at: Map.put(state.written_at, path, DateTime.utc_now())
     }
   end
 
@@ -129,7 +144,12 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
 
       {"GET", ["v1", "auth", "token", "lookup-self"]} ->
         json(conn, 200, %{
-          data: %{policies: ["root"], ttl: state.token_ttl, renewable: state.renewable}
+          data: %{
+            policies: ["root"],
+            ttl: state.token_ttl,
+            renewable: state.renewable,
+            explicit_max_ttl: state.explicit_max_ttl
+          }
         })
 
       {"POST", ["v1", "auth", "token", "renew-self"]} when state.renewable ->
@@ -178,8 +198,15 @@ defmodule OptimalEngine.TestSupport.OpenBaoStub do
 
       {"GET", ["v1", ^mount, "metadata" | path]} ->
         case Map.get(state.versions, Enum.join(path, "/")) do
-          nil -> json(conn, 404, %{errors: []})
-          current -> json(conn, 200, %{data: %{current_version: current}})
+          nil ->
+            json(conn, 404, %{errors: []})
+
+          current ->
+            written = Map.get(state.written_at, Enum.join(path, "/"), DateTime.utc_now())
+
+            json(conn, 200, %{
+              data: %{current_version: current, updated_time: DateTime.to_iso8601(written)}
+            })
         end
 
       {"POST", ["v1", ^mount, "destroy" | path]} ->
