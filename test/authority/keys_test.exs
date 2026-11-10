@@ -65,4 +65,78 @@ defmodule OptimalEngine.Authority.KeysTest do
     assert {:ok, _} = Keys.verification_key(tenant, first.kid, "grant")
     assert {:error, :key_revoked} = Keys.verification_key(tenant, second.kid, "grant")
   end
+
+  defp active_kids(tenant, purpose) do
+    {:ok, rows} =
+      Store.raw_query(
+        "SELECT kid FROM authority_keys WHERE tenant_id = ?1 AND purpose = ?2 AND status = 'active'",
+        [tenant, purpose]
+      )
+
+    List.flatten(rows)
+  end
+
+  test "rotations that run at once leave exactly one active key, the last one made", %{
+    tenant: tenant
+  } do
+    {:ok, _first} = Keys.active(tenant, "grant")
+
+    rotated =
+      1..8
+      |> Enum.map(fn _ -> Task.async(fn -> Keys.rotate(tenant, "grant") end) end)
+      |> Enum.map(&Task.await(&1, 30_000))
+
+    assert Enum.all?(rotated, &match?({:ok, _}, &1))
+    assert [kid] = active_kids(tenant, "grant")
+    assert {:ok, %{kid: ^kid}} = Keys.active(tenant, "grant")
+  end
+
+  test "first use from many callers at once creates one active key", %{tenant: tenant} do
+    made =
+      1..8
+      |> Enum.map(fn _ -> Task.async(fn -> Keys.active(tenant, "evidence") end) end)
+      |> Enum.map(&Task.await(&1, 30_000))
+
+    assert [kid] = active_kids(tenant, "evidence")
+    assert Enum.all?(made, &match?({:ok, %{kid: ^kid}}, &1))
+  end
+
+  test "two rotations within one second: the active key is the newer one", %{tenant: tenant} do
+    {:ok, _} = Keys.active(tenant, "grant")
+    {:ok, _older} = Keys.rotate(tenant, "grant")
+    {:ok, newer} = Keys.rotate(tenant, "grant")
+
+    # Every key of the tenant stamped with the same instant.
+    {:ok, _} =
+      Store.raw_query(
+        "UPDATE authority_keys SET created_at = '2026-01-01T00:00:00.000' WHERE tenant_id = ?1",
+        [tenant]
+      )
+
+    assert [kid] = active_kids(tenant, "grant")
+    assert kid == newer.kid
+    assert {:ok, %{kid: ^kid}} = Keys.active(tenant, "grant")
+  end
+
+  test "keys an older build left active together resolve the same way every time", %{
+    tenant: tenant
+  } do
+    {:ok, one} = Keys.active(tenant, "grant")
+    {:ok, two} = Keys.rotate(tenant, "grant")
+
+    # What a race in an older build could leave: two active keys, one instant.
+    {:ok, _} =
+      Store.raw_query(
+        "UPDATE authority_keys SET status = 'active', retired_at = NULL, created_at = '2026-01-01T00:00:00.000' WHERE tenant_id = ?1",
+        [tenant]
+      )
+
+    expected = Enum.max([one.kid, two.kid])
+
+    for _ <- 1..10, do: assert({:ok, %{kid: ^expected}} = Keys.active(tenant, "grant"))
+
+    # The next rotation leaves one active key again.
+    {:ok, three} = Keys.rotate(tenant, "grant")
+    assert active_kids(tenant, "grant") == [three.kid]
+  end
 end

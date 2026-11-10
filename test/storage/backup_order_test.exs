@@ -83,4 +83,58 @@ defmodule OptimalEngine.Storage.BackupOrderTest do
 
     assert List.flatten(rows) == infos |> Enum.map(& &1.id) |> Enum.reverse()
   end
+
+  test "ids made by many processes at once still sort in the order they were made" do
+    # A shared counter taken before and after each id: an id whose "after" is
+    # below another's "before" was certainly made first.
+    ticket = :atomics.new(1, [])
+
+    made =
+      1..8
+      |> Enum.map(fn _ ->
+        Task.async(fn ->
+          for _ <- 1..200 do
+            before = :atomics.add_get(ticket, 1, 1)
+            id = Catalog.ordered_id("p_")
+            {before, id, :atomics.add_get(ticket, 1, 1)}
+          end
+        end)
+      end)
+      |> Enum.flat_map(&Task.await(&1, 30_000))
+
+    ids = Enum.map(made, &elem(&1, 1))
+    assert ids == Enum.uniq(ids)
+
+    by_after = Enum.sort_by(made, &elem(&1, 2))
+
+    for {_b, id, done} <- by_after,
+        {before, later, _a} <- made,
+        before > done do
+      assert id < later, "#{id} was made before #{later} but sorts after it"
+    end
+  end
+
+  test "the newest checksum in a SQLite catalog file is the last one made in its second" do
+    path = Path.join(System.tmp_dir!(), "catalog-order-#{System.unique_integer([:positive])}.db")
+    on_exit(fn -> File.rm(path) end)
+    {:ok, db} = Exqlite.Sqlite3.open(path)
+
+    :ok =
+      Exqlite.Sqlite3.execute(
+        db,
+        "CREATE TABLE backup_records (id TEXT PRIMARY KEY, storage_uri TEXT, status TEXT, checksum_sha256 TEXT, created_at TEXT)"
+      )
+
+    # Ids that sort against the order they were made: only rowid tells them apart.
+    for {id, sum} <- [{"z_first", "sum-1"}, {"m_second", "sum-2"}, {"a_third", "sum-3"}] do
+      :ok =
+        Exqlite.Sqlite3.execute(
+          db,
+          "INSERT INTO backup_records VALUES ('#{id}', '/data/x.db', 'completed', '#{sum}', '#{@same_second}')"
+        )
+    end
+
+    :ok = Exqlite.Sqlite3.close(db)
+    assert Backup.catalog_checksum_in(path, "/data/x.db") == {:ok, "sum-3"}
+  end
 end

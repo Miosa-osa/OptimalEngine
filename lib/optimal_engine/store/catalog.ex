@@ -337,23 +337,28 @@ defmodule OptimalEngine.Store.Catalog do
   def insertion_order(key), do: if(postgres?(), do: key, else: "rowid")
 
   @doc """
-  An id that sorts in the order ids were made: `prefix`, the time in
-  microseconds as 14 hex digits, a counter that keeps ids made in the same
-  microsecond apart, and random hex. Ids made on one Engine sort in the order
-  they were made; on two Engines, in the order of their clocks.
+  An id that sorts in the order ids were made: `prefix`, the Erlang system
+  time in microseconds as 14 hex digits, the node's monotonic unique integer
+  as 12 hex digits, and random hex.
+
+  The clock is the runtime's monotonic time plus its offset, which in the
+  default time warp mode (`no_time_warp`) never goes back while the node runs,
+  even when the OS clock is set back; the unique integer orders ids made in
+  the same microsecond. So on one node ids sort in the order they were made,
+  across processes. Ids made on two nodes or Engines sort by their clocks, as
+  the timestamps beside them do. Rows written before ids were made this way
+  keep their random ids (there is no backfill): a tie on the second among
+  them still falls to an arbitrary one.
   """
   @spec ordered_id(String.t()) :: String.t()
   def ordered_id(prefix) do
-    micros = System.os_time(:microsecond) |> Integer.to_string(16) |> String.pad_leading(14, "0")
-
-    counter =
-      rem(:erlang.unique_integer([:positive, :monotonic]), 0x10000)
-      |> Integer.to_string(16)
-      |> String.pad_leading(4, "0")
-
+    micros = System.monotonic_time(:microsecond) + System.time_offset(:microsecond)
+    unique = :erlang.unique_integer([:positive, :monotonic])
     random = :crypto.strong_rand_bytes(5) |> Base.encode16(case: :lower)
-    prefix <> String.downcase(micros <> counter) <> random
+    prefix <> String.downcase(hex(micros, 14) <> hex(unique, 12)) <> random
   end
+
+  defp hex(n, width), do: n |> Integer.to_string(16) |> String.pad_leading(width, "0")
 
   defp query(nil, sql, params), do: store().raw_query(sql, params)
   defp query(txn, sql, params), do: store().txn_query(txn, sql, params)

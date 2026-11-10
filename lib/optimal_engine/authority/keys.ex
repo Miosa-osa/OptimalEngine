@@ -45,28 +45,19 @@ defmodule OptimalEngine.Authority.Keys do
   def active(tenant_id, purpose) when purpose in @purposes do
     case load_active(tenant_id, purpose) do
       {:ok, key} -> {:ok, key}
-      {:error, :not_found} -> create(tenant_id, purpose)
+      {:error, :not_found} -> create(tenant_id, purpose, :unless_active)
       error -> error
     end
   end
 
-  @doc "Retires the active key and creates a new one."
+  @doc """
+  Retires the active key and creates a new one, in one transaction that holds
+  `authority_keys` against every other writer, so rotations (and a first use)
+  that run at once leave exactly one active key: the last one made.
+  """
   @spec rotate(String.t(), String.t()) :: {:ok, key()} | {:error, term()}
-  def rotate(tenant_id, purpose) when purpose in @purposes do
-    with :ok <- wrapping_available() do
-      {:ok, _} =
-        Store.raw_query(
-          """
-          UPDATE authority_keys SET status = 'retired',
-            retired_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-          WHERE tenant_id = ?1 AND purpose = ?2 AND status = 'active'
-          """,
-          [tenant_id, purpose]
-        )
-
-      create(tenant_id, purpose)
-    end
-  end
+  def rotate(tenant_id, purpose) when purpose in @purposes,
+    do: create(tenant_id, purpose, :retire_active)
 
   @doc "Marks a key compromised; what it signed no longer verifies."
   @spec revoke(String.t(), String.t()) :: :ok | {:error, :not_found}
@@ -200,33 +191,80 @@ defmodule OptimalEngine.Authority.Keys do
 
   # ---------------------------------------------------------------------------
 
-  defp create(tenant_id, purpose) do
+  # The key is made (and wrapped, which may ask OpenBao) before the
+  # transaction. Inside it, `authority_keys` is held against every other
+  # writer (PostgreSQL; SQLite runs one write transaction at a time): a first
+  # use creates a key only if none is active by then, a rotation retires every
+  # active key first, so exactly one is active when it commits.
+  defp create(tenant_id, purpose, mode) do
     with :ok <- wrapping_available() do
       {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
       kid = thumbprint(public_key)
       {wrapped, stored_private} = wrap(private_key)
+      row = [kid, tenant_id, purpose, JWS.encode64(public_key), stored_private, wrapped]
 
-      case Store.raw_query(
-             """
-             INSERT INTO authority_keys
-               (kid, tenant_id, purpose, public_key, private_key, wrapped, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')
-             """,
-             [kid, tenant_id, purpose, JWS.encode64(public_key), stored_private, wrapped]
-           ) do
+      result =
+        Store.transaction(fn txn ->
+          with :ok <- Store.txn_lock_tables(txn, ["authority_keys"]),
+               {:ok, :insert} <- make_room(txn, tenant_id, purpose, mode),
+               {:ok, _} <-
+                 Store.txn_execute(
+                   txn,
+                   """
+                   INSERT INTO authority_keys
+                     (kid, tenant_id, purpose, public_key, private_key, wrapped, status)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')
+                   """,
+                   row
+                 ) do
+            {:ok, :created}
+          end
+        end)
+
+      case result do
         {:ok, _} -> load_active(tenant_id, purpose)
         {:error, reason} -> {:error, reason}
       end
     end
   end
 
+  defp make_room(txn, tenant_id, purpose, :unless_active) do
+    case Store.txn_query(
+           txn,
+           "SELECT 1 FROM authority_keys WHERE tenant_id = ?1 AND purpose = ?2 AND status = 'active' LIMIT 1",
+           [tenant_id, purpose]
+         ) do
+      {:ok, []} -> {:ok, :insert}
+      {:ok, [_ | _]} -> {:ok, :already_active}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp make_room(txn, tenant_id, purpose, :retire_active) do
+    case Store.txn_execute(
+           txn,
+           """
+           UPDATE authority_keys SET status = 'retired',
+             retired_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           WHERE tenant_id = ?1 AND purpose = ?2 AND status = 'active'
+           """,
+           [tenant_id, purpose]
+         ) do
+      {:ok, _} -> {:ok, :insert}
+      {:error, _} = error -> error
+    end
+  end
+
+  # One key is active (`create/3`). Keys an older build left active together
+  # resolve the same way on every read and store: newest first, then the
+  # greater kid; the next rotation retires all of them.
   defp load_active(tenant_id, purpose) do
     case Store.raw_query(
            """
            SELECT kid, tenant_id, purpose, public_key, private_key, wrapped, status, created_at, retired_at
            FROM authority_keys
            WHERE tenant_id = ?1 AND purpose = ?2 AND status = 'active'
-           ORDER BY created_at DESC LIMIT 1
+           ORDER BY created_at DESC, kid DESC LIMIT 1
            """,
            [tenant_id, purpose]
          ) do

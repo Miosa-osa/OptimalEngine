@@ -431,11 +431,11 @@ defmodule OptimalEngine.Jobs do
     {sql, params} =
       case Keyword.get(opts, :status) do
         nil ->
-          {"SELECT #{@job_columns} FROM jobs WHERE workspace_id = ?1 ORDER BY inserted_at DESC, id LIMIT ?2",
+          {"SELECT #{@job_columns} FROM jobs WHERE workspace_id = ?1 ORDER BY inserted_at DESC, #{newest_first()} LIMIT ?2",
            [workspace_id, limit]}
 
         status ->
-          {"SELECT #{@job_columns} FROM jobs WHERE workspace_id = ?1 AND status = ?3 ORDER BY inserted_at DESC, id LIMIT ?2",
+          {"SELECT #{@job_columns} FROM jobs WHERE workspace_id = ?1 AND status = ?3 ORDER BY inserted_at DESC, #{newest_first()} LIMIT ?2",
            [workspace_id, limit, to_string(status)]}
       end
 
@@ -984,6 +984,11 @@ defmodule OptimalEngine.Jobs do
 
   defp binary_part_safe(text) when byte_size(text) <= @max_error_bytes, do: text
   defp binary_part_safe(text), do: String.slice(text, 0, @max_error_bytes)
+
+  # Of jobs made in the same second, the last one made first: SQLite's rowid,
+  # and on PostgreSQL the id, made in creation order (`new_id/1`).
+  defp newest_first,
+    do: OptimalEngine.Store.Catalog.insertion_order("id") <> " DESC"
 
   defp default_owner, do: "#{node()}:#{inspect(self())}"
 

@@ -93,21 +93,23 @@ defmodule OptimalEngine.StorageCatalog do
     }
   ]
 
+  # `{newest}` is the tie-break among rows of the same second, the last one
+  # written first (`Store.Catalog.insertion_order/1`), filled in when queried.
   @record_views %{
     "jobs" => {
-      "SELECT id, workspace_id, kind, status, priority, run_at, attempts, max_attempts, last_error, updated_at FROM jobs WHERE workspace_id = ?1 ORDER BY updated_at DESC LIMIT ?2",
+      "SELECT id, workspace_id, kind, status, priority, run_at, attempts, max_attempts, last_error, updated_at FROM jobs WHERE workspace_id = ?1 ORDER BY updated_at DESC, {newest} LIMIT ?2",
       ~w(id workspace_id kind status priority run_at attempts max_attempts last_error updated_at)
     },
     "metrics" => {
-      "SELECT id, workspace_id, metric_name, metric_kind, value, labels, recorded_at FROM metric_samples WHERE workspace_id = ?1 ORDER BY recorded_at DESC LIMIT ?2",
+      "SELECT id, workspace_id, metric_name, metric_kind, value, labels, recorded_at FROM metric_samples WHERE workspace_id = ?1 ORDER BY recorded_at DESC, {newest} LIMIT ?2",
       ~w(id workspace_id metric_name metric_kind value labels recorded_at)
     },
     "backups" => {
-      "SELECT id, storage_provider, status, encrypted, offsite, size_bytes, checksum_sha256, integrity_status, created_at, verified_at, expires_at FROM backup_records ORDER BY created_at DESC LIMIT ?1",
+      "SELECT id, storage_provider, status, encrypted, offsite, size_bytes, checksum_sha256, integrity_status, created_at, verified_at, expires_at FROM backup_records ORDER BY created_at DESC, {newest} LIMIT ?1",
       ~w(id storage_provider status encrypted offsite size_bytes checksum_sha256 integrity_status created_at verified_at expires_at)
     },
     "decomposition" => {
-      "SELECT id, workspace_id, source_package_id, strategy, status, fallback_strategy, attempt, input_bytes, output_units, model_calls, iterations, error, created_at, completed_at FROM decomposition_runs WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+      "SELECT id, workspace_id, source_package_id, strategy, status, fallback_strategy, attempt, input_bytes, output_units, model_calls, iterations, error, created_at, completed_at FROM decomposition_runs WHERE workspace_id = ?1 ORDER BY created_at DESC, {newest} LIMIT ?2",
       ~w(id workspace_id source_package_id strategy status fallback_strategy attempt input_bytes output_units model_calls iterations error created_at completed_at)
     },
     "replication" => {
@@ -115,7 +117,7 @@ defmodule OptimalEngine.StorageCatalog do
       ~w(sequence id workspace_id device_id actor_id entity_type entity_id operation payload_hash idempotency_key occurred_at recorded_at)
     },
     "models" => {
-      "SELECT id, workspace_id, base_model, trainer, method, status, hardware, metrics, error, created_at, completed_at FROM training_runs WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+      "SELECT id, workspace_id, base_model, trainer, method, status, hardware, metrics, error, created_at, completed_at FROM training_runs WHERE workspace_id = ?1 ORDER BY created_at DESC, {newest} LIMIT ?2",
       ~w(id workspace_id base_model trainer method status hardware metrics error created_at completed_at)
     }
   }
@@ -187,7 +189,9 @@ defmodule OptimalEngine.StorageCatalog do
   end
 
   defp query_records(sql, params, fields) do
-    case Store.raw_query(sql, params) do
+    newest = OptimalEngine.Store.Catalog.insertion_order("id") <> " DESC"
+
+    case Store.raw_query(String.replace(sql, "{newest}", newest), params) do
       {:ok, rows} -> {:ok, Enum.map(rows, &Map.new(Enum.zip(fields, &1)))}
       {:error, reason} -> {:error, reason}
     end

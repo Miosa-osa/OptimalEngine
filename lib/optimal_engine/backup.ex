@@ -1002,6 +1002,10 @@ defmodule OptimalEngine.Backup do
     end
   end
 
+  @doc false
+  def catalog_checksum_in(catalog_path, source_path),
+    do: catalog_checksum(source_path, catalog_path)
+
   # Read the catalog straight from the database file so restore works before
   # boot, when the Store process that normally owns it is not running.
   defp catalog_checksum(source_path, catalog_path) do

@@ -176,7 +176,7 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
     SELECT id FROM memories
     WHERE tenant_id = ?1 AND workspace_id = ?2
       AND is_latest = 1 AND is_forgotten = 0
-    ORDER BY updated_at DESC
+    ORDER BY updated_at DESC, id DESC
     LIMIT ?3
     """
 
