@@ -205,7 +205,8 @@ Generate the key once and store it the way `OPTIMAL_AUTHORITY_KEY` and `CONNECTO
 openssl rand -hex 32
 ```
 
-`OPTIMAL_BACKUP_KEY` may be an OpenBao reference, and an OpenBao transit key can wrap each copy's data key instead (see [OpenBao](#openbao)).
+`OPTIMAL_BACKUP_KEY` may be an OpenBao reference, and an OpenBao transit key can wrap each copy's data key as well (see [OpenBao](#openbao)).
+A reference with no transit key makes that OpenBao the only place the key that opens every copy lives: if it runs on the Engine's machine, every copy is lost with it. The Engine logs that once; keep the key somewhere else as well.
 
 Without `OPTIMAL_BACKUP_KEY` an offsite copy is refused with `backup_key_missing` and a message naming the variable, and nothing is uploaded.
 A key that is not 64 hex characters is refused with `backup_key_invalid`.
@@ -561,6 +562,7 @@ A backup is then refused with `backup_key_unavailable`, an authority key is not 
 When `CONNECTOR_KEY` itself cannot be used the reason says which way: `connector_key_missing` (not set), `connector_key_invalid` (not 64 hex characters) or `connector_key_unavailable` (a reference OpenBao could not answer).
 `OPTIMAL_OPENBAO_TOKEN` itself cannot be a reference.
 A renewable token is renewed (`auth/token/renew-self`) when half its remaining time has passed, for as long as the Engine runs; a token that expires and cannot be renewed is logged once, with when it runs out; a token with no expiry (a root token) needs nothing.
+A token with a maximum TTL of its own (`explicit_max_ttl`) whose renewal answers a shorter lease than the last is nearing that cap: it is renewed no more, and that is logged once; any other lease is renewed for as long as it can be. Nothing is scheduled sooner than 30 seconds ahead, so a shrinking lease never becomes a renewal loop: a lease shorter than a minute is renewed at 30 seconds, and one shorter than 30 seconds is left to expire, which is logged once.
 
 A sealed or unreachable OpenBao never stops the Engine from booting.
 The Engine starts and serves, and readiness (`GET /api/health`, `GET /api/status`, `Release.preflight/0`) reports it as degraded, not down: the `secrets` check warns `openbao_unavailable` with the reason (`openbao_sealed`, `openbao_unreachable`, ...), and `credential_key` warns `connector_key_unavailable` when `CONNECTOR_KEY` is a reference.
@@ -595,7 +597,10 @@ bin/optimal eval 'OptimalEngine.Release.migrate_connector_credentials()'
 
 Each row's envelope is opened with `CONNECTOR_KEY`, the credentials are written to OpenBao, read back and compared, and only then is the row rewritten to the marker, if it is still the row that was read.
 Any failure (a wrong `CONNECTOR_KEY`, OpenBao sealed, a copy that reads back different) leaves that row unchanged and is listed under `failed`; the run exits non-zero.
-Running it again is safe: marked rows are `already_migrated`, a running connector is `skipped` until the next run, and the output names connector ids, never a credential.
+Running it again is safe: marked rows are `already_migrated`, and the output names connector ids, never a credential.
+A credential rotated while it runs is never lost: each row is read again just before its copy, and the copy is a KV check-and-set that writes only where nothing is stored, so a secret written meanwhile is left as it is (`skipped`, `secret_exists`, tried again on the next run). A secret with other credentials last written more than 15 minutes ago while the row is still unmarked is a copy an earlier run left behind, and is written over.
+A copy that does not read back, or whose row changed or could not be marked, is released by destroying only the version that run wrote, so a newer version a rotation wrote meanwhile stays the secret; a secret an earlier run wrote with exactly the row's credentials is adopted and never destroyed.
+A connector a sync is running in the same VM is `skipped` until the next run; `bin/optimal eval` runs in a VM of its own and cannot see the Engine's syncs, which is why the two guards above exist.
 Keep `CONNECTOR_KEY` until every row is migrated.
 `OPTIMAL_CONNECTOR_CREDENTIAL_STORE` unset, `engine` or any other value writes database envelopes; `openbao` refuses a write when OpenBao is not configured.
 The secret's path is built from the connector's tenant and id, which must be in the form ids take (a letter or digit, then letters, digits, `.`, `_`, `:` and `-`, at most 128; no `/` or `..`): any other is refused (`invalid_connector_id`) before OpenBao is asked. A row an older build wrote with such an id is counted by readiness (`connector_ids` warns `connector_ids_invalid` with the count) and at boot, and `mix optimal.connector invalid-ids` lists them; re-register each under a valid id.
@@ -722,7 +727,9 @@ optimal analytics query usage acme:ops --bucket day --from 2026-11-01
 ```
 
 DuckDB reads any path it is given, so every statement the Engine runs is locked first: the workspace's own directory (the staging directory, for an export) is the only allowed directory, external access is off, installing and autoloading extensions is off, memory is 512 MB and threads 2, what does not fit in memory spills to a fresh directory inside the allowed one (removed after the statement), and the configuration is locked, so the statement cannot turn any of it back on.
-At most `OPTIMAL_ANALYTICS_MAX_PROCESSES` `duckdb` processes run at once (default 1, for a 1 GiB guest): a query past the cap is `503 {"error": "analytics_busy"}` with `Retry-After: 5`, and an export waits its turn.
+At most `OPTIMAL_ANALYTICS_MAX_PROCESSES` `duckdb` query processes run at once (default 1, for a 1 GiB guest): a query past the cap is `503 {"error": "analytics_busy"}` with `Retry-After: 5`.
+An export runs on one process of its own beside that cap, at a 256 MB memory limit with the rest spilled into its staging directory, so the daily export never turns queries away; a second export waits for the first.
+Spill (`~duckdb-tmp-*`) and staging (`.staging-*`) directories name the process that made them (its pid and start time). Each export first removes, from the directory it writes into, those whose process is gone, and those naming no process that are older than an hour; a live Engine's are never taken, even by `bin/optimal eval` running beside it.
 The values a caller sends are checked against a fixed shape (a dataset and a bucket from a list, a date, a name pattern) before the Engine writes them into the statement as quoted literals.
 
 ## Use Cases And Plans

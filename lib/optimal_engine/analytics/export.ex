@@ -64,7 +64,8 @@ defmodule OptimalEngine.Analytics.Export do
          true <- config.executable != nil || {:error, :not_installed},
          :ok <- active_workspace(tenant_id, workspace_id) do
       dir = Analytics.workspace_dir(config.path, workspace_id)
-      staging = Path.join(dir, ".staging-" <> random())
+      Analytics.sweep_leftovers(dir)
+      staging = Path.join(dir, Analytics.leftover_name(".staging", Analytics.owner_tag()))
       File.mkdir_p!(staging)
 
       try do
@@ -99,7 +100,8 @@ defmodule OptimalEngine.Analytics.Export do
     with {:ok, config} <- DuckDB.config(opts),
          true <- config.executable != nil || {:error, :not_installed} do
       dir = Analytics.engine_dir(config.path)
-      staging = Path.join(dir, ".staging-" <> random())
+      Analytics.sweep_leftovers(dir)
+      staging = Path.join(dir, Analytics.leftover_name(".staging", Analytics.owner_tag()))
       File.mkdir_p!(staging)
 
       try do
@@ -173,14 +175,16 @@ defmodule OptimalEngine.Analytics.Export do
          {:ok, _} <-
            Analytics.run_locked(config, staging, convert(dataset, ndjson, parquet),
              timeout: @convert_timeout,
-             wait: @slot_wait
+             wait: @slot_wait,
+             slot: :export
            ),
          {:ok, [%{"n" => rows}]} <-
            Analytics.run_locked(
              config,
              staging,
              "SELECT count(*) AS n FROM read_parquet(#{Analytics.literal(parquet)})",
-             wait: @slot_wait
+             wait: @slot_wait,
+             slot: :export
            ) do
       {:ok, rows}
     else
@@ -371,6 +375,4 @@ defmodule OptimalEngine.Analytics.Export do
       _ -> nil
     end
   end
-
-  defp random, do: Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
 end

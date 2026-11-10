@@ -115,7 +115,11 @@ defmodule OptimalEngine.Connectors.Runner do
     result
   end
 
-  @doc "Whether a run of this connector is in progress anywhere in this Engine."
+  @doc """
+  Whether a run of this connector is in progress in this VM. The run registry
+  is local to the VM, so a separate VM (`bin/optimal eval`, a Mix task) sees
+  only its own runs, never the Engine's.
+  """
   @spec running?(String.t()) :: boolean()
   def running?(connector_id) when is_binary(connector_id) do
     Process.whereis(@run_registry) != nil and

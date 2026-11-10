@@ -258,7 +258,7 @@ defmodule OptimalEngine.AnalyticsTest do
 
       for sql <- lines(ctx.log) do
         assert [_, temp] = Regex.run(~r/SET temp_directory = '([^']+)'/, sql)
-        assert temp =~ ~r{^#{Regex.escape(dir)}/\.staging-[0-9a-f]+/~duckdb-tmp-}
+        assert temp =~ ~r{^#{Regex.escape(dir)}/\.staging-o\d+x\d+-[0-9a-f]+/~duckdb-tmp-o\d+x\d+-}
       end
     end
 
@@ -572,10 +572,104 @@ defmodule OptimalEngine.AnalyticsTest do
              end)
     end
 
-    test "an export waits for a slot instead of failing", ctx do
+    test "a query is answered while an export holds its own slot", ctx do
       seed(ctx, ctx.workspace, "mine")
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
       System.put_env("OPTIMAL_ANALYTICS_MAX_PROCESSES", "1")
-      holder = hold_slot()
+      exporting = hold_slot(:export)
+
+      assert {:ok, _} = Analytics.query(ctx.workspace, %{"dataset" => "usage"})
+      release_slot(exporting)
+    end
+
+    test "an export runs with a lower memory limit, spilling the rest to disk", ctx do
+      seed(ctx, ctx.workspace, "mine")
+      File.write!(ctx.log, "")
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+      exports = lines(ctx.log)
+      assert exports != []
+      assert Enum.all?(exports, &(&1 =~ "SET memory_limit = '256MB'"))
+
+      File.write!(ctx.log, "")
+      {:ok, _} = Analytics.query(ctx.workspace, %{"dataset" => "usage"})
+      assert Enum.all?(lines(ctx.log), &(&1 =~ "SET memory_limit = '512MB'"))
+    end
+
+    test "an export removes the spill and staging directories a killed Engine left", ctx do
+      seed(ctx, ctx.workspace, "mine")
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+      dir = Analytics.workspace_dir(ctx.root, ctx.workspace)
+      # Owned by an Engine that is gone: this OS pid, started at another time.
+      gone = Analytics.owner_tag(System.pid() |> String.to_integer(), 1)
+
+      leftovers =
+        for prefix <- ["~duckdb-tmp", ".staging"],
+            do: Path.join(dir, Analytics.leftover_name(prefix, gone))
+
+      Enum.each(leftovers, &File.mkdir_p!(Path.join(&1, "inside")))
+
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+      refute Enum.any?(leftovers, &File.exists?/1)
+      assert File.exists?(Path.join(dir, "metrics.parquet"))
+    end
+
+    test "a second VM or a restarted slots server never sweeps a live Engine's directories",
+         ctx do
+      seed(ctx, ctx.workspace, "mine")
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+      dir = Analytics.workspace_dir(ctx.root, ctx.workspace)
+
+      # Another VM (bin/optimal eval beside the Engine) is an OS process of
+      # its own: here a sleep stands in for it, holding an export's staging.
+      port = Port.open({:spawn_executable, System.find_executable("sleep")}, args: ["30"])
+      {:os_pid, other} = Port.info(port, :os_pid)
+      their_tag = Analytics.owner_tag(other)
+      assert Analytics.owner_alive?(their_tag)
+      theirs = Path.join(dir, Analytics.leftover_name(".staging", their_tag))
+      mine = Path.join(dir, Analytics.leftover_name("~duckdb-tmp", Analytics.owner_tag()))
+      Enum.each([theirs, mine], &File.mkdir_p!(Path.join(&1, "inside")))
+
+      # Neither a restarted slots server nor a sweep from this VM takes them.
+      :ok = Supervisor.terminate_child(OptimalEngine.Supervisor, Slots)
+      {:ok, _} = Supervisor.restart_child(OptimalEngine.Supervisor, Slots)
+      :ok = Analytics.sweep_leftovers(dir)
+      {:ok, _} = Export.run(ctx.tenant, ctx.workspace)
+      assert File.dir?(theirs)
+      assert File.dir?(mine)
+
+      # The other VM ends: its directory goes with the next sweep; this VM's stays.
+      {_, 0} = System.cmd("kill", ["-9", Integer.to_string(other)])
+      assert eventually(fn -> Analytics.owner_alive?(their_tag) == false end)
+      :ok = Analytics.sweep_leftovers(dir)
+      refute File.exists?(theirs)
+      assert File.dir?(mine)
+      File.rm_rf!(mine)
+    end
+
+    test "a directory naming no owner goes only once it is older than any statement", ctx do
+      dir = Analytics.workspace_dir(ctx.root, ctx.workspace)
+      old = Path.join(dir, ".staging-3d4e5f")
+      fresh = Path.join(dir, "~duckdb-tmp-0a1b2c")
+      Enum.each([old, fresh], &File.mkdir_p!/1)
+      File.touch!(old, System.os_time(:second) - 2 * 3600)
+
+      # A symlink named like a leftover is never followed or removed.
+      target = Path.join(ctx.root, "not-a-leftover")
+      File.mkdir_p!(Path.join(target, "keep"))
+      link = Path.join(dir, ".staging-linked")
+      :ok = File.ln_s(target, link)
+      File.touch!(target, System.os_time(:second) - 2 * 3600)
+
+      :ok = Analytics.sweep_leftovers(dir)
+      refute File.exists?(old)
+      assert File.dir?(fresh)
+      assert File.dir?(Path.join(target, "keep"))
+      assert {:ok, %File.Stat{type: :symlink}} = File.lstat(link)
+    end
+
+    test "an export waits behind another export instead of failing", ctx do
+      seed(ctx, ctx.workspace, "mine")
+      holder = hold_slot(:export)
       export = Task.async(fn -> Export.run(ctx.tenant, ctx.workspace) end)
       refute Task.yield(export, 300)
       release_slot(holder)
@@ -606,12 +700,12 @@ defmodule OptimalEngine.AnalyticsTest do
   end
 
   # A process that holds one DuckDB slot until told to let it go.
-  defp hold_slot do
+  defp hold_slot(class \\ :query) do
     test = self()
 
     pid =
       spawn(fn ->
-        :ok = Slots.acquire(0)
+        :ok = Slots.acquire(class, 0)
         send(test, {:holding, self()})
 
         receive do

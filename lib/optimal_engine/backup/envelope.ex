@@ -147,6 +147,7 @@ defmodule OptimalEngine.Backup.Envelope do
   def sealing_key do
     case OpenBao.transit_key() do
       nil ->
+        warn_if_only_in_openbao()
         backup_key()
 
       transit ->
@@ -175,6 +176,28 @@ defmodule OptimalEngine.Backup.Envelope do
       error ->
         error
     end
+  end
+
+  # OPTIMAL_BACKUP_KEY as an OpenBao reference is the only key that opens
+  # every copy; if that OpenBao is the one beside the Engine, losing the
+  # machine loses the key and every copy with it. Said once per process.
+  defp warn_if_only_in_openbao do
+    if Secrets.source(@key_env) == "openbao" and
+         not :persistent_term.get({__MODULE__, :warned_key_in_openbao}, false) do
+      :persistent_term.put({__MODULE__, :warned_key_in_openbao}, true)
+
+      Logger.warning(
+        "#{@key_env} is read from OpenBao and is the only key that opens offsite backups: if that OpenBao runs on this machine, every copy is lost with that OpenBao. Keep the key somewhere else as well."
+      )
+    end
+  end
+
+  @doc false
+  # Tests: say the warnings above again.
+  @spec reset_warnings() :: :ok
+  def reset_warnings do
+    :persistent_term.erase({__MODULE__, :warned_key_in_openbao})
+    :ok
   end
 
   @doc """

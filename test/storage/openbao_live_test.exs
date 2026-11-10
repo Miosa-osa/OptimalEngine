@@ -112,6 +112,31 @@ defmodule OptimalEngine.Storage.OpenBaoLiveTest do
              CredentialVault.get(marked, "default", "live:conn-1")
   end
 
+  test "a check-and-set copy and a destroyed version, as migrate-credentials uses them" do
+    path = "optimal/connectors/default/live:cas"
+    old = %{"api_key" => "k-old"}
+    rotated = %{"api_key" => "k-rotated"}
+
+    # cas: 0 writes only where nothing was ever stored.
+    assert {:ok, 1} = OpenBao.kv_write_version(path, old, cas: 0)
+    assert {:error, :openbao_cas_mismatch} = OpenBao.kv_write_version(path, rotated, cas: 0)
+    assert {:ok, ^old, 1} = OpenBao.kv_read_version(path)
+
+    # A rotation writes a newer version; destroying the stale one leaves it.
+    assert :ok = OpenBao.kv_write(path, rotated)
+    assert :ok = OpenBao.kv_destroy_version(path, 1)
+    assert {:ok, ^rotated, 2} = OpenBao.kv_read_version(path)
+
+    # A latest version destroyed reads as nothing, and is written over at
+    # the version the metadata names.
+    assert :ok = OpenBao.kv_destroy_version(path, 2)
+    assert {:error, :not_found} = OpenBao.kv_read(path)
+    assert {:ok, 2} = OpenBao.kv_current_version(path)
+    assert {:ok, 3} = OpenBao.kv_write_version(path, old, cas: 2)
+    assert {:ok, %{current_version: 3, updated_time: %DateTime{}}} = OpenBao.kv_metadata(path)
+    assert {:error, :not_found} = OpenBao.kv_current_version("optimal/connectors/none")
+  end
+
   test "a backup sealed under a transit key opens through it, and without OpenBao", %{
     transit: transit,
     tmp_dir: tmp

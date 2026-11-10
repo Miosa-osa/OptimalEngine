@@ -212,15 +212,24 @@ defmodule OptimalEngine.Storage.OpenBao do
 
   @doc """
   What OpenBao says about the configured token: `{:ok, %{ttl: seconds,
-  renewable: boolean}}`; a `ttl` of 0 never expires (a root token).
+  renewable: boolean, explicit_max_ttl: seconds}}`; a `ttl` of 0 never
+  expires (a root token), and an `explicit_max_ttl` of 0 is no cap of the
+  token's own.
   """
   @spec token_lookup(keyword()) ::
-          {:ok, %{ttl: non_neg_integer(), renewable: boolean()}} | {:error, term()}
+          {:ok,
+           %{ttl: non_neg_integer(), renewable: boolean(), explicit_max_ttl: non_neg_integer()}}
+          | {:error, term()}
   def token_lookup(opts \\ []) do
     with {:ok, config} <- data_config(opts) do
       case guarded_call(config, :get, "/v1/auth/token/lookup-self", nil, opts) do
         {:ok, 200, %{"data" => data}} when is_map(data) ->
-          {:ok, %{ttl: non_negative(data["ttl"]), renewable: data["renewable"] == true}}
+          {:ok,
+           %{
+             ttl: non_negative(data["ttl"]),
+             renewable: data["renewable"] == true,
+             explicit_max_ttl: non_negative(data["explicit_max_ttl"])
+           }}
 
         other ->
           failure(other)
@@ -301,13 +310,91 @@ defmodule OptimalEngine.Storage.OpenBao do
   """
   @spec kv_read(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def kv_read(path, opts \\ []) do
+    with {:ok, data, _version} <- kv_read_version(path, opts), do: {:ok, data}
+  end
+
+  @doc "As `kv_read/2`, with the version that was read: `{:ok, data, version}`."
+  @spec kv_read_version(String.t(), keyword()) ::
+          {:ok, map(), non_neg_integer() | nil} | {:error, term()}
+  def kv_read_version(path, opts \\ []) do
     with {:ok, config} <- data_config(opts),
          {:ok, segments} <- secret_path(path) do
       case guarded_call(config, :get, "/v1/#{config.mount}/data/#{segments}", nil, opts) do
-        {:ok, 200, %{"data" => %{"data" => data}}} when is_map(data) -> {:ok, data}
+        {:ok, 200, %{"data" => %{"data" => data} = body}} when is_map(data) ->
+          {:ok, data, get_in(body, ["metadata", "version"])}
+
         # A secret whose latest version was deleted answers 404 with its metadata.
-        {:ok, 404, _body} -> {:error, :not_found}
-        {:ok, 200, _body} -> {:error, :openbao_not_kv_version_2}
+        {:ok, 404, _body} ->
+          {:error, :not_found}
+
+        {:ok, 200, _body} ->
+          {:error, :openbao_not_kv_version_2}
+
+        other ->
+          failure(other)
+      end
+    end
+  end
+
+  @doc """
+  The secret's current version number, counting deleted and destroyed
+  versions (what a check-and-set compares against), or `{:error, :not_found}`
+  when the path has no metadata.
+  """
+  @spec kv_current_version(String.t(), keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def kv_current_version(path, opts \\ []) do
+    with {:ok, meta} <- kv_metadata(path, opts), do: {:ok, meta.current_version}
+  end
+
+  @doc """
+  The secret's metadata: `%{current_version: n, updated_time: DateTime | nil}`
+  (when its latest version was written), or `{:error, :not_found}`.
+  """
+  @spec kv_metadata(String.t(), keyword()) ::
+          {:ok, %{current_version: non_neg_integer(), updated_time: DateTime.t() | nil}}
+          | {:error, term()}
+  def kv_metadata(path, opts \\ []) do
+    with {:ok, config} <- data_config(opts),
+         {:ok, segments} <- secret_path(path) do
+      case guarded_call(config, :get, "/v1/#{config.mount}/metadata/#{segments}", nil, opts) do
+        {:ok, 200, %{"data" => %{"current_version" => n} = data}} when is_integer(n) ->
+          {:ok, %{current_version: n, updated_time: timestamp(data["updated_time"])}}
+
+        {:ok, 404, _body} ->
+          {:error, :not_found}
+
+        other ->
+          failure(other)
+      end
+    end
+  end
+
+  defp timestamp(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, at, _offset} -> at
+      _ -> nil
+    end
+  end
+
+  defp timestamp(_value), do: nil
+
+  @doc """
+  Destroys one version of the secret at `path` for good, leaving every other
+  version (a newer one written meanwhile) as it is. A version that is not
+  there is `:ok`.
+  """
+  @spec kv_destroy_version(String.t(), pos_integer(), keyword()) :: :ok | {:error, term()}
+  def kv_destroy_version(path, version, opts \\ []) when is_integer(version) and version > 0 do
+    with {:ok, config} <- data_config(opts),
+         {:ok, segments} <- secret_path(path) do
+      case guarded_call(
+             config,
+             :post,
+             "/v1/#{config.mount}/destroy/#{segments}",
+             %{versions: [version]},
+             opts
+           ) do
+        {:ok, status, _body} when status in [200, 204, 404] -> :ok
         other -> failure(other)
       end
     end
@@ -319,21 +406,44 @@ defmodule OptimalEngine.Storage.OpenBao do
   """
   @spec kv_write(String.t(), map(), keyword()) :: :ok | {:error, term()}
   def kv_write(path, data, opts \\ []) when is_map(data) do
+    with {:ok, _version} <- kv_write_version(path, data, opts), do: :ok
+  end
+
+  @doc """
+  As `kv_write/3`, answering the version written: `{:ok, version}` (`nil` when
+  the server does not say). With `cas: n` it is written only if the secret's
+  current version is n; otherwise `{:error, :openbao_cas_mismatch}`.
+  """
+  @spec kv_write_version(String.t(), map(), keyword()) ::
+          {:ok, pos_integer() | nil} | {:error, term()}
+  def kv_write_version(path, data, opts \\ []) when is_map(data) do
     with {:ok, config} <- data_config(opts),
          {:ok, segments} <- secret_path(path) do
+      # `cas: n` is KV version 2's check-and-set: written only if the
+      # secret's current version is n (0: only where nothing is stored).
+      body =
+        case Keyword.get(opts, :cas) do
+          nil -> %{data: data}
+          version -> %{data: data, options: %{cas: version}}
+        end
+
       write = fn ->
-        guarded_call(config, :post, "/v1/#{config.mount}/data/#{segments}", %{data: data}, opts)
+        guarded_call(config, :post, "/v1/#{config.mount}/data/#{segments}", body, opts)
       end
 
       case write.() do
-        {:ok, 200, _body} ->
-          :ok
+        {:ok, 200, body} ->
+          {:ok, written_version(body)}
 
         {:ok, 204, _body} ->
           {:error, :openbao_not_kv_version_2}
 
         {:ok, status, body} = missing when status in [400, 404] ->
-          if no_route?(body), do: enable_kv_and_retry(config, write, opts), else: failure(missing)
+          cond do
+            no_route?(body) -> enable_kv_and_retry(config, write, opts)
+            cas_mismatch?(body) -> {:error, :openbao_cas_mismatch}
+            true -> failure(missing)
+          end
 
         other ->
           failure(other)
@@ -374,15 +484,23 @@ defmodule OptimalEngine.Storage.OpenBao do
 
   defp retry_write(write, attempts) do
     case write.() do
-      {:ok, 200, _body} ->
-        :ok
+      {:ok, 200, body} ->
+        {:ok, written_version(body)}
 
       {:ok, status, body} = other when status in [400, 404] ->
-        if no_route?(body) and attempts > 0 do
-          Process.sleep(100)
-          retry_write(write, attempts - 1)
-        else
-          if no_route?(body), do: {:error, :openbao_mount_missing}, else: failure(other)
+        cond do
+          no_route?(body) and attempts > 0 ->
+            Process.sleep(100)
+            retry_write(write, attempts - 1)
+
+          no_route?(body) ->
+            {:error, :openbao_mount_missing}
+
+          cas_mismatch?(body) ->
+            {:error, :openbao_cas_mismatch}
+
+          true ->
+            failure(other)
         end
 
       other ->
@@ -582,6 +700,14 @@ defmodule OptimalEngine.Storage.OpenBao do
     do: Enum.any?(errors, &(is_binary(&1) and &1 =~ "no handler for route"))
 
   defp no_route?(_body), do: false
+
+  defp written_version(%{"data" => %{"version" => version}}) when is_integer(version), do: version
+  defp written_version(_body), do: nil
+
+  defp cas_mismatch?(%{"errors" => errors}) when is_list(errors),
+    do: Enum.any?(errors, &(is_binary(&1) and &1 =~ "check-and-set"))
+
+  defp cas_mismatch?(_body), do: false
 
   defp call(config, method, path, body, opts) do
     # Sent once, and over https only to a verified certificate and host name:
