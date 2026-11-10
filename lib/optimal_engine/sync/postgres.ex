@@ -169,12 +169,15 @@ defmodule OptimalEngine.Sync.Postgres do
   so Engines booting together do not both alter it.
 
   Sessions that cached a block before the change might still hand it out: the
-  ALTER SEQUENCE documentation says they use up what they cached. PostgreSQL
-  16.14 was seen to drop those blocks (`test/sync/ledger_sequence_test.exs`
-  holds a block in dedicated sessions across the check), but nothing relies on
-  it: after a set-back, every ledger writer of this Engine runs `DISCARD
-  SEQUENCES` under the ledger lock before it draws, for the rest of the boot,
-  so its draw is the sequence's next value whatever its session cached.
+  ALTER SEQUENCE documentation says they use up what they cached. PostgreSQL 16
+  drops those blocks instead (the change gives the sequence new storage);
+  `test/sync/ledger_sequence_test.exs` pins that with dedicated sessions that
+  each hold a block across the check and then draw with a plain `nextval`.
+  Nothing relies on it: after a set-back, every ledger writer of this Engine
+  runs `DISCARD SEQUENCES` under the ledger lock before it draws, for the rest
+  of the boot (a later check that finds the cache at 1 does not turn it off:
+  the pool's sessions may predate the set-back), so its draw is the
+  sequence's next value whatever its session cached.
 
   It never fails the boot. When the cache cannot be set back (the Engine's role
   does not own the table), it logs what to run as the owner, readiness warns
@@ -277,9 +280,11 @@ defmodule OptimalEngine.Sync.Postgres do
   defp record(outcome) do
     {status, discard?} =
       case outcome do
-        :ok -> {:ok, false}
+        # A set-back earlier in this boot keeps the writers discarding: the
+        # pool's sessions may have cached a block before it.
+        :ok -> {:ok, discard_sequences?()}
         # Values other sessions cached before the change could still be
-        # handed out (PostgreSQL 16.14 drops them, which nothing here relies
+        # handed out (PostgreSQL 16 drops them, which nothing here relies
         # on): the writers discard their sessions' blocks for the rest of this
         # boot, as when the change is refused.
         {:set_back, _name, _cache} -> {:ok, true}
