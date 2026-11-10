@@ -15,7 +15,7 @@ defmodule OptimalEngine.Conformance.Transport.Stub do
     "git_sha" => String.duplicate("a", 40),
     "api_version" => "v1",
     "contract_version" => 1,
-    "expected_migration" => 88,
+    "expected_migration" => 89,
     "capabilities" => []
   }
 

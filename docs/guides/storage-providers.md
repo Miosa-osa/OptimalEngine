@@ -384,7 +384,7 @@ A completed sync clears only the marks made before it began; a workspace marked 
 The mark is in memory and the job is durable: after a restart the queued job keeps the workspace on the embedded vectors until it has run.
 
 Removals are durable and never wait on Qdrant.
-A deleted vector, a memory forgotten or hard deleted (every version of its chain, and the source chunk the erasure deleted with it), a memory version superseded by a new one, an archived workspace and a workspace moved to another Engine are written to `qdrant_pending_removals` (migration 88) and the request returns; the projection process applies each in order, behind the mirrors queued before it, and deletes the record once Qdrant has deleted the points.
+A deleted vector, a memory forgotten or hard deleted (every version of its chain, and the source chunk the erasure deleted with it), a memory version superseded by a new one, an archived workspace and a workspace moved to another Engine are written to `qdrant_pending_removals` (migration 89) and the request returns; the projection process applies each in order, behind the mirrors queued before it, and deletes the record once Qdrant has deleted the points.
 A removal Qdrant refuses stays recorded: the projection retries it on a timer (`retry_interval_ms`, one minute, and once at boot), queues a sync for an active workspace, and every sync retries the records first and fails while one remains.
 Before a retry deletes anything it checks which of the named rows are searchable again (a vector stored anew, a workspace no longer archived) and leaves their points alone.
 Removals run whenever a Qdrant URL is configured, serving or not, and only ever name the Engine's own points.

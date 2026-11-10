@@ -809,7 +809,7 @@ defmodule OptimalEngine.Store.Migrations do
   # Qdrant has deleted them; the projection retries on a timer and every sync
   # retries first. Engine state, never replicated. Additive. The version is
   # provisional, like the ones above.
-  @qdrant_pending_removals_version 88
+  @qdrant_pending_removals_version 89
 
   defp migration_qdrant_pending_removals do
     {@qdrant_pending_removals_version,

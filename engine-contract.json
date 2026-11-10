@@ -3,7 +3,7 @@
   "repository": "Miosa-osa/OptimalEngine",
   "version": "0.3.14",
   "api_version": "v1",
-  "expected_migration": 88,
+  "expected_migration": 89,
   "capabilities": [
     "workspace_mix_tasks",
     "governed_claim_review",
