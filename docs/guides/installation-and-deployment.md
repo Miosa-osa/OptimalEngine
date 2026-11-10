@@ -215,12 +215,12 @@ A request to a protected route without a key must return 401.
 ## Mode 2: Self-Hosted With Providers
 
 Start from mode 1 and add providers on your own infrastructure.
-Only two providers are usable today.
+The table says what each provider does today; only Fractal has no adapter.
 
 | Provider | Status | What it holds |
 | --- | --- | --- |
 | S3-compatible storage (Garage, MinIO, or another) | Wired | Assets and offsite backups |
-| PostgreSQL | Wired but partial | The canonical relational store of a Postgres build |
+| PostgreSQL | Wired | The canonical relational store of an `OPTIMAL_STORE=postgres` Engine |
 | NATS JetStream | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS`; nothing without them |
 | Valkey | Adapter, health-checked and proved, in the data path | Shared rate limits and caches, ETS as the fallback |
 | Qdrant | Adapter, health-checked and proved | Nothing yet; no Engine feature uses it |
@@ -280,21 +280,19 @@ Setting `OPTIMAL_POSTGRES_URL` alone changes nothing: the provider reports `sele
 
 Use one schema per Engine (`OPTIMAL_POSTGRES_SCHEMA`) so that Engines that must not see each other's data do not share tables.
 
-What a Postgres build gives up:
+What changes on a Postgres build ([PostgreSQL Provider](postgres-provider.md) has the details):
 
 | Feature | On a Postgres build |
 | --- | --- |
-| Full-text search | Refused. Search, context assembly, and asking return an error naming it. |
-| Replication | Refused. Enabling sync and adding a peer return 501. |
-| App data collections | Refused. |
-| SQLite-only statements | Refused by name where used (some JSON functions, date arithmetic, `rowid`, `PRAGMA`). |
-| ETS hot cache | Off. |
-| Engine backup routes | They copy the SQLite file, so they do not back up a Postgres build. Back the database up with Postgres tooling. |
-| Moving an existing Engine's data to Postgres | `mix optimal.postgres.migrate` copies an SQLite Engine's store, verified by row counts, checksums and parity queries before it commits ([PostgreSQL Provider](postgres-provider.md#stage-4-moving-an-existing-engine)). |
+| Full-text search | Works: posting lists in PostgreSQL with FTS5's tokens and BM25 ranking, so search, context assembly and asking rank as on SQLite. |
+| Replication | Works: SQLite and PostgreSQL Engines replicate with each other. |
+| App data collections | Work. |
+| Schema and transaction statements sent as statements | Refused by name: the schema comes from the migrations. |
+| ETS hot cache | Off, by design: one Engine's cache cannot see another Engine's writes. |
+| Engine backup routes | Work: a backup is a SQLite file holding one consistent snapshot of the store; `mix optimal.restore` restores into the schema. |
+| Moving an existing Engine's data to Postgres | `mix optimal.postgres.migrate` copies an SQLite Engine's store, verified by row counts, checksums and parity queries before it commits ([PostgreSQL Provider](postgres-provider.md#stage-4-moving-an-existing-engine)). It takes an Engine that has not enabled replication or app data collections; turn them on again after the move. |
 
-An Engine whose Postgres database holds replication data does not start.
-[PostgreSQL Provider](postgres-provider.md) lists every refusal.
-Choose this build only when several Engine processes must write one database and you can live without the features above.
+Choose this build when several Engine processes must write one database.
 
 ## Mode 3: Cloud Providers
 
@@ -304,7 +302,7 @@ The Engine is still one instance on one durable disk.
 | Provider | Status | Notes |
 | --- | --- | --- |
 | Managed S3: AWS S3, Cloudflare R2 | Wired | Assets and offsite backups |
-| Managed PostgreSQL | Wired but partial | The Postgres build above, with the same refusals |
+| Managed PostgreSQL | Wired | The `OPTIMAL_STORE=postgres` Engine above |
 | Managed NATS | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS` |
 | Managed Valkey | Adapter, health-checked and proved | Shared rate limits and caches across the Engine's processes |
 | Managed Qdrant | Adapter, health-checked and proved | Reached and proved; no Engine feature uses it yet |
@@ -327,8 +325,7 @@ Give each Engine its own prefix or bucket and write nothing else under it, becau
 
 Use the Postgres build from mode 2 with the managed database's connection string and `sslmode=require` or stricter.
 Give each Engine its own schema.
-Back the database up with the provider's backups; the Engine's backup routes do not cover it.
-Managed Postgres does not remove any limit above: replication stays refused.
+The Engine's backup routes cover it, and the provider's own backups can sit beside them.
 
 ### Backup, upgrade, verify
 
@@ -467,7 +464,7 @@ A production deployment starts as one Engine instance (mode 1) and separates fiv
 
 | Concern | Recommended role |
 | --- | --- |
-| Canonical runtime rows | The instance's SQLite file with verified backups. A Postgres build is an optional, partial provider for scale (mode 2). |
+| Canonical runtime rows | The instance's SQLite file with verified backups. A Postgres build is an optional provider for scale (mode 2). |
 | Raw artifacts | The instance's files, or S3-compatible object storage (wired) with retention, backup, and access policy. |
 | Indexes and caches | Rebuildable FTS/vector/chunk/parse/cache projections. |
 | Worker runtime | Supervised Elixir workers plus adapter/model/tool worker processes. |

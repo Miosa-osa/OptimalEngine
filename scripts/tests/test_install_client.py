@@ -34,7 +34,7 @@ CLI_BUILD = ROOT / 'apps' / 'cli' / 'build.sh'
 VERSION = mix_version()
 MCP_ARCHIVE = f'optimal-engine-mcp-{VERSION}.tar.gz'
 ENV_VARS = ('env_vars = ["OPTIMAL_ENGINE_URL", "OPTIMAL_ENGINE_API_KEY", "OPTIMAL_ENGINE_API_KEY_FILE", '
-            '"OPTIMAL_WORKSPACE", "OPTIMAL_PROFILE", "XDG_CONFIG_HOME"]')
+            '"OPTIMAL_WORKSPACE", "OPTIMAL_PROFILE", "OPTIMAL_WAKE_TIMEOUT", "XDG_CONFIG_HOME"]')
 
 
 def node_ok():
@@ -1496,6 +1496,17 @@ class RegisterTests(InstallClientTestCase):
         self.assertFalse(self.calls.exists())
         self.assertFalse((self.home / '.codex').exists())
 
+
+
+class ClientInstallDocTest(unittest.TestCase):
+    """CLIENT-INSTALL.md names the variables the installer gives Codex's MCP server."""
+
+    def test_the_documented_env_vars_are_the_installers(self):
+        script = INSTALLER.read_text()
+        listed = re.search(r"^MCP_ENV_VARS='(.*)'$", script, re.M).group(1)
+        doc = (ROOT / 'deploy' / 'miosa-template' / 'CLIENT-INSTALL.md').read_text()
+        self.assertIn(f'env_vars = [{listed}]', doc)
+        self.assertEqual(ENV_VARS, f'env_vars = [{listed}]')
 
 if __name__ == '__main__':
     unittest.main()

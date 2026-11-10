@@ -40,9 +40,11 @@ defmodule OptimalEngine.Store.Postgres.Migrate do
   - A table or column the snapshot has and this build's schema does not
     (`{:unknown_tables, names}`, `{:unknown_columns, ...}`) unless
     `ignore_unknown: true`, which leaves it behind and reports it.
-  - An Engine that uses replication or app data collections
-    (`{:unsupported_in_use, features}`), which the PostgreSQL store refuses
-    to start with.
+  - An Engine that has enabled replication or app data collections
+    (`{:unsupported_in_use, features}`): both work on a PostgreSQL store,
+    but this copy does not carry their state (the replication ledger's
+    capture, the collections' own tables), so the Engine moves without them
+    and turns them on again after.
   - A value PostgreSQL's column cannot hold as SQLite did (text that is not
     UTF-8, a non-integer in an integer column): the transaction rolls back
     with the table named.
@@ -236,8 +238,9 @@ defmodule OptimalEngine.Store.Postgres.Migrate do
       else: {:error, {:target_not_empty, schema}}
   end
 
-  # The PostgreSQL store does not start on an Engine that uses these
-  # (OptimalEngine.Store.Postgres).
+  # A precondition of this copy: an Engine that has enabled these is not
+  # copied, because their state is not part of the copy (both work on a
+  # PostgreSQL store; turn them on again after the move).
   @in_use [
     {"replication",
      "SELECT 1 FROM sync_workspaces UNION ALL SELECT 1 FROM sync_peers WHERE status <> 'disabled'"},

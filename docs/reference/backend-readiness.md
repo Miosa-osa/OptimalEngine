@@ -58,7 +58,7 @@ The backend uses multiple storage roles. They should not be confused.
 | Store role | Current state | Owns |
 | --- | --- | --- |
 | SQLite | Current local canonical runtime store. | Workspaces, Nodes, Sources, Claims, Facts, Memories, Context Packages, pools, workflows, skills, governance rows. |
-| Postgres | Optional provider for scale, wired but partial (`OPTIMAL_STORE=postgres` at boot). | Same lifecycle model as SQLite where the build supports it; no replication. |
+| Postgres | Optional provider for scale, wired (`OPTIMAL_STORE=postgres` at boot). | Same lifecycle model as SQLite, replication included. |
 | Raw artifact storage | Local file-backed evidence path by default; S3-compatible object storage is wired for assets and offsite backups. | Files, uploads, attachments, media, source payloads. |
 | FTS/vector/chunk indexes | Rebuildable acceleration layer. | Search candidates, embeddings, chunks, summaries, rerank state. |
 | ETS | In-memory triple-store mirror: the config default, and what the Docker image and MIOSA template run. | Fast process-local graph state, reloaded from the SQLite `graph_edges` table at each start. |

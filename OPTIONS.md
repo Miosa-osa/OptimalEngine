@@ -71,7 +71,7 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OPTIMAL_STORE` | `sqlite` | Read when the Engine boots. `sqlite` or `postgres`: which canonical store the Engine runs; one build runs either. See `docs/guides/postgres-provider.md` for what a PostgreSQL store does not do yet. Any other value stops the boot. |
+| `OPTIMAL_STORE` | `sqlite` | Read when the Engine boots. `sqlite` or `postgres`: which canonical store the Engine runs; one build runs either. See `docs/guides/postgres-provider.md` for how a PostgreSQL store differs. Any other value stops the boot. |
 | `OPTIMAL_POSTGRES_URL` | none | Connection URL of a Postgres build, read when the store starts. Never logged or returned. |
 | `OPTIMAL_POSTGRES_SCHEMA` | `public` | Schema a Postgres build keeps its tables in; use one per Engine. |
 | `OPTIMAL_S3_ENDPOINT` | none | S3-compatible endpoint base URL. |
@@ -107,9 +107,11 @@ Names come from `config/runtime.exs`, `config/config.exs`, and the provider adap
 
 The mirror is not what retrieval reads: the graph that search and assembly read is the `graph_edges` table in SQLite.
 
-Providers with an adapter that no Engine feature uses yet: `OPTIMAL_VALKEY_URL` and `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`.
+`OPTIMAL_VALKEY_URL` puts the API and connector rate limits, the verified API key cache and the sync gate cache in Valkey, with ETS as the fallback; see [Valkey](docs/guides/storage-providers.md#valkey).
 OpenBao (above) is in the data path: see [Storage providers](docs/guides/storage-providers.md#openbao).
-Setting them lets `GET /api/storage/providers?probe=true` check each service and the provider proofs prove it with a round trip; the Engine's data stays where it is.
+`OPTIMAL_ANALYTICS_PATH` (DuckDB and Parquet, below) holds each workspace's analytics files.
+The provider with an adapter that no Engine feature uses yet is Qdrant: `OPTIMAL_QDRANT_URL` with `OPTIMAL_QDRANT_API_KEY`.
+Setting these lets `GET /api/storage/providers?probe=true` check each service and the provider proofs prove it with a round trip; the Engine's data stays where it is.
 NATS JetStream is reached the same way, and runs the flows it is given:
 
 | Variable | Default | Purpose |
@@ -260,7 +262,7 @@ They should not connect to the owner's private engine unless explicitly configur
 | --- | --- | --- |
 | Local source checkout | Developer or local agent work | `bin/optimal dev` runs the engine on `localhost:4200`. |
 | Bundled desktop engine | BusinessOS desktop user | App launches a local release with fresh local runtime data. |
-| Production service | Hosted org or workspace | Service uses production secrets and scoped keys. Postgres is an optional, partial provider chosen when the Engine boots (`OPTIMAL_STORE=postgres`), not switched on by configuring a URL alone. |
+| Production service | Hosted org or workspace | Service uses production secrets and scoped keys. Postgres is an optional provider chosen when the Engine boots (`OPTIMAL_STORE=postgres`), not switched on by configuring a URL alone. |
 | Test mode | CI and unit tests | Use isolated temp stores and avoid private `.optimal/` data. |
 
 ## Compatibility And API Grants

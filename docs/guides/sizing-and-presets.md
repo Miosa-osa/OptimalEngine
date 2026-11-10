@@ -11,7 +11,7 @@ The profile tunes the Engine to its machine and says when to grow; the preset ap
 | `workspace` | 1 / 2 GiB | 10 GiB | 250k vectors, 500k memories, 50k memory candidates, 100k contexts | yes | one client or team workspace |
 | `business` | 2 / 4 GiB | 25 GiB | 1M vectors, 2M memories, 200k memory candidates, 500k contexts | no | a whole company in one brain |
 | `platform` | 4 / 8 GiB | 100 GiB | 5M vectors, 10M memories, 1M memory candidates, 2M contexts | no | a large customer, a product with many end users |
-| `scale` | 8 / 16 GiB or more | 250 GiB or more | beyond embedded limits | no | beyond one embedded Engine: vectors would move to a vector provider (Qdrant, reached and proved, not yet serving search), writers to Postgres (wired but partial, see below) |
+| `scale` | 8 / 16 GiB or more | 250 GiB or more | beyond embedded limits | no | beyond one embedded Engine: vectors would move to a vector provider (Qdrant, reached and proved, not yet serving search), writers to Postgres (wired, see below) |
 
 ### Sizes on MIOSA
 
@@ -86,18 +86,15 @@ At 70 percent of any limit the recommendation is `resize` to the next profile, w
 | `vectors` | `qdrant` | Reached and proved; the Engine's vector search still reads the embedded vectors. |
 | no gauge (analytics) | `duckdb` | Wired: the daily `analytics_export` analysis writes each workspace's metrics, sync runs, ledger and usage as Parquet under `OPTIMAL_ANALYTICS_PATH`, and `GET /api/analytics/query` answers over them; no gauge names it, so turn it on when the workspace needs analytics. |
 | `disk_bytes` | `s3` | Wired. Moves assets and backups off the disk. |
-| `writes_per_minute` | `postgres`, `nats_jetstream` | `postgres` is wired but partial; `nats_jetstream` publishes the change ledger to subscribers (`OPTIMAL_NATS_FLOWS=ledger`), but Engine writes still land in SQLite first, so it adds no write capacity. |
-| any other gauge | `postgres` | Wired but partial. |
+| `writes_per_minute` | `postgres`, `nats_jetstream` | `postgres` is wired: several Engines can write to one database; `nats_jetstream` publishes the change ledger to subscribers (`OPTIMAL_NATS_FLOWS=ledger`), but every write lands in the Engine's store first, so it adds no write capacity. |
+| any other gauge | `postgres` | Wired. |
 | no gauge (secrets) | `openbao` | Not named by a recommendation. In the data path when configured: secret references, connector credentials (opt in) and backup transit keys ([Storage providers](storage-providers.md#openbao)). |
 
 The recommendation names a provider whether or not the Engine can use it, so check `GET /api/storage/providers` (`adapter_implemented`) before acting on it.
 
-A Postgres build gives up replication.
-Enabling sync is refused by name on it.
-Backups, offsite copies and restores work on it: a backup is a SQLite file holding one consistent snapshot of the store.
-Search, context assembly, and asking work on it, with FTS5's tokens and BM25 ranking.
-An existing Engine's data moves to Postgres with `mix optimal.postgres.migrate`, which commits only a copy it has verified.
-Choose it for write concurrency only when you can live without those features ([PostgreSQL Provider](postgres-provider.md)).
+A Postgres build runs every feature of the store: replication (with SQLite and PostgreSQL Engines alike), app data collections, backups, offsite copies and restores (a backup is a SQLite file holding one consistent snapshot of the store), and search, context assembly and asking, with FTS5's tokens and BM25 ranking.
+Only the ETS hot cache is off, because one Engine's cache cannot see another's writes.
+An existing Engine's data moves to Postgres with `mix optimal.postgres.migrate`, which commits only a copy it has verified ([PostgreSQL Provider](postgres-provider.md)).
 
 A platform reads the recommendation to show usage and to resize.
 

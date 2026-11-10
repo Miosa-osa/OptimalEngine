@@ -81,7 +81,7 @@ being reliable.
 SQLite:
   default runtime store, inside one Engine instance that holds every store
 
-Postgres, optional provider for scale (wired but partial):
+Postgres, optional provider for scale (wired):
   multi-user, enterprise, hosted or team deployment
 
 RocksDB/fast indexes:

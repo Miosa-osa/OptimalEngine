@@ -43,8 +43,9 @@ The triple store (ETS or RocksDB) is a mirror rebuilt from it, and no retrieval 
 The mirror is ETS, in memory, under bare `mix`, in tests, in the Docker image, and in the MIOSA template and managed Engines, because none of them sets `OPTIMAL_KNOWLEDGE_BACKEND`.
 `scripts/run-engine.sh` defaults it to RocksDB, and `OPTIMAL_KNOWLEDGE_BACKEND=rocksdb` with `OPTIMAL_KNOWLEDGE_ROCKSDB_PATH` selects it anywhere.
 Mnesia is an experiment with `ram_copies` tables, and Riak is in no build.
-Providers are things a deployment grows onto: S3-compatible storage is wired for assets and offsite backups, and Postgres is an optional, partial provider for scale (an `OPTIMAL_STORE=postgres` Engine without full-text search, replication, or app data collections).
-NATS JetStream, Valkey, Qdrant, DuckDB, and OpenBao have adapters that are health-checked and proved by a round trip, and no Engine feature uses them yet; Fractal is declared with no adapter.
+Providers are things a deployment grows onto: S3-compatible storage is wired for assets and offsite backups, and Postgres is an optional provider for scale (an `OPTIMAL_STORE=postgres` Engine, chosen at boot, with full-text search, replication and app data collections).
+NATS JetStream, Valkey, Qdrant, DuckDB, and OpenBao have adapters that are health-checked and proved by a round trip.
+Valkey carries the rate limits and caches, DuckDB the workspace analytics, OpenBao the secret references, connector credentials (opt in) and backup transit keys, and NATS JetStream the flows named in `OPTIMAL_NATS_FLOWS`; no Engine feature uses Qdrant yet. Fractal is declared with no adapter.
 Vectors, chunks, FTS rows, and caches are projections.
 The live logical-store catalog is available through `GET /api/stores`.
 Use `GET /api/stores/audit` to verify SQLite integrity, foreign keys, migrations, FTS parity, workspace isolation, vector validity, asset cataloging, verified backups, RLM readiness, and cache readiness.

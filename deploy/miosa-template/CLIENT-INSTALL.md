@@ -183,7 +183,7 @@ From 0.3.3 the MCP server is versioned with the Engine and a different version i
   A different earlier profile is kept as `profile.previous`.
 * Claude Code: `claude mcp add --scope user optimal-engine -- <prefix>/bin/optimal-engine-mcp`, after removing an earlier `optimal-engine`.
   Claude Code passes its own environment to the server.
-* Codex: the `[mcp_servers.optimal-engine]` table in `$CODEX_HOME/config.toml` (default `~/.codex`), with `command` set to the launcher and `env_vars = ["OPTIMAL_ENGINE_URL", "OPTIMAL_ENGINE_API_KEY", "OPTIMAL_ENGINE_API_KEY_FILE", "OPTIMAL_WORKSPACE", "OPTIMAL_PROFILE", "XDG_CONFIG_HOME"]`.
+* Codex: the `[mcp_servers.optimal-engine]` table in `$CODEX_HOME/config.toml` (default `~/.codex`), with `command` set to the launcher and `env_vars = ["OPTIMAL_ENGINE_URL", "OPTIMAL_ENGINE_API_KEY", "OPTIMAL_ENGINE_API_KEY_FILE", "OPTIMAL_WORKSPACE", "OPTIMAL_PROFILE", "OPTIMAL_WAKE_TIMEOUT", "XDG_CONFIG_HOME"]`.
   Codex gives a stdio server only a fixed environment (`HOME`, `PATH` and a few more) plus the names in `env_vars`, so this list is what lets the server see the injected Engine settings; with only `HOME` it still finds the default profile.
   `env_vars` needs Codex 0.47.0 or newer: an older Codex gets the table without it, with a warning, and when the version is unknown (`codex` not on `PATH`, or no version in its `--version`) the table has it and the script warns.
   Any earlier `optimal-engine` table and its sub-tables are replaced, however their headers are spaced or quoted; every other setting is kept.

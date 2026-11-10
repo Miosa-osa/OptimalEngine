@@ -101,4 +101,4 @@
 - "File" was treated like truth. Files in node folders should be **Workspace Exports** derived from the **Enterprise Memory Core**.
 - "Skill" was used for prompts, tools, procedures, and agent abilities. Use **Skill Package** only for governed procedural knowledge with policy, validation, provenance, and audit.
 - "Postgres" was used as shorthand for the architecture.
-  The canonical term is **Enterprise Memory Core**; the default implementation substrate is the Engine's embedded SQLite, and Postgres is an optional, partial provider for scale.
+  The canonical term is **Enterprise Memory Core**; the default implementation substrate is the Engine's embedded SQLite, and Postgres is an optional provider for scale.
