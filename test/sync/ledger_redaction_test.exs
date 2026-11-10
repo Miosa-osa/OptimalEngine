@@ -527,6 +527,44 @@ defmodule OptimalEngine.Sync.LedgerRedactionTest do
       assert redacted_rows(ctx.ws, "contexts", doc) != []
     end
 
+    # The changes a batch applies and the erasure of the same row in that batch:
+    # the erasure must see the earlier change's ledger row, however the apply
+    # writes its ledger rows (at each step, or all at the end of the batch).
+    test "a row created and erased in one batch leaves no text in the ledger", ctx do
+      mem = "peer-batch-mem-#{ctx.n}"
+      doc = "peer-batch-ctx-#{ctx.n}"
+
+      batch = [
+        mutation("create", "memories", mem, %{
+          "id" => mem,
+          "content" => "batched memory #{ctx.token}",
+          "content_hash" => "hbm#{ctx.n}",
+          "is_forgotten" => 0,
+          "created_at" => "2026-10-14T10:00:00Z",
+          "updated_at" => "2026-10-14T10:00:00Z"
+        }),
+        mutation("create", "contexts", doc, %{
+          "id" => doc,
+          "title" => "t",
+          "content" => "batched context #{ctx.token}",
+          "created_at" => "2026-10-14T10:00:00Z"
+        }),
+        mutation(
+          "create",
+          "ledger_redactions",
+          "lr_batch#{ctx.n}",
+          request_row("lr_batch#{ctx.n}", "memory", mem, "2026-10-14T11:00:00.000"),
+          2
+        ),
+        mutation("delete", "contexts", doc, %{"id" => doc}, 2)
+      ]
+
+      assert {:ok, %{applied: 4, failed: []}} = Sync.apply_changes(ctx.tenant, ctx.ws, batch)
+      seal!()
+      assert ledger_hits(ctx.token) == []
+      assert_hashes_hold(ctx.ws)
+    end
+
     test "a request redacts only changes at or before the version it erased", ctx do
       id = "peer-bound-#{ctx.n}"
 
