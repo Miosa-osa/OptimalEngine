@@ -538,19 +538,6 @@ defmodule OptimalEngine.Sync.Capture do
   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
   """
 
-  @ledger_insert_pg """
-  INSERT INTO sync_mutations
-    (id, tenant_id, organization_id, workspace_id, device_id, entity_type, entity_id, operation,
-     payload, payload_hash, idempotency_key, occurred_at)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-  ON CONFLICT DO NOTHING
-  """
-
-  @doc false
-  # The statement a seal inserts ledger rows with on PostgreSQL; a test stands
-  # in for a second Engine's seal with it (test/sync/ledger_commit_order_test.exs).
-  def ledger_insert_pg, do: @ledger_insert_pg
-
   # The ledger rows of captured changes, and the captured rows gone, in one
   # transaction. Sealing is idempotent (a mutation id is the capture key, and a
   # sealed row is ignored), so on PostgreSQL it runs at READ COMMITTED: at
@@ -558,7 +545,7 @@ defmodule OptimalEngine.Sync.Capture do
   # be aborted again and again beside the writers it overlaps.
   defp write_ledger(entries, max_seq) do
     if PgCapture.active?() do
-      PgCapture.write_ledger(@ledger_insert_pg, entries, max_seq)
+      PgCapture.write_ledger(entries, max_seq)
     else
       Store.transaction(fn txn ->
         Enum.each(entries, fn params ->

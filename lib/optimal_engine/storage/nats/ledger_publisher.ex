@@ -106,6 +106,8 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   @max_age_env "OPTIMAL_NATS_LEDGER_MAX_AGE_HOURS"
   @default_max_age_hours 168
   @empty %{published: 0, purged: 0, forgotten: 0}
+  @checkpoint {__MODULE__, :workspace_checkpoint}
+  @degraded_after 5
 
   @doc false
   def child_spec(opts) do
@@ -196,10 +198,37 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
     :exit, _ -> %{state: "down", workspaces: []}
   end
 
+  @doc """
+  `:ok`, or `{:degraded, failures, last_error}` once #{@degraded_after} passes
+  in a row have failed (readiness warns, `OptimalEngine.Health`). Read without
+  calling the publisher, so a pass in progress never holds it up.
+  """
+  @spec health(GenServer.server()) :: :ok | {:degraded, pos_integer(), String.t() | nil}
+  def health(server \\ __MODULE__),
+    do: :persistent_term.get({__MODULE__, :health, server}, :ok)
+
   # ---------------------------------------------------------------------------
 
   @impl GenServer
   def init(opts) do
+    # Its failures in a row outlive the process (`run/1`): a run that ended
+    # without stopping (a crash, a kill) is one more, so a publisher its
+    # supervisor keeps restarting shows degraded. A clean stop keeps the count
+    # and adds nothing; a pass that goes through clears it. A health mark with
+    # no run behind it (another boot's) is not this run's.
+    Process.flag(:trap_exit, true)
+    name = Keyword.get(opts, :name, __MODULE__)
+
+    {failures, last_error} =
+      case :persistent_term.get({__MODULE__, :run, name}, nil) do
+        nil -> {0, nil}
+        %{running: true, failures: n} -> {n + 1, "restarted after an abnormal exit"}
+        %{failures: n, last_error: error} -> {n, error}
+      end
+
+    put_run(name, failures, last_error, true)
+    put_health(name, failures, last_error)
+
     enabled = Keyword.get_lazy(opts, :enabled, fn -> NATS.flow?(@flow) end)
 
     namespace =
@@ -214,6 +243,10 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
       connection: Keyword.get(opts, :connection, Connection),
       interval: Keyword.get(opts, :interval_ms, @interval),
       only: Keyword.get(opts, :workspaces),
+      name: Keyword.get(opts, :name, __MODULE__),
+      # How a workspace's changes are read (tests stand in a failing read).
+      changes: Keyword.get(opts, :changes, &Sync.changes/3),
+      failures: failures,
       state: if(enabled, do: "starting", else: "off"),
       epoch: nil,
       more: false,
@@ -221,7 +254,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
       published: 0,
       purged: 0,
       last_published_at: nil,
-      last_error: nil
+      last_error: last_error
     }
 
     cond do
@@ -279,6 +312,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
        purges_pending: if(state.enabled, do: length(pending_requests(state)), else: 0),
        last_published_at: state.last_published_at,
        last_error: state.last_error,
+       consecutive_failures: state.failures,
        workspaces: if(state.enabled, do: backlogs(state), else: [])
      }, state}
   end
@@ -290,6 +324,10 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
     {:noreply, state}
   end
 
+  # Exits are trapped only so a clean stop reaches `terminate/2`; a linked
+  # process that ends (its parent's exit is handled by GenServer) changes nothing.
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
+
   defp schedule(%{interval: interval}) when interval > 0,
     do: Process.send_after(self(), :tick, interval)
 
@@ -300,14 +338,53 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   # each, in ledger order.
   # ---------------------------------------------------------------------------
 
+  # A pass, and the count of passes in a row that failed: health degrades after
+  # @degraded_after of them, and the first pass that goes through clears it.
   defp pass(state, only) do
+    {reply, state} = run_pass(state, only)
+
+    failures =
+      case {reply, state.state} do
+        {{:error, _reason}, "error"} -> state.failures + 1
+        {{:error, _reason}, _buffering} -> state.failures
+        {{:ok, _totals}, _settled} -> 0
+      end
+
+    put_run(state.name, failures, state.last_error, true)
+    put_health(state.name, failures, state.last_error)
+    {reply, %{state | failures: failures}}
+  end
+
+  # The run's record: its failures in a row, its last error, and whether it is
+  # running (cleared by a clean stop, `terminate/2`).
+  defp put_run(name, failures, last_error, running) do
+    record = %{failures: failures, last_error: last_error, running: running}
+    key = {__MODULE__, :run, name}
+    if :persistent_term.get(key, nil) != record, do: :persistent_term.put(key, record)
+  end
+
+  @impl GenServer
+  def terminate(reason, state) do
+    if reason in [:normal, :shutdown] or match?({:shutdown, _}, reason),
+      do: put_run(state.name, state.failures, state.last_error, false)
+
+    :ok
+  end
+
+  defp put_health(name, failures, last_error) do
+    health = if failures >= @degraded_after, do: {:degraded, failures, last_error}, else: :ok
+    key = {__MODULE__, :health, name}
+    if :persistent_term.get(key, :ok) != health, do: :persistent_term.put(key, health)
+  end
+
+  defp run_pass(state, only) do
     with {:ok, state} <- provision(state) do
       {done, state} = process_requests(state)
       requested = done |> Map.values() |> Enum.sum()
 
       {totals, state} =
         Enum.reduce_while(workspaces(state, only), {@empty, state}, fn workspace, {totals, state} ->
-          case publish_workspace(state, workspace, @pages_per_pass, @empty) do
+          case guarded_workspace(state, workspace) do
             {:ok, counts, state} ->
               {:cont, {add(totals, counts), state}}
 
@@ -341,9 +418,58 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
         {{:error, reason}, failed(state, reason)}
     end
   rescue
+    # Anything outside a workspace's publishing (the workspace purges, the
+    # list of workspaces): nothing of this pass was published yet.
     error ->
       Logger.warning("[NATS] ledger pass failed: #{Exception.message(error)}")
       {{:error, :pass_failed}, failed(state, :pass_failed)}
+  catch
+    kind, reason ->
+      Logger.warning("[NATS] ledger pass failed: #{kind} #{inspect(reason)}")
+      {{:error, :pass_failed}, failed(state, :pass_failed)}
+  end
+
+  # A workspace that raises or exits part way ends the pass with the state the
+  # pass had before it: the workspaces published earlier in the pass keep the
+  # cursors they moved. (A read that fails is caught page by page in
+  # `read_page/4`, which keeps this workspace's earlier pages too.)
+  defp guarded_workspace(state, workspace) do
+    Process.delete(@checkpoint)
+    publish_workspace(state, workspace, @pages_per_pass, @empty)
+  rescue
+    error ->
+      Logger.warning("[NATS] ledger publish failed: #{Exception.message(error)}")
+      {state, counts} = checkpoint(state)
+      {:error, {:raised, Exception.message(error)}, counts, state}
+  catch
+    kind, reason ->
+      Logger.warning("[NATS] ledger publish failed: #{kind} #{inspect(reason)}")
+      {state, counts} = checkpoint(state)
+      {:error, {kind, reason}, counts, state}
+  after
+    Process.delete(@checkpoint)
+  end
+
+  # The state and counts after the last page of this workspace that went out
+  # whole: a raise or exit later in the workspace keeps the cursor those pages
+  # moved.
+  defp checkpoint(state), do: Process.get(@checkpoint, {state, @empty})
+
+  # One page of a workspace's changes and the later forgets of its rows. The
+  # read seals first, and a seal that fails or waits past its timeout (a long
+  # apply holding the ledger lock) raises or exits: that ends this workspace's
+  # pass, not the publisher.
+  defp read_page(state, tenant, ws, cursor) do
+    page = state.changes.(tenant, ws, since: cursor, limit: @page)
+    {:ok, page, later_forgets(tenant, ws, page["mutations"])}
+  rescue
+    error ->
+      Logger.warning("[NATS] ledger read failed: #{Exception.message(error)}")
+      {:error, {:read_failed, Exception.message(error)}}
+  catch
+    kind, reason ->
+      Logger.warning("[NATS] ledger read failed: #{kind} #{inspect(reason)}")
+      {:error, {:read_failed, {kind, reason}}}
   end
 
   defp add(a, b), do: Map.merge(a, b, fn _key, x, y -> x + y end)
@@ -379,10 +505,8 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   defp publish_workspace(state, _workspace, 0, counts), do: {:ok, counts, %{state | more: true}}
 
   defp publish_workspace(state, {tenant, ws} = workspace, pages, counts) do
-    with {:ok, cursor, state} <- cursor(state, workspace) do
-      page = Sync.changes(tenant, ws, since: cursor, limit: @page)
-      forgets = later_forgets(tenant, ws, page["mutations"])
-
+    with {:ok, cursor, state} <- cursor(state, workspace),
+         {:ok, page, forgets} <- read_page(state, tenant, ws, cursor) do
       case publish_all(state, workspace, page["mutations"], forgets) do
         {:ok, page_counts} ->
           state = put_in(state, [:cursors, workspace], page["cursor"])
@@ -390,6 +514,8 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
 
           state =
             if page_counts.published > 0, do: %{state | last_published_at: now()}, else: state
+
+          Process.put(@checkpoint, {state, counts})
 
           if page["more"] do
             publish_workspace(state, workspace, pages - 1, counts)
@@ -671,16 +797,20 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   defp only(rows, nil), do: rows
   defp only(rows, ids), do: Enum.filter(rows, fn {_tenant, ws} -> ws in ids end)
 
-  # Sealed first, so a write the triggers captured counts before a pass ran.
+  # The ledger rows past the cursor and the writes captured but not sealed
+  # yet, read without sealing: a seal can wait on the ledger lock, and a status
+  # must not (it runs in this process, and its caller waits 5 s).
   defp backlogs(state) do
-    {:ok, _} = OptimalEngine.Sync.Capture.seal()
-
     for {tenant, ws} = workspace <- workspaces(state, nil) do
       through = Map.get(state.cursors, workspace)
 
       {:ok, [[backlog]]} =
         Store.raw_query(
-          "SELECT COUNT(*) FROM sync_mutations WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3",
+          """
+          SELECT (SELECT COUNT(*) FROM sync_mutations
+                  WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3)
+               + (SELECT COUNT(*) FROM sync_capture WHERE workspace_id = ?2)
+          """,
           [tenant, ws, through || 0]
         )
 

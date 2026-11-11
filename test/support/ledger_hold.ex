@@ -37,6 +37,31 @@ defmodule OptimalEngine.Test.LedgerHold do
         "CREATE TRIGGER oe_test_ledger_hold AFTER INSERT ON sync_mutations FOR EACH ROW EXECUTE FUNCTION oe_test_ledger_hold()",
         []
       )
+
+      # An applied change's row write, held the same way for an id starting
+      # `slow-`: the apply is part way through its transaction.
+      Postgrex.query!(
+        conn,
+        """
+        CREATE OR REPLACE FUNCTION oe_test_row_hold() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.id LIKE 'slow-%' THEN
+            PERFORM pg_advisory_lock(hashtext('#{@key}'), hashtext(NEW.id));
+            PERFORM pg_advisory_unlock(hashtext('#{@key}'), hashtext(NEW.id));
+          END IF;
+          RETURN NEW;
+        END $$
+        """,
+        []
+      )
+
+      Postgrex.query!(conn, "DROP TRIGGER IF EXISTS oe_test_row_hold ON contexts", [])
+
+      Postgrex.query!(
+        conn,
+        "CREATE TRIGGER oe_test_row_hold AFTER INSERT ON contexts FOR EACH ROW EXECUTE FUNCTION oe_test_row_hold()",
+        []
+      )
     end)
 
     :ok
@@ -46,6 +71,8 @@ defmodule OptimalEngine.Test.LedgerHold do
     with_conn(fn conn ->
       Postgrex.query!(conn, "DROP TRIGGER IF EXISTS oe_test_ledger_hold ON sync_mutations", [])
       Postgrex.query!(conn, "DROP FUNCTION IF EXISTS oe_test_ledger_hold()", [])
+      Postgrex.query!(conn, "DROP TRIGGER IF EXISTS oe_test_row_hold ON contexts", [])
+      Postgrex.query!(conn, "DROP FUNCTION IF EXISTS oe_test_row_hold()", [])
     end)
 
     :ok
@@ -53,7 +80,7 @@ defmodule OptimalEngine.Test.LedgerHold do
 
   @doc "Takes the lock a writer of `entity_id` will wait on; returns the holding connection."
   def hold(entity_id) do
-    conn = connect()
+    conn = open()
 
     Postgrex.query!(conn, "SELECT pg_advisory_lock(hashtext($1), hashtext($2))", [@key, entity_id])
 
@@ -81,8 +108,9 @@ defmodule OptimalEngine.Test.LedgerHold do
     GenServer.stop(conn)
   end
 
-  defp with_conn(fun) do
-    conn = connect()
+  @doc "Runs `fun` with a connection of its own on the store's schema (or `schema`)."
+  def with_conn(fun, schema \\ nil) do
+    conn = open(schema)
 
     try do
       fun.(conn)
@@ -91,11 +119,13 @@ defmodule OptimalEngine.Test.LedgerHold do
     end
   end
 
-  defp connect do
+  @doc "A connection (one session) of its own on the store's schema (or `schema`); stop it with `GenServer.stop/1`."
+  def open(schema \\ nil) do
     {:ok, config} = OptimalEngine.Storage.Postgres.config()
 
     schema =
-      Keyword.get(Application.get_env(:optimal_engine, :postgres_store, []), :schema, "public")
+      schema ||
+        Keyword.get(Application.get_env(:optimal_engine, :postgres_store, []), :schema, "public")
 
     {:ok, conn} =
       config

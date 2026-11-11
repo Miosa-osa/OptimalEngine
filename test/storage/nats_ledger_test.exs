@@ -53,14 +53,17 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     name = :"nats_ledger_pub_#{System.unique_integer([:positive])}"
 
     opts =
-      [
-        name: name,
-        connection: ctx.conn,
-        namespace: "optimal",
-        enabled: true,
-        interval_ms: 0,
-        workspaces: [ctx.ws]
-      ] ++ extra
+      Keyword.merge(
+        [
+          name: name,
+          connection: ctx.conn,
+          namespace: "optimal",
+          enabled: true,
+          interval_ms: 0,
+          workspaces: [ctx.ws]
+        ],
+        extra
+      )
 
     start_supervised!({LedgerPublisher, opts}, id: name)
     name
@@ -191,6 +194,151 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     refute Enum.any?(NATSStub.messages(ctx.stub, "OPTIMAL_LEDGER"), &(&1.data =~ "secret"))
   end
 
+  describe "a pass that fails" do
+    defp second_workspace(ctx) do
+      {:ok, ws} =
+        Workspace.create(%{
+          tenant_id: ctx.tenant,
+          organization_id: "#{ctx.tenant}:org",
+          slug: "second",
+          name: "Second"
+        })
+
+      {:ok, _} = Sync.enable(ctx.tenant, ws.id, "user:owner")
+      ws.id
+    end
+
+    # Reads a workspace's changes as `Sync.changes/3` does, except `failing`,
+    # whose read raises or exits as a seal that fails or times out would.
+    defp changes_failing(failing, how) do
+      fn tenant, ws, opts ->
+        if ws == failing do
+          case how do
+            :raise -> raise "seal failed"
+            :exit -> exit({:timeout, {GenServer, :call, [:seal]}})
+          end
+        else
+          Sync.changes(tenant, ws, opts)
+        end
+      end
+    end
+
+    test "keeps the cursors it moved before the failure", ctx do
+      second = second_workspace(ctx)
+      insert_context(ctx, "kept-#{ctx.n}", "Kept")
+      pub = publisher(ctx, workspaces: [ctx.ws, second], changes: changes_failing(second, :raise))
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, _} = LedgerPublisher.publish_now(pub)
+      end)
+
+      status = LedgerPublisher.status(pub)
+      assert status.state == "error"
+      first = Enum.find(status.workspaces, &(&1.workspace_id == ctx.ws))
+      assert is_integer(first.published_through) and first.published_through > 0
+      assert first.backlog == 0
+    end
+
+    test "an exit ends the pass, not the publisher, and failures that keep coming are reported",
+         ctx do
+      pub = publisher(ctx, changes: changes_failing(ctx.ws, :exit))
+      pid = Process.whereis(pub)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        for _ <- 1..4, do: assert({:error, _} = LedgerPublisher.publish_now(pub))
+        assert LedgerPublisher.health(pub) == :ok
+
+        assert {:error, _} = LedgerPublisher.publish_now(pub)
+      end)
+
+      assert Process.whereis(pub) == pid
+      assert %{state: "error", consecutive_failures: 5} = LedgerPublisher.status(pub)
+      assert {:degraded, 5, _last_error} = LedgerPublisher.health(pub)
+    end
+
+    test "a raise on a later page keeps the cursor the earlier pages moved", ctx do
+      insert_context(ctx, "paged-#{ctx.n}", "Paged")
+      calls = :counters.new(1, [])
+
+      # The first page goes out whole and says there is more; the second
+      # holds a change that cannot be encoded, so publishing it raises.
+      changes = fn tenant, ws, opts ->
+        :counters.add(calls, 1, 1)
+        page = Sync.changes(tenant, ws, opts)
+
+        case :counters.get(calls, 1) do
+          1 ->
+            Map.put(page, "more", true)
+
+          _later ->
+            [last | _] = Enum.reverse(page_mutations(tenant, ws))
+
+            bad =
+              last
+              |> Map.put("id", "unencodable-#{ctx.n}")
+              |> Map.put("sequence", last["sequence"] + 1_000_000)
+              |> Map.put("payload", {:not, :json})
+
+            %{page | "mutations" => [bad], "more" => false}
+        end
+      end
+
+      pub = publisher(ctx, changes: changes)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, _} = LedgerPublisher.publish_now(pub)
+      end)
+
+      status = LedgerPublisher.status(pub)
+      assert status.state == "error"
+      ws = Enum.find(status.workspaces, &(&1.workspace_id == ctx.ws))
+      assert is_integer(ws.published_through) and ws.published_through > 0
+      assert ws.backlog == 0
+    end
+
+    defp page_mutations(tenant, ws), do: Sync.changes(tenant, ws, since: 0, limit: 200)["mutations"]
+  end
+
+  test "a publisher that starts again starts healthy", ctx do
+    name = :"nats_ledger_pub_restart_#{ctx.n}"
+    key = {LedgerPublisher, :health, name}
+    :persistent_term.put(key, {:degraded, 7, "the last run's error"})
+    on_exit(fn -> :persistent_term.erase(key) end)
+
+    publisher(ctx, name: name)
+    assert LedgerPublisher.health(name) == :ok
+  end
+
+  test "a publisher that keeps crashing shows degraded; a clean stop adds nothing", ctx do
+    name = :"nats_ledger_pub_crashloop_#{ctx.n}"
+
+    on_exit(fn ->
+      :persistent_term.erase({LedgerPublisher, :health, name})
+      :persistent_term.erase({LedgerPublisher, :run, name})
+    end)
+
+    # The child's id (the helper's own name); the process is registered as `name`.
+    id = publisher(ctx, name: name)
+    assert LedgerPublisher.health(name) == :ok
+
+    # Each kill is a run that ended without stopping; its supervisor starts it again.
+    for _ <- 1..5 do
+      pid = Process.whereis(name)
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 5_000
+      assert eventually(fn -> is_pid(Process.whereis(name)) and Process.whereis(name) != pid end)
+    end
+
+    assert {:degraded, failures, _error} = LedgerPublisher.health(name)
+    assert failures >= 5
+
+    # A clean stop and start keeps the count, and adds no failure of its own.
+    :ok = stop_supervised(id)
+    publisher(ctx, name: name)
+    assert {:degraded, ^failures, _} = LedgerPublisher.health(name)
+  end
+
   test "off unless the ledger flow is enabled, and the inventory says which" do
     previous = {System.get_env("OPTIMAL_NATS_FLOWS"), System.get_env("OPTIMAL_NATS_URL")}
 
@@ -240,6 +388,14 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
     for bad <- ["a.b", "has space", "*", ">", String.duplicate("x", 40), ""] do
       System.put_env("OPTIMAL_NATS_NAMESPACE", bad)
       assert NATS.namespace() == {:error, :invalid_namespace}, bad
+    end
+  end
+
+  defp eventually(check, tries \\ 50) do
+    cond do
+      check.() -> true
+      tries == 0 -> false
+      true -> Process.sleep(50) && eventually(check, tries - 1)
     end
   end
 end

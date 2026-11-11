@@ -55,7 +55,14 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
                       periodic_ms: 1
 
   @batch 10
-  @no_counts %{acked: 0, retried: 0, terminated: 0, failed: 0, dead_lettered: 0}
+  @no_counts %{
+    acked: 0,
+    retried: 0,
+    terminated: 0,
+    failed: 0,
+    dead_lettered: 0,
+    unsent_dropped: 0
+  }
   @expires_ms 2_000
   @idle_ms 1_000
   @max_backoff_ms 600_000
@@ -154,6 +161,7 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
       # Background publishes that did not get through, oldest first.
       unsent: :queue.new(),
       unsent_count: 0,
+      unsent_overflow: 0,
       counts: %{
         published: 0,
         acked: 0,
@@ -383,28 +391,37 @@ defmodule OptimalEngine.Storage.NATS.WorkQueue do
   # likely to reach it. A queue, so a failed publish at the cap costs O(1).
   def keep_unsent(%{unsent_count: count} = state, message) when count >= @max_unsent do
     {_oldest, rest} = :queue.out(state.unsent)
-    dropped = Map.get(state.counts, :unsent_dropped, 0)
+    dropped = state.counts.unsent_dropped
+    # Drops since the list last filled: counted again from 0 once it drains.
+    overflow = Map.get(state, :unsent_overflow, 0)
 
-    # One line when the list first fills, then one per 1,000 dropped.
-    if rem(dropped, 1_000) == 0 do
+    # One line when the list fills, then one per 1,000 dropped.
+    if rem(overflow, 1_000) == 0 do
       Logger.warning(
         "[NATS] #{state.callback.flow()} kept announcements are full (#{@max_unsent}): " <>
-          "the oldest is dropped (#{dropped + 1} so far); its job is announced by a later sweep or run at its worker's next poll"
+          "the oldest is dropped (#{dropped + 1} since start); its job is announced by a later sweep or run at its worker's next poll"
       )
     end
 
-    %{
-      state
-      | unsent: :queue.in(message, rest),
-        counts: Map.put(state.counts, :unsent_dropped, dropped + 1)
-    }
+    state
+    |> Map.put(:unsent, :queue.in(message, rest))
+    |> Map.put(:unsent_overflow, overflow + 1)
+    |> Map.put(:counts, %{state.counts | unsent_dropped: dropped + 1})
   end
 
   def keep_unsent(state, message),
     do: %{state | unsent: :queue.in(message, state.unsent), unsent_count: state.unsent_count + 1}
 
-  defp take_unsent(state),
-    do: {:queue.to_list(state.unsent), %{state | unsent: :queue.new(), unsent_count: 0}}
+  @doc false
+  # What was kept, oldest first, and an empty list: a list that fills again
+  # warns again.
+  def take_unsent(state) do
+    {:queue.to_list(state.unsent),
+     state |> Map.merge(%{unsent: :queue.new(), unsent_count: 0, unsent_overflow: 0})}
+  end
+
+  @doc false
+  def no_counts, do: @no_counts
 
   @doc false
   # A failure that sending the same message again cannot fix: the message is
