@@ -236,7 +236,7 @@ defmodule OptimalEngine.Storage.PolicyStore do
                   device_id, actor_id, entity_type, entity_id, operation,
                   payload, payload_hash, idempotency_key, occurred_at, recorded_at
            FROM sync_mutations
-           WHERE workspace_id = ?1 AND sequence > ?2
+           WHERE workspace_id = ?1 AND sequence > ?2 AND redacted_at IS NULL
            ORDER BY sequence ASC
            LIMIT ?3
            """,

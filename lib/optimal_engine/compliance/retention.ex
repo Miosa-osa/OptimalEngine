@@ -41,6 +41,7 @@ defmodule OptimalEngine.Compliance.Retention do
   alias OptimalEngine.Compliance.{DerivedData, LegalHold, Redact, Reindex}
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
+  alias OptimalEngine.Sync.Redaction
 
   require Logger
 
@@ -79,7 +80,8 @@ defmodule OptimalEngine.Compliance.Retention do
       actions_taken: 0,
       skipped_held: 0,
       errors: 0,
-      deleted_in: MapSet.new()
+      deleted_in: MapSet.new(),
+      erased_in: MapSet.new()
     }
 
     result =
@@ -88,7 +90,7 @@ defmodule OptimalEngine.Compliance.Retention do
         process_targets(targets, policy, tenant_id, dry_run?, acc)
       end)
 
-    {:ok, purge_deleted_workspaces(result)}
+    {:ok, result |> flush_erased_workspaces() |> purge_deleted_workspaces()}
   end
 
   @doc """
@@ -201,8 +203,14 @@ defmodule OptimalEngine.Compliance.Retention do
 
         true ->
           case apply_action(target, policy, tenant_id) do
-            :ok -> acc |> note_deleted(target, policy) |> Map.update!(:actions_taken, &(&1 + 1))
-            _ -> %{acc | errors: acc.errors + 1}
+            :ok ->
+              acc
+              |> note_deleted(target, policy)
+              |> note_erased(target, policy)
+              |> Map.update!(:actions_taken, &(&1 + 1))
+
+            _ ->
+              %{acc | errors: acc.errors + 1}
           end
       end
     end)
@@ -216,6 +224,20 @@ defmodule OptimalEngine.Compliance.Retention do
        do: %{acc | deleted_in: MapSet.put(acc.deleted_in, workspace_id)}
 
   defp note_deleted(acc, _target, _policy), do: acc
+
+  defp note_erased(acc, %{workspace_id: workspace_id}, %{action: action})
+       when is_binary(workspace_id) and action in ["delete", "redact"],
+       do: %{acc | erased_in: MapSet.put(acc.erased_in, workspace_id)}
+
+  defp note_erased(acc, _target, _policy), do: acc
+
+  # What a delete or a redact erased leaves the NATS ledger stream once the sweep
+  # is done: the publisher purges the subjects of the deleted and redacted rows
+  # (`OptimalEngine.Sync.Redaction.flush_nats/1`). The publisher never raises.
+  defp flush_erased_workspaces(%{erased_in: workspaces} = result) do
+    if MapSet.size(workspaces) > 0, do: Redaction.flush_nats(MapSet.to_list(workspaces))
+    Map.delete(result, :erased_in)
+  end
 
   # A workspace whose cache could not be purged counts as an error, so the operator
   # sees it in the report; the purge logs the cause.
@@ -314,20 +336,53 @@ defmodule OptimalEngine.Compliance.Retention do
   # with an unredacted chunk or source package behind it.
   defp rewrite(target, tenant_id, content, l0, l1) do
     with {:ok, _removed} <- DerivedData.delete_derived([target.id]),
-         {:ok, _} <-
-           Store.raw_query(
-             """
-             UPDATE contexts SET content = ?1, l0_abstract = ?2, l1_overview = ?3,
-               metadata = CASE WHEN json_valid(metadata)
-                          THEN json_remove(metadata, '$.source_package_id') ELSE metadata END
-             WHERE id = ?4 AND tenant_id = ?5
-             """,
-             [content, l0, l1, target.id, tenant_id]
-           ) do
+         {:ok, _} <- rewrite_context(target, tenant_id, content, l0, l1) do
       Reindex.context(target.id)
       :ok
     end
   end
+
+  # The unredacted text leaves the replication ledger in the same transaction
+  # (`OptimalEngine.Sync.Redaction.redact_rows/5`): the context's changes so far
+  # become tombstones and, for a workspace that replicates, a redaction request
+  # tells peers to do the same to theirs. It goes before the rewrite, so the
+  # rewrite itself is captured after it and replicates the redacted text.
+  defp rewrite_context(target, tenant_id, content, l0, l1) do
+    Store.transaction(fn txn ->
+      with {:ok, rows} <-
+             Store.txn_query(
+               txn,
+               "SELECT workspace_id FROM contexts WHERE id = ?1 AND tenant_id = ?2",
+               [target.id, tenant_id]
+             ),
+           :ok <- redact_ledger(txn, rows, target.id, tenant_id),
+           {:ok, _} <-
+             Store.txn_execute(
+               txn,
+               """
+               UPDATE contexts SET content = ?1, l0_abstract = ?2, l1_overview = ?3,
+                 metadata = CASE WHEN json_valid(metadata)
+                            THEN json_remove(metadata, '$.source_package_id') ELSE metadata END
+               WHERE id = ?4 AND tenant_id = ?5
+               """,
+               [content, l0, l1, target.id, tenant_id]
+             ) do
+        {:ok, :rewritten}
+      end
+    end)
+  end
+
+  defp redact_ledger(txn, [[workspace_id]], id, tenant_id) when is_binary(workspace_id) do
+    {:ok, _} =
+      Redaction.redact_rows(txn, workspace_id, "contexts", [id],
+        tenant_id: tenant_id,
+        reason: "retention_redact"
+      )
+
+    :ok
+  end
+
+  defp redact_ledger(_txn, _rows, _id, _tenant_id), do: :ok
 
   # Audit trace: best-effort. A failure here is logged but never
   # propagates — a trace insert failure must NOT make a successful

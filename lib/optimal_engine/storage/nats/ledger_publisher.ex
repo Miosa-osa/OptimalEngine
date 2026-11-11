@@ -80,7 +80,14 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   tombstone. The create or update the forget covers is withheld on that pass
   too, so nothing erased goes back. This is the same on either store.
 
-  A workspace archived or removed (`forget_workspace/4`) has its whole subject
+  A row whose content an erasure emptied while the row stays (a context
+  redacted in place, a forgotten memory) is named by a redaction request
+  (`ledger_redactions`, `OptimalEngine.Sync.Redaction`): every message on that
+  row's subject is purged before the request goes out. The changes the
+  redaction rewrote in the ledger are never served (`Sync.changes/3`), so they
+  are never published again either.
+
+  A workspace archived, moved or removed (`forget_workspace/4`) has its whole subject
   tree purged. The request is an `events` row (`nats_purge_requested`) written
   first and done when NATS is reachable (now, or on a later pass); its
   completion is an `events` row (`nats_purge`,
@@ -185,6 +192,33 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   end
 
   @doc """
+  Purges the messages of single rows of a workspace (`rows` as
+  `[table, entity_id]`): a row an erasure deleted while its workspace did not
+  replicate has no delete in the ledger, so no tombstone would ever purge its
+  subject. Recorded and done as `forget_workspace/4` is: now when NATS is
+  reachable, else on a later pass. Never raises and never fails the caller.
+  """
+  @spec forget_rows(GenServer.server(), String.t(), String.t(), [[String.t()]], String.t()) ::
+          {:ok, map()}
+  def forget_rows(server, tenant_id, workspace_id, rows, reason)
+
+  def forget_rows(_server, _tenant_id, _workspace_id, [], _reason),
+    do: {:ok, %{messages_purged: 0}}
+
+  def forget_rows(server, tenant_id, workspace_id, rows, reason) do
+    GenServer.call(server, {:forget_rows, tenant_id, workspace_id, rows, reason}, 15_000)
+  catch
+    :exit, _ ->
+      with true <- NATS.flow?(@flow),
+           {:ok, namespace} <- NATS.namespace() do
+        request_purge(namespace, tenant_id, workspace_id, reason, rows)
+        {:ok, %{pending: true}}
+      else
+        _ -> {:ok, %{state: "off"}}
+      end
+  end
+
+  @doc """
   What an operator sees: `state` (`off`, `invalid_namespace`, `buffering`,
   `publishing`, `caught_up`, `error`), the stream, the changes published and
   the messages purged since start, the workspace purges still waiting on
@@ -282,9 +316,25 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   def handle_call({:forget_workspace, _tenant, _ws, _reason}, _from, %{enabled: false} = state),
     do: {:reply, {:ok, %{state: "off"}}, state}
 
+  def handle_call({:forget_rows, _tenant, _ws, _rows, _reason}, _from, %{enabled: false} = state),
+    do: {:reply, {:ok, %{state: "off"}}, state}
+
+  def handle_call({:forget_rows, tenant, ws, rows, reason}, _from, state) do
+    id = request_purge(state.namespace, tenant, ws, reason, rows)
+    run_requested(id, state)
+  end
+
   def handle_call({:forget_workspace, tenant, ws, reason}, _from, state) do
     id = request_purge(state.namespace, tenant, ws, reason)
+    run_requested(id, state)
+  end
 
+  def handle_call(:status, _from, state) do
+    status_reply(state)
+  end
+
+  # A purge just requested, done now when NATS is reachable.
+  defp run_requested(id, state) do
     with {:ok, state} <- provision(state) do
       {done, state} = process_requests(state)
 
@@ -301,7 +351,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
     end
   end
 
-  def handle_call(:status, _from, state) do
+  defp status_reply(state) do
     {:reply,
      %{
        state: state.state,
@@ -544,6 +594,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
     |> Enum.reduce_while({:ok, @empty}, fn {mutation, index}, {:ok, counts} ->
       result =
         cond do
+          redaction?(mutation) -> redact(state, workspace, mutation)
           forget?(mutation) -> forget(state, workspace, mutation)
           forgotten_later?(mutation, forgets) -> {:ok, :withheld}
           true -> publish(state, workspace, mutation, mutation)
@@ -580,6 +631,30 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
       {:ok, {:forgot, purged}}
     end
   end
+
+  # A redaction request (`OptimalEngine.Sync.Redaction`) names a row whose
+  # content was erased while the row stays: every message of that row's subject
+  # is purged, then the request goes out on its own subject, so a subscriber
+  # learns of it. It carries a table name, an id and constants, no content.
+  defp redact(state, workspace, mutation) do
+    row = get_in(mutation, ["payload", "row"]) || %{}
+
+    target = %{
+      "entity_type" => OptimalEngine.Sync.Lineage.table_for_type(row["target_type"]) || "_",
+      "entity_id" => row["entity_id"]
+    }
+
+    with {:ok, purged} <-
+           JetStream.purge(state.connection, stream(state), row_subject(state, workspace, target)),
+         {:ok, _ack} <- publish(state, workspace, mutation, mutation) do
+      {:ok, {:forgot, purged}}
+    end
+  end
+
+  defp redaction?(%{"entity_type" => "ledger_redactions", "operation" => op}),
+    do: op in ["create", "update"]
+
+  defp redaction?(_mutation), do: false
 
   # A delete carries the row's key already; a forgotten memory keeps its id
   # and the flag, nothing it said.
@@ -694,7 +769,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
   # Workspace purges: requested in `events`, done when NATS is reachable.
   # ---------------------------------------------------------------------------
 
-  defp request_purge(namespace, tenant, ws, reason) do
+  defp request_purge(namespace, tenant, ws, reason, rows \\ nil) do
     {:ok, [[id]]} =
       Store.raw_query(
         """
@@ -704,13 +779,15 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
         [
           tenant,
           "workspace:" <> ws,
-          Jason.encode!(%{
+          %{
             flow: "ledger",
             namespace: namespace,
             tenant_id: tenant,
             workspace_id: ws,
             reason: reason
-          })
+          }
+          |> then(&if(rows, do: Map.put(&1, :rows, rows), else: &1))
+          |> Jason.encode!()
         ]
       )
 
@@ -746,7 +823,7 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
       workspace = {meta["tenant_id"], meta["workspace_id"]}
       filter = workspace_subjects(state, workspace)
 
-      case JetStream.purge(state.connection, stream(state), filter) do
+      case purge_request(state, workspace, filter, meta["rows"]) do
         {:ok, purged} ->
           record_event(meta["tenant_id"], "nats-purge-request:#{id}", %{
             flow: "ledger",
@@ -763,6 +840,27 @@ defmodule OptimalEngine.Storage.NATS.LedgerPublisher do
           Logger.warning("[NATS] workspace purge #{id} not done yet: #{inspect(reason)}")
           {done, state}
       end
+    end)
+  end
+
+  # A request for single rows purges each row's subject; any other the
+  # workspace's whole tree.
+  defp purge_request(state, _workspace, filter, nil),
+    do: JetStream.purge(state.connection, stream(state), filter)
+
+  defp purge_request(state, workspace, _filter, rows) when is_list(rows) do
+    Enum.reduce_while(rows, {:ok, 0}, fn
+      [table, entity], {:ok, total} ->
+        subject =
+          row_subject(state, workspace, %{"entity_type" => table, "entity_id" => entity})
+
+        case JetStream.purge(state.connection, stream(state), subject) do
+          {:ok, n} -> {:cont, {:ok, total + n}}
+          error -> {:halt, error}
+        end
+
+      _other, acc ->
+        {:cont, acc}
     end)
   end
 
