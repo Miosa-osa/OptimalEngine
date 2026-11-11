@@ -15,6 +15,7 @@ defmodule OptimalEngine.Storage.QdrantProjectionHardeningTest do
   alias OptimalEngine.Store
   alias OptimalEngine.Store.Vectors
   alias OptimalEngine.Sync, as: PeerSync
+  alias OptimalEngine.Test.StoreDDL
   alias OptimalEngine.TestSupport.QdrantStub
   alias OptimalEngine.{Maintenance, Organization, Workspace}
   alias OptimalEngine.Tenancy.Tenant
@@ -343,14 +344,18 @@ defmodule OptimalEngine.Storage.QdrantProjectionHardeningTest do
     [a, b, c, d, e] |> Enum.map(&Base.encode16(&1, case: :lower)) |> Enum.join("-")
   end
 
-  # Runs `fun` while no removal can be recorded.
+  # Runs `fun` while no removal can be recorded: a trigger refuses every
+  # insert into the records, on either store (`StoreDDL`).
   defp without_removals(fun) do
-    {:ok, _} = Store.raw_query("ALTER TABLE qdrant_pending_removals RENAME TO qpr_hidden", [])
+    StoreDDL.execute!(
+      "CREATE TRIGGER qpr_refuse_insert BEFORE INSERT ON qdrant_pending_removals " <>
+        "BEGIN SELECT RAISE(ABORT, 'removal refused by the test'); END"
+    )
 
     try do
       fun.()
     after
-      {:ok, _} = Store.raw_query("ALTER TABLE qpr_hidden RENAME TO qdrant_pending_removals", [])
+      StoreDDL.execute!("DROP TRIGGER IF EXISTS qpr_refuse_insert")
     end
   end
 
