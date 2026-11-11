@@ -20,6 +20,12 @@ defmodule OptimalEngine.Storage.OpenBaoTokenRenewerTest do
 
   setup do
     previous = Map.new(@env, &{&1, System.get_env(&1)})
+    # The application's own renewer, if a test before left one running, reads
+    # the same environment: it would renew against this test's stub and log
+    # the same warnings. It goes first; restarted after with the environment
+    # restored (which starts it as :ignore when OpenBao is not configured).
+    OptimalEngine.Test.OpenBaoRenewer.stop_app_renewer()
+    on_exit(&OptimalEngine.Test.OpenBaoRenewer.restart_app_renewer/0)
     # Tokens here live seconds, not hours: renew as often as they need.
     Application.put_env(:optimal_engine, :openbao_renew_floor_ms, 100)
     on_exit(fn -> Application.delete_env(:optimal_engine, :openbao_renew_floor_ms) end)
