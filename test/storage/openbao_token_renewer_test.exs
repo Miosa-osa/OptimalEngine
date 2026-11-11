@@ -15,8 +15,17 @@ defmodule OptimalEngine.Storage.OpenBaoTokenRenewerTest do
 
   @env ~w(OPTIMAL_OPENBAO_ADDR OPTIMAL_OPENBAO_TOKEN)
 
+  # Each captured line names the process that logged it (`said/3`).
+  @own_log [format: "$metadata$message\n", metadata: [:pid]]
+
   setup do
     previous = Map.new(@env, &{&1, System.get_env(&1)})
+    # The application's own renewer, if a test before left one running, reads
+    # the same environment: it would renew against this test's stub and log
+    # the same warnings. It goes first; restarted after with the environment
+    # restored (which starts it as :ignore when OpenBao is not configured).
+    OptimalEngine.Test.OpenBaoRenewer.stop_app_renewer()
+    on_exit(&OptimalEngine.Test.OpenBaoRenewer.restart_app_renewer/0)
     # Tokens here live seconds, not hours: renew as often as they need.
     Application.put_env(:optimal_engine, :openbao_renew_floor_ms, 100)
     on_exit(fn -> Application.delete_env(:optimal_engine, :openbao_renew_floor_ms) end)
@@ -39,6 +48,19 @@ defmodule OptimalEngine.Storage.OpenBaoTokenRenewerTest do
     stub
   end
 
+  # How many lines this renewer logged that contain `text`. Counted by the
+  # logging process (the `pid` metadata), never the whole log: another
+  # renewer (the application's own, started by an earlier test with OpenBao
+  # configured) reads the same environment, reaches the same stub and may
+  # log the same warning meanwhile.
+  defp said(log, pid, text) do
+    owner = "pid=" <> to_string(:erlang.pid_to_list(pid))
+
+    log
+    |> String.split("\n")
+    |> Enum.count(&(String.contains?(&1, owner) and String.contains?(&1, text)))
+  end
+
   defp renewals(stub),
     do: Enum.count(OpenBaoStub.requests(stub), &(&1 == {"POST", "/v1/auth/token/renew-self"}))
 
@@ -57,15 +79,16 @@ defmodule OptimalEngine.Storage.OpenBaoTokenRenewerTest do
     stub =
       start(token_ttl: 2, renewable: true, renew_ttls: [2, 1, 1, 1], explicit_max_ttl: 4)
 
-    log =
-      capture_log(fn ->
+    {pid, log} =
+      with_log(@own_log, fn ->
         pid = start_supervised!({TokenRenewer, name: nil})
         Process.sleep(2_500)
         assert Process.alive?(pid)
+        pid
       end)
 
     assert renewals(stub) <= 3
-    assert length(String.split(log, "stopped growing")) == 2
+    assert said(log, pid, "stopped growing") == 1
     refute log =~ stub.token
   end
 
@@ -94,30 +117,32 @@ defmodule OptimalEngine.Storage.OpenBaoTokenRenewerTest do
     Application.put_env(:optimal_engine, :openbao_renew_floor_ms, 30_000)
     stub = start(token_ttl: 1, renewable: true)
 
-    log =
-      capture_log(fn ->
+    {pid, log} =
+      with_log(@own_log, fn ->
         pid = start_supervised!({TokenRenewer, name: nil})
         TokenRenewer.check(pid)
         Process.sleep(1_200)
+        pid
       end)
 
     assert renewals(stub) == 0
-    assert length(String.split(log, "too short to renew")) == 2
+    assert said(log, pid, "too short to renew") == 1
     refute log =~ stub.token
   end
 
   test "a token that cannot be renewed is logged once, and never renewed" do
     stub = start(token_ttl: 3_600, renewable: false)
 
-    log =
-      capture_log(fn ->
+    {pid, log} =
+      with_log(@own_log, fn ->
         pid = start_supervised!({TokenRenewer, name: nil})
         TokenRenewer.check(pid)
         TokenRenewer.check(pid)
         _ = TokenRenewer.status(pid)
+        pid
       end)
 
-    assert length(String.split(log, "not renewable")) == 2
+    assert said(log, pid, "not renewable") == 1
     assert log =~ "OPTIMAL_OPENBAO_TOKEN"
     refute log =~ stub.token
     assert renewals(stub) == 0

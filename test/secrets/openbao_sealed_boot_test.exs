@@ -45,6 +45,10 @@ defmodule OptimalEngine.Secrets.OpenBaoSealedBootTest do
       OpenBaoStub.stop(stub)
       # Leave the application running for the rest of the suite whatever happened.
       {:ok, _} = Application.ensure_all_started(:optimal_engine)
+      # The restart in the test started the token renewer against this stub;
+      # with OpenBao unconfigured again it starts as :ignore, so no renewer
+      # of this test outlives it (it would reach the next test's stub).
+      OptimalEngine.Test.OpenBaoRenewer.restart_app_renewer()
     end)
 
     Enum.each(@references, fn {name, ref} -> System.put_env(name, ref) end)
