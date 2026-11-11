@@ -563,3 +563,4 @@ unordered	SELECT id, uri, title, node, genre, signal_type, sn_ratio, modified_at
 refused	SELECT id, tenant_id, workspace_id, kind, payload, status, priority, run_at, attempts, max_attempts, lease_owner, lease_expires_at, idempotency_key, last_error, inserted_at, updated_at, completed_at FROM jobs WHERE workspace_id = ? AND status = ? ORDER BY inserted_at DESC, rowid DESC LIMIT ?
 refused	SELECT id, tenant_id, workspace_id, kind, payload, status, priority, run_at, attempts, max_attempts, lease_owner, lease_expires_at, idempotency_key, last_error, inserted_at, updated_at, completed_at FROM jobs WHERE workspace_id = ? ORDER BY inserted_at DESC, rowid DESC LIMIT ?
 refused	SELECT id, workspace_id, kind, status, priority, run_at, attempts, max_attempts, last_error, updated_at FROM jobs WHERE workspace_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT ?
+refused	SELECT m.name, p."…" FROM sqlite_master m, pragma_foreign_key_list(m.name) p WHERE m.type = '…'
