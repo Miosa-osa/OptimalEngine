@@ -69,7 +69,7 @@ defmodule OptimalEngine.Sync.Capture do
   @engine_state ~w(sync_capture sync_mutations sync_cursors sync_workspaces sync_peers sync_conflicts
                    sync_runs sync_local_stamp metric_samples uri_redirects federation_peers connectors
                    connector_runs processor_runs jobs dead_letter_jobs workspaces workspace_handles
-                   graph_backfills)
+                   graph_backfills qdrant_pending_removals)
 
   # Per-Engine as well, but a workspace bundle carries them (a move takes the
   # workspace's whole state). Each is here for a reason:

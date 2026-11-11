@@ -6,19 +6,30 @@ defmodule OptimalEngine.Storage.Qdrant.Adapter do
   reports `qdrant` as implemented, configured and healthy instead of
   `adapter_missing`. Health is claimed only on evidence: the collections
   endpoint answered with the key. Nothing here returns, logs or embeds the key.
+
+  A healthy Qdrant is `active` while the Engine serves from it: every embedding
+  is mirrored to it and vector search reads it
+  (`OptimalEngine.Storage.Qdrant.Projection`). With `OPTIMAL_QDRANT_SERVING=off`
+  it is reached and proved but `available` only.
   """
 
   @behaviour OptimalEngine.Storage.Provider
 
   alias OptimalEngine.Storage.Qdrant
+  alias OptimalEngine.Storage.Qdrant.Projection
 
   @capabilities ~w(vector)a
+  @serves ~w(embedding_projection vector_search memory_search)
 
   @impl OptimalEngine.Storage.Provider
   def id, do: "qdrant"
 
   @impl OptimalEngine.Storage.Provider
   def capabilities, do: @capabilities
+
+  @doc "What the Engine keeps on and reads from Qdrant while the projection is on."
+  @spec serves() :: [String.t()]
+  def serves, do: @serves
 
   @impl OptimalEngine.Storage.Provider
   def describe do
@@ -28,9 +39,14 @@ defmodule OptimalEngine.Storage.Qdrant.Adapter do
       kind: "service",
       role: "projection",
       capabilities: Enum.map(@capabilities, &Atom.to_string/1),
-      operations: ~w(collection_create upsert search collection_delete),
+      serves: @serves,
+      operations:
+        ~w(collection_create payload_index upsert search count scroll points_delete collection_delete),
       protocol: "REST over HTTP(S); api-key header when OPTIMAL_QDRANT_API_KEY is set",
-      durability: "a projection: every collection is rebuilt from the canonical stores"
+      durability: "a projection: every collection is rebuilt from the canonical stores",
+      data_path:
+        "mirrors the vector, chunk and memory embeddings; serves vector and memory search, " <>
+          "each candidate verified against SQLite, falling back to the embedded vectors"
     }
   end
 
@@ -51,7 +67,8 @@ defmodule OptimalEngine.Storage.Qdrant.Adapter do
       health: Atom.to_string(health),
       lifecycle_state: lifecycle_state(configured, health),
       capabilities: Enum.map(@capabilities, &Atom.to_string/1),
-      api_key_configured: key_configured?()
+      api_key_configured: key_configured?(),
+      serving: Projection.status()
     }
   end
 
@@ -78,7 +95,10 @@ defmodule OptimalEngine.Storage.Qdrant.Adapter do
   end
 
   defp lifecycle_state(false, _health), do: "not_configured"
-  defp lifecycle_state(true, :healthy), do: "available"
+
+  defp lifecycle_state(true, :healthy),
+    do: if(Projection.enabled?(), do: "active", else: "available")
+
   defp lifecycle_state(true, :unknown), do: "configured_unverified"
   defp lifecycle_state(true, _health), do: "unavailable"
 

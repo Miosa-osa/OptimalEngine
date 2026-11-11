@@ -47,7 +47,7 @@ A platform that needs a provider to hold data checks `data_path == "serving"`, a
 Provider status never returns credentials, connection strings, or secret values; only the names of the environment variables a provider reads.
 
 Today `s3` and `postgres` are the service providers with an adapter.
-`valkey` and `nats_jetstream` have adapters and report `not_configured`, `available` or `unavailable` like `s3`; `qdrant`, `openbao` and `duckdb` have one too; `fractal` is declared and reports `adapter_missing` until an adapter ships.
+`valkey` and `nats_jetstream` have adapters and report `not_configured`, `available` or `unavailable` like `s3`; `openbao` and `duckdb` have one too; `qdrant` reports `active` when it answered and the Engine serves from it (see [Qdrant Projection](#qdrant-projection)); `fractal` is declared and reports `adapter_missing` until an adapter ships.
 
 `sqlite` and `postgres` are canonical stores, and an engine runs exactly one of them.
 The choice is made when the Engine boots (`OPTIMAL_STORE`), so both report `selected`: `true` for the store this Engine runs and `false` for the other.
@@ -336,6 +336,95 @@ mix optimal.restore --from-offsite-key backups/default/scheduled-20261019T000012
 
 Every chunk is authenticated and the plaintext must match the checksum sealed into the object before the usual restore checks run.
 Only sealed copies restore this way.
+
+## Qdrant Projection
+
+Qdrant holds a projection of the Engine's embeddings and serves vector search from it.
+SQLite stays the truth: every collection can be dropped and rebuilt from the canonical stores.
+
+```text
+OPTIMAL_QDRANT_URL                 http(s) base URL; setting it turns the projection on
+OPTIMAL_QDRANT_API_KEY             sent as the api-key header when the server asks for one
+OPTIMAL_QDRANT_COLLECTION_PREFIX   collection name prefix; default oe_<this Engine's replica id>
+OPTIMAL_QDRANT_SERVING             off (or false, 0) stops mirroring and serving; erasures still reach Qdrant
+```
+
+What it holds:
+
+| Kind | Rows | Collection | Payload |
+| --- | --- | --- | --- |
+| `contexts` | `vectors` whose context exists | `<prefix>_contexts_<dims>` | `engine_id`, `context_id`, `tenant_id`, `workspace_id` (the context's) |
+| `chunks` | `chunk_embeddings` whose chunk exists | `<prefix>_chunks_<dims>` | `engine_id`, `chunk_id`, `context_id`, `scale`, `model`, `tenant_id`, `workspace_id` |
+| `memories` | `memory_embeddings` of latest, unforgotten memories | `<prefix>_memories_<dims>` | `engine_id`, `memory_id`, `model`, `tenant_id`, `workspace_id` |
+
+These are exactly the rows the embedded search can return, so what is mirrored and what is counted are the same rows; a row with no workspace is neither.
+A collection has one vector size, so each kind has one collection per dimension, with cosine distance.
+Workspaces share the collections and are kept apart by a payload filter on `workspace_id` (and `tenant_id` and `model` for memories), each with a keyword index.
+A point's id is a UUID derived from this Engine's id and the row's key (SHA-256 of the `engine_id`, the kind and the id, and the model for a memory), and the key is in the payload, so the same row of the same Engine always lands on the same point, and two peer-synced Engines that hold the same row never write the same point.
+An earlier build left the Engine out of the id; after an upgrade the count comparison sees each row twice, falls back to the embedded vectors and queues a sync, which writes the new ids and sweeps the old ones.
+
+### Engines sharing a Qdrant
+
+Each Engine owns its points, by name and by payload.
+The default prefix is `oe_` and the hex of the Engine's replica id (`sync_identity.replica_id`, made once when its store is created and kept by backups), so two Engines never share a collection unless an operator gives them the same `OPTIMAL_QDRANT_COLLECTION_PREFIX`.
+Every point also carries `engine_id`, the replica id, and every count, search, orphan sweep and delete the Engine sends filters on it, so even Engines under one prefix never read, count or remove each other's points.
+A prefix must be lower case letters, digits, `_` and `-`, at most 64 characters: with `OPTIMAL_QDRANT_URL` set an invalid one stops the Engine at boot, and is never replaced by a default; without a URL it is unused and only reported.
+The inventory's `serving.config_error` names `invalid_prefix` (or `no_engine_identity`) when the projection cannot run.
+
+### Writes
+
+Mirrors leave the write path.
+A stored vector, a chunk embedding batch and a memory embedding are queued after the SQLite write succeeds, and one process applies the queue in order, reading each row as it is then and upserting it; a write returns without waiting for Qdrant.
+Past 10,000 queued mirrors (`config :optimal_engine, :qdrant_projection, max_queue:`) a mirror is dropped and its workspace marked dirty, so a burst never blocks a request; a workspace already marked writes nothing more to the store, and a chunk embedding batch that spans workspaces marks each of them.
+A point written this way reaches Qdrant moments after the row; until it does, Qdrant-served search can miss that one change.
+
+A failed mirror never fails the write.
+It marks the workspace dirty and queues a `maintenance.qdrant_sync` job for it.
+A dirty workspace, and one with a sync queued or running, is searched through the embedded vectors until the sync completes, so a vector Qdrant could not replace (a re-embed during an outage, whose count stays the same) is never searched there.
+A completed sync clears only the marks made before it began; a workspace marked while it ran gets a follow-up pass from the same job.
+The mark is in memory and the job is durable: after a restart the queued job keeps the workspace on the embedded vectors until it has run. While a mark stays, the projection's retry timer queues the workspace's job again (one queued or running is found, not duplicated), so a job that died never leaves a workspace stale.
+
+Removals are durable and never wait on Qdrant.
+A deleted vector, a memory forgotten or hard deleted (every version of its chain, and the source chunk the erasure deleted with it), a memory version superseded by a new one, a context deleted (`Store.delete_context/1`), a row a peer's change deleted or made unsearchable, an archived workspace and a workspace moved to another Engine are written to `qdrant_pending_removals` (migration 89) and the request returns; the projection process applies each in order, behind the mirrors queued before it, and deletes the record once Qdrant has deleted the points.
+Where a transaction deletes the rows (a forget, a hard delete, an update, a context delete, a peer's batch, an archive), the record is written in that transaction, so the rows never go without it: a forget or an archive whose record cannot be written is not done.
+A removal Qdrant refuses stays recorded: the projection retries it on a timer (`retry_interval_ms`, one minute, and once at boot), queues a sync for an active workspace, and every sync retries the records first, then goes on whatever they answer.
+One refused `max_removal_attempts` times (100) is dead: kept with `dead_at` set, logged, and retried no more, so it never holds up the others or a sync; the orphan sweep of a full sync removes its points.
+Before a retry deletes anything it checks which of the named rows are searchable again (a vector stored anew, a workspace no longer archived) and leaves their points alone.
+Removals run whenever a Qdrant URL is configured, serving or not, and only ever name the Engine's own points.
+`OptimalEngine.Storage.Qdrant.Projection.remove_memories/2` is the durable removal of memories' points, of every model; a path that deletes rows in a transaction records it there with `OptimalEngine.Storage.Qdrant.Removals.record_in/5`.
+
+A row in an archived workspace is not searchable: it is neither mirrored nor counted, and the sync removes its points, so neither a sync nor a drift repair brings an archived workspace's vectors back.
+
+An erasure cannot wait for a retry.
+It deletes the context's points (its vector and its chunks' vectors) in the caller, never behind the mirror queue, within the request timeout (`timeout`, 5 seconds), before it deletes the rows; when Qdrant cannot delete them, or does not answer in time, the erasure stops with `qdrant_delete_failed` and the rows stay, as it does when the object store cannot.
+After the rows are gone it records the same removal again, which takes a point a mirror put back between the two.
+
+### Reads
+
+`Store.Vectors.search/2` (the vector hop of hybrid search) and the durable memory search ask Qdrant for candidates only while the workspace is not dirty and Qdrant holds exactly as many of the Engine's points in the searched scope as SQLite holds searchable rows.
+The comparison is kept for two minutes per scope (`config :optimal_engine, :qdrant_projection, count_ttl_ms:`); the local count reads indexes (contexts by workspace joined to the vector key, memory embeddings by scope), never the vectors.
+Every candidate is read back from SQLite in the searched workspace, with the type and node filters, and for memories only the latest and not forgotten, then scored with the same similarity over the stored vector.
+So the results have the same shape, filters and scores as the embedded search; a point whose row was deleted or moved is dropped.
+A search whose filters leave too few candidates in five pages, a request that fails, or a workspace whose counts differ reads the embedded vectors instead; a search of a dimension Qdrant has no collection for falls back without marking Qdrant unhealthy.
+A scope the store holds no searchable rows of while Qdrant still holds points there queues a sync, and since equal counts do not prove equal sets, a workspace whose counts agree is synced anyway once a day (`verify_interval_ms`).
+Chunk reranking of the full-text candidates still reads `chunk_embeddings`: it scores only those candidates, never the whole workspace.
+
+### Sync
+
+Counts that differ, from a mirror that failed or a delete that cascaded in SQLite, queue a `maintenance.qdrant_sync` job for the workspace.
+The same work runs by hand, idempotently:
+
+```bash
+mix optimal.qdrant_sync [--workspace <id>] [--batch 2000]
+bin/optimal maintenance qdrant_sync [--workspace <id>]      # in a release, Engine stopped
+```
+
+It upserts every searchable row, then deletes every one of the Engine's points whose row is gone, moved to another workspace, superseded, forgotten, or of another dimension.
+A completed pass clears the dirty marks made before it began. A run that finds Qdrant healthy forgets an unhealthy spell cached before it, and writes refused because Qdrant turned unhealthy during the run defer the job rather than fail it.
+Run it once after pointing an Engine that already holds vectors at Qdrant.
+
+`GET /api/storage/providers/qdrant?probe=true` reports `active` and `data_path: "serving"` (with `serves` `embedding_projection`, `vector_search`, `memory_search`) when Qdrant answered and the projection is on, and `available` with `data_path: "standby"` under `OPTIMAL_QDRANT_SERVING=off`.
+Its `serving` field gives the prefix, any configuration error, the cached health, the number of dirty workspaces, of pending removals and of dead ones, and counters since boot: points upserted and deleted, mirrors dropped past the queue limit, write failures, searches served and fallen back, and count differences found.
 
 ## Storage Mutations
 
@@ -649,7 +738,7 @@ Providers are what a deployment grows onto, and this table is the status of each
 | `postgres` | Wired | The canonical relational store of an Engine started with `OPTIMAL_STORE=postgres` | Nothing the SQLite store has (see [PostgreSQL Provider](postgres-provider.md)) |
 | `nats_jetstream` | Wired | The probe and the proof, a supervised JetStream client that reconnects with backoff, and with `OPTIMAL_NATS_FLOWS` the change ledger published as a stream per workspace subject, background jobs dispatched through a work queue, and connector intake queued | Replication between Engines does not use it (see "Replication over NATS: not implemented") |
 | `valkey` | Wired, in the data path | The probe (PING), the proof (set, get, delete), and, over a supervised connection pool, the API and connector rate limits, the verified API key cache and the sync gate cache ([Valkey](#valkey)), over `OPTIMAL_VALKEY_URL`, TLS with `rediss://` | Durable data: everything in it can be lost, and is rebuilt or falls back to ETS |
-| `qdrant` | Wired | The probe (list collections with the key) and the proof (a collection created, a point upserted, searched and read back, the collection deleted) over `OPTIMAL_QDRANT_URL` | The Engine's vector search still reads the embedded vectors |
+| `qdrant` | Wired, serving | Every vector, chunk and memory embedding mirrored; vector search and durable memory search read it, verified against the canonical store, with the embedded vectors as the fallback; `mix optimal.qdrant_sync` and the `maintenance.qdrant_sync` job; the probe and the proof over `OPTIMAL_QDRANT_URL` | Chunk reranking of full-text candidates still reads `chunk_embeddings` (it is bounded to the candidates) |
 | `duckdb` (DuckDB and Parquet) | Wired | The probe (a query through the `duckdb` executable against a writable `OPTIMAL_ANALYTICS_PATH`), the proof (a Parquet file written and read back), the daily Parquet export of each workspace's metrics, sync runs, ledger and usage, and the read-only `GET /api/analytics/query` over them, and the Engine-wide metrics behind admin-only routes (see [DuckDB And Parquet Analytics](#duckdb-and-parquet-analytics)) | Arbitrary SQL; any dataset beyond the four, and beyond `metrics` for the Engine |
 | `openbao` | Wired, in the data path | Secret references for the backup, authority, connector, S3, Qdrant, Valkey and NATS credentials; connector credentials kept in KV instead of the database (opt in, not in Engine backups); backup data keys wrapped by transit beside `OPTIMAL_BACKUP_KEY`; the probe (unsealed, token accepted) and the proof (a KV v2 secret written under `optimal/proof/`, read back and deleted) over `OPTIMAL_OPENBAO_ADDR` ([OpenBao](#openbao)) | PKI; the OpenBao token itself still comes from the environment; a peer key is a value sealed with `CONNECTOR_KEY` in the database, never a reference |
 | `fractal` | Declared, no adapter yet | | Everything |
@@ -900,7 +989,7 @@ The scripts need a standalone Valkey (or Redis 7 or later); Valkey Cluster is no
 
 ## What Is Not Implemented
 
-The Engine has no adapter for Fractal, and the provider inventory says so; Qdrant is reached and proved, but no Engine feature is served from it yet; NATS JetStream carries the flows named in `OPTIMAL_NATS_FLOWS` (the change ledger, background jobs, connector intake) on either canonical store; OpenBao serves secret references and backup key wrapping; DuckDB serves the workspace analytics export and query, and nothing else.
+The Engine has no adapter for Fractal, and the provider inventory says so; Qdrant serves vector search when `OPTIMAL_QDRANT_URL` is set (see [Qdrant Projection](#qdrant-projection)); NATS JetStream carries the flows named in `OPTIMAL_NATS_FLOWS` (the change ledger, background jobs, connector intake) on either canonical store; OpenBao serves secret references and backup key wrapping; DuckDB serves the workspace analytics export and query, and nothing else.
 Valkey carries the rate limits and caches listed under [Valkey](#valkey) and nothing durable.
 PostgreSQL holds the canonical relational store with every feature of the SQLite store, and an existing Engine's data moves to it with `mix optimal.postgres.migrate` (stage 4 of [PostgreSQL Provider](postgres-provider.md)).
 An embedded deployment remains the default, and no provider is activated by configuration alone: canonical store changes and cross-workspace routing are reviewed deployment decisions, and `OptimalEngine.Storage.Planner` reports a plan that selects a provider without an adapter as not ready.

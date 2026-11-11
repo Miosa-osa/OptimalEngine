@@ -4,12 +4,19 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
 
   Canonical memory content remains in `memories`.
   This projection is workspace scoped and can be deleted and rebuilt safely.
+
+  With the Qdrant projection enabled (`OptimalEngine.Storage.Qdrant.Projection`)
+  every embedding put here is mirrored to Qdrant, and `search/2` takes its
+  candidates from Qdrant, reading each back from SQLite (tenant, workspace,
+  model, latest and not forgotten) and scoring it here before it counts.
   """
 
   alias OptimalEngine.Embed.Text, as: TextEmbedder
   alias OptimalEngine.Memory.Versioned
   alias OptimalEngine.Memory.Versioned.RetrievalDocument
   alias OptimalEngine.Store
+  alias OptimalEngine.Storage.Qdrant.Projection
+  alias OptimalEngine.Storage.Qdrant.Search, as: QdrantSearch
   alias OptimalEngine.Store.Replace
 
   @fallback_model "nomic-embed-text"
@@ -111,8 +118,13 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
            {:blob, blob},
            content_hash(Keyword.get(opts, :projection_content, memory.content))
          ]) do
-      {:ok, _} -> :ok
-      {:error, _} = error -> error
+      {:ok, _} ->
+        # The projection follows the canonical write and never fails it.
+        Projection.mirror(:memories, [{memory.id, model}], workspace_id: memory.workspace_id)
+        :ok
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -132,13 +144,47 @@ defmodule OptimalEngine.Memory.Versioned.Embeddings do
       AND m.is_latest = 1 AND m.is_forgotten = 0
     """
 
-    with {:ok, rows} <- Store.raw_query(sql, [tenant_id, workspace_id, model]) do
+    params = [tenant_id, workspace_id, model]
+
+    score = fn rows ->
+      rows
+      |> Enum.map(fn [id, blob] -> {id, cosine(query_embedding, decode(blob))} end)
+      |> Enum.filter(fn {_id, score} -> score >= min_similarity end)
+    end
+
+    # Qdrant proposes; the rows read back here with the same scope decide.
+    verify = fn ids ->
+      placeholders = Enum.map_join(1..length(ids), ", ", &"?#{&1 + 3}")
+
+      with {:ok, rows} <-
+             Store.raw_query(sql <> " AND me.memory_id IN (#{placeholders})", params ++ ids),
+           do: {:ok, score.(rows)}
+    end
+
+    ranked =
+      case QdrantSearch.nearest(
+             :memories,
+             query_embedding,
+             %{tenant_id: tenant_id, workspace_id: workspace_id, model: model},
+             [limit: limit, min_similarity: min_similarity],
+             verify
+           ) do
+        {:ok, ranked} ->
+          {:ok, ranked}
+
+        :fallback ->
+          with {:ok, rows} <- Store.raw_query(sql, params) do
+            {:ok,
+             rows
+             |> score.()
+             |> Enum.sort_by(fn {id, score} -> {0.0 - score, id} end)
+             |> Enum.take(limit)}
+          end
+      end
+
+    with {:ok, ranked} <- ranked do
       results =
-        rows
-        |> Enum.map(fn [id, blob] -> {id, cosine(query_embedding, decode(blob))} end)
-        |> Enum.filter(fn {_id, score} -> score >= min_similarity end)
-        |> Enum.sort_by(fn {id, score} -> {0.0 - score, id} end)
-        |> Enum.take(limit)
+        ranked
         |> Enum.flat_map(fn {id, score} ->
           case Versioned.get(id) do
             {:ok, memory} -> [{memory, score}]

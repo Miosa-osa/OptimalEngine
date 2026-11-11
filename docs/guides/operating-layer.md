@@ -160,13 +160,14 @@ POST /api/jobs/dead/<id>/replay {"workspace": "<id>"}     (admin)
 
 ## Maintenance jobs
 
-Three kinds of maintenance run as durable jobs, so an Engine without Mix, such as a release, runs them through the API.
+Four kinds of maintenance run as durable jobs, so an Engine without Mix, such as a release, runs them through the API.
 
 | Kind | Work | Mix task (same work) |
 | --- | --- | --- |
 | `maintenance.chunk_embeddings` | embeds the workspace's chunks that have no chunk embedding | `mix optimal.embed_backfill` |
 | `maintenance.graph_backfill` | writes the relationship edges of the workspace's contexts and claims | `mix optimal.graph_backfill` |
 | `maintenance.association_projection` | rebuilds the workspace's associative projection | none; `POST /api/memory/associations/rebuild` does it in the request |
+| `maintenance.qdrant_sync` | brings the workspace's Qdrant projection level with its embeddings; queued by a search that finds the counts differ, deferred while Qdrant does not answer | `mix optimal.qdrant_sync` |
 
 ```
 GET  /api/maintenance/embeddings?kind=chunks&workspace=<id>                     (admin; missing count and the active job)

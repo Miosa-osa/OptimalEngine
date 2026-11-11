@@ -93,7 +93,7 @@ Canonical cutover requires an explicit migration, validation, and rollback plan.
 ### Tier 2: Cloud Scale
 
 Managed S3-compatible object storage (AWS S3, R2) and managed PostgreSQL (with the limits above) can replace self-hosted equivalents today.
-Valkey, NATS JetStream, Qdrant and DuckDB with Parquet all have adapters; DuckDB holds the workspace analytics projection (metrics, sync runs, ledger and usage as Parquet), and no Engine projection is written to the others yet. NATS carries the flows named in `OPTIMAL_NATS_FLOWS`, copies of what the Engine already stored.
+Valkey, NATS JetStream, Qdrant and DuckDB with Parquet all have adapters; Qdrant holds the embedding projection that serves vector search, DuckDB holds the workspace analytics projection (metrics, sync runs, ledger and usage as Parquet), and no Engine projection is written to the others yet. NATS carries the flows named in `OPTIMAL_NATS_FLOWS`, copies of what the Engine already stored.
 
 Qdrant is an optional high-scale semantic projection and never becomes accepted truth.
 
@@ -147,7 +147,7 @@ A provider has one of six lifecycle states.
 It outranks configuration and probes: a reachable endpoint the engine cannot talk to is not available storage.
 Every provider reports `adapter_implemented`.
 The embedded local providers, `s3`, and `postgres` have adapters (`postgres` is the whole canonical store of an `OPTIMAL_STORE=postgres` Engine, replication included).
-`qdrant` has an adapter that checks and proves the service, and no Engine feature uses it yet; `duckdb` serves the workspace analytics and `openbao` the secret references, connector credentials (opt in) and backup transit keys when configured; `nats_jetstream` has one too and carries the flows named in `OPTIMAL_NATS_FLOWS`; `valkey` carries the shared rate limits and caches when it is configured; `fractal` has none.
+`qdrant` has an adapter and serves vector search (it reports `active` while it does); `duckdb` serves the workspace analytics and `openbao` the secret references, connector credentials (opt in) and backup transit keys when configured; `nats_jetstream` has one too and carries the flows named in `OPTIMAL_NATS_FLOWS`; `valkey` carries the shared rate limits and caches when it is configured; `fractal` has none.
 
 `active` means a default local provider is currently part of the running engine.
 RocksDB is `active` only when the knowledge store runs on it (`OPTIMAL_KNOWLEDGE_BACKEND=rocksdb`); on an ETS knowledge store it reports `available`.

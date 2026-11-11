@@ -30,6 +30,14 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   A package another live memory or a context of the workspace still holds the
   same text in is shared, and stays: that text is theirs.
 
+  The removal of the versions' points, and of the deleted source chunks'
+  points, from the Qdrant projection is recorded in the same transaction
+  (`OptimalEngine.Storage.Qdrant.Removals.record_in/5`) and handed to the
+  projection after the commit: applied in order and retried until Qdrant
+  takes it. A removal that cannot be recorded is the forget's error
+  (`{:memory_erasure_failed, :qdrant_removal, reason}`), and nothing is
+  erased.
+
   On PostgreSQL the posting lists are rewritten after the commit. The row
   trigger queued each version's key in the forget's own transaction
   (`optimal_fts_queue`), so the rewrite is on record before the forget
@@ -48,6 +56,7 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   alias OptimalEngine.Memory.Versioned
   alias OptimalEngine.Memory.Versioned.Store, as: VStore
   alias OptimalEngine.MemoryCore.ID
+  alias OptimalEngine.Storage.Qdrant.{Projection, Removals}
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FullText
 
@@ -92,17 +101,22 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   @type done :: %{
           memories: [Versioned.t()],
           removed: %{atom() => non_neg_integer()},
+          qdrant_removals: [String.t()],
           refresh: :ok | {:error, term()}
         }
 
   defp erase(id, reason, forget_after, rows) do
+    # Read before the transaction: it reads the store.
+    qdrant? = Projection.configured?()
+
     result =
       Store.transaction(
         fn txn ->
           with {:ok, versions} <- chain(txn, id),
                {:ok, removed} <- erase_all(txn, versions, reason, forget_after),
-               {:ok, removed} <- delete_rows(txn, versions, removed, rows) do
-            {:ok, %{memories: versions, removed: removed}}
+               {:ok, removed} <- delete_rows(txn, versions, removed, rows),
+               {:ok, removals} <- record_removals(txn, versions, qdrant?) do
+            {:ok, %{memories: versions, removed: removed, qdrant_removals: removals}}
           end
         end,
         @timeout
@@ -111,6 +125,31 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
     with {:ok, %{memories: versions} = done} <- result do
       refresh = if versions == [], do: :ok, else: FullText.refresh(["memories_fts"])
       {:ok, Map.put(done, :refresh, refresh)}
+    end
+  end
+
+  # The removal of the versions' points from the Qdrant projection, and of the
+  # points of the source chunks the erasure deleted, recorded in the
+  # erasure's own transaction: the rows never go without it (a hard delete
+  # retried finds no rows to record it from). Handed to the projection after
+  # the commit (`OptimalEngine.Memory.Versioned`).
+  defp record_removals(_txn, _versions, false), do: {:ok, []}
+  defp record_removals(_txn, [], true), do: {:ok, []}
+
+  defp record_removals(txn, [first | _] = versions, true) do
+    chunks =
+      for %{source_chunk_id: chunk} when is_binary(chunk) and chunk != "" <- versions,
+          uniq: true,
+          do: chunk
+
+    case Removals.record_all_in(
+           txn,
+           [{:memories, "memory_id", Enum.map(versions, & &1.id)}, {:chunks, "chunk_id", chunks}],
+           tenant_id: first.tenant_id,
+           workspace_id: first.workspace_id
+         ) do
+      {:ok, _ids} = ok -> ok
+      {:error, reason} -> {:error, {:memory_erasure_failed, :qdrant_removal, reason}}
     end
   end
 

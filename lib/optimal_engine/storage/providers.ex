@@ -191,9 +191,11 @@ defmodule OptimalEngine.Storage.Providers do
       capabilities: ~w(vector)a,
       activation: "high_scale_semantic",
       probe: :qdrant,
-      serves: [],
+      serves: ~w(embedding_projection vector_search memory_search),
+      in_use: :qdrant_projection,
       required_env: ["OPTIMAL_QDRANT_URL"],
-      optional_env: ["OPTIMAL_QDRANT_API_KEY"]
+      optional_env:
+        ~w(OPTIMAL_QDRANT_API_KEY OPTIMAL_QDRANT_COLLECTION_PREFIX OPTIMAL_QDRANT_SERVING)
     },
     %{
       id: "duckdb",
@@ -398,12 +400,22 @@ defmodule OptimalEngine.Storage.Providers do
   defp put_selected(inspected, %{store: store}),
     do: Map.put(inspected, :selected, OptimalEngine.Store.selected?(store))
 
+  # What the Qdrant projection does: mirrored writes, searches served and
+  # fallen back, and whether it is on at all.
+  defp put_selected(inspected, %{id: "qdrant"}),
+    do: Map.put(inspected, :serving, OptimalEngine.Storage.Qdrant.Projection.status())
+
   defp put_selected(inspected, _provider), do: inspected
 
   # RocksDB is in use only when the knowledge store runs on it; every other
   # default local provider is part of every engine.
   defp in_use?(%{in_use: :knowledge_backend}),
     do: OptimalEngine.Knowledge.DefaultStore.backend() == OptimalEngine.Knowledge.Backend.RocksDB
+
+  # Qdrant is routed to only while its projection is on (OPTIMAL_QDRANT_SERVING
+  # not off): reachable but switched off, it holds nothing the Engine writes.
+  defp in_use?(%{in_use: :qdrant_projection}),
+    do: OptimalEngine.Storage.Qdrant.Projection.enabled?()
 
   defp in_use?(_provider), do: true
 
@@ -412,6 +424,13 @@ defmodule OptimalEngine.Storage.Providers do
 
   defp lifecycle_state(%{activation: "default_local"}, true, true, :healthy, true),
     do: "active"
+
+  # Qdrant is active when it answered and the Engine mirrors its embeddings to
+  # it and reads its vector search from it; reachable but switched off
+  # (OPTIMAL_QDRANT_SERVING=off) it is only available.
+  defp lifecycle_state(%{id: "qdrant"}, true, true, :healthy, _in_use) do
+    if OptimalEngine.Storage.Qdrant.Projection.enabled?(), do: "active", else: "available"
+  end
 
   defp lifecycle_state(_provider, true, false, _health, _in_use), do: "not_configured"
   defp lifecycle_state(_provider, true, true, :healthy, _in_use), do: "available"

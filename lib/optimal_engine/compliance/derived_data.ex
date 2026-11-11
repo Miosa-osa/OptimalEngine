@@ -51,6 +51,7 @@ defmodule OptimalEngine.Compliance.DerivedData do
 
   alias OptimalEngine.Compliance.{Artifacts, ContextFiles}
   alias OptimalEngine.Knowledge.DefaultStore
+  alias OptimalEngine.Storage.Qdrant.Projection
   alias OptimalEngine.Storage.S3
   alias OptimalEngine.Store
 
@@ -74,9 +75,12 @@ defmodule OptimalEngine.Compliance.DerivedData do
       with {:ok, plan} <- ContextFiles.plan(tenant_id, batch),
            batch = Enum.uniq(batch ++ plan.copy_ids),
            :ok <- remove_objects(tenant_id, batch),
+           :ok <- Projection.erase_contexts(batch, tenant_id),
            {:ok, _removed} <-
              ContextFiles.remove(plan.files ++ plan.wiki_files, except: batch, owned: plan.owned) do
-        drop_triples(Store.transaction(&erase_batch(&1, tenant_id, batch, true), @timeout))
+        Store.transaction(&erase_batch(&1, tenant_id, batch, true), @timeout)
+        |> drop_triples()
+        |> qdrant_after_commit(batch, tenant_id)
       end
     end)
   end
@@ -123,11 +127,24 @@ defmodule OptimalEngine.Compliance.DerivedData do
 
     with {:ok, plan} <- ContextFiles.plan(nil, ids, copies: false),
          :ok <- remove_objects(nil, ids),
+         :ok <- Projection.erase_contexts(ids, nil),
          {:ok, _redacted} <- ContextFiles.redact(plan.files, except: ids, owned: plan.owned),
          {:ok, _removed} <- ContextFiles.remove(plan.wiki_files) do
-      drop_triples(Store.transaction(&delete_in(&1, ids, true), @timeout))
+      Store.transaction(&delete_in(&1, ids, true), @timeout)
+      |> drop_triples()
+      |> qdrant_after_commit(ids, nil)
     end
   end
+
+  # Qdrant's points were deleted before the rows; a mirror that read a row in
+  # between may have put one back. Once the rows are gone, the same removal is
+  # recorded again, durably, and that takes it.
+  defp qdrant_after_commit({:ok, _} = result, ids, tenant_id) do
+    Projection.erased_contexts(ids, tenant_id)
+    result
+  end
+
+  defp qdrant_after_commit(other, _ids, _tenant_id), do: other
 
   # The triggers of Knowledge.Mirror recorded the deleted graph_edges rows in
   # the same transaction; their triples leave the triple store before this

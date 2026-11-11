@@ -26,6 +26,8 @@ refused	INSERT OR REPLACE INTO vectors (context_id, embedding, dimensions, tenan
 refused	INSERT OR REPLACE INTO viability_reports (tenant_id, scope, period, report, backfilled) VALUES (?)
 refused	PRAGMA busy_timeout
 refused	PRAGMA foreign_key_check
+refused	PRAGMA foreign_keys = OFF
+refused	PRAGMA foreign_keys = ON
 refused	PRAGMA integrity_check
 refused	PRAGMA schema_version
 refused	PRAGMA table_info("…")

@@ -31,7 +31,7 @@ Providers are things a deployment grows onto, not the default shape:
 | PostgreSQL | Wired: an `OPTIMAL_STORE=postgres` Engine, replication and the NATS flows included | The canonical relational store for engines that share one database |
 | NATS JetStream | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS`, each sent after the Engine stored it in its store (SQLite or PostgreSQL); nothing without them |
 | Valkey | Adapter, health-checked and proved, in the data path | Shared rate limits, the verified API key cache and the sync gate cache, with ETS as the fallback ([Valkey](storage-providers.md#valkey)) |
-| Qdrant | Adapter, health-checked and proved | Nothing yet: no Engine feature reads or writes it |
+| Qdrant | Wired, serving | Vector search: every embedding is mirrored to it and searches read it, falling back to the embedded vectors |
 | DuckDB and Parquet | Wired | Each workspace's metrics, sync runs, ledger and usage as Parquet under `OPTIMAL_ANALYTICS_PATH`, and the read-only analytics query |
 | OpenBao | Adapter, health-checked, proved, and in the data path when configured | Secret references for the backup, authority, connector and S3 keys, connector credentials (opt in), backup transit keys ([Storage providers](storage-providers.md#openbao)) |
 | Fractal | Declared, no adapter yet | Nothing: the Engine cannot use it |
@@ -223,7 +223,7 @@ The table says what each provider does today; only Fractal has no adapter.
 | PostgreSQL | Wired | The canonical relational store of an `OPTIMAL_STORE=postgres` Engine |
 | NATS JetStream | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS`; nothing without them |
 | Valkey | Adapter, health-checked and proved, in the data path | Shared rate limits and caches, ETS as the fallback |
-| Qdrant | Adapter, health-checked and proved | Nothing yet; no Engine feature uses it |
+| Qdrant | Wired, serving | A projection of the vector, chunk and memory embeddings, which vector search reads |
 | DuckDB and Parquet | Wired | Analytical Parquet projections of each workspace, rebuilt daily |
 | OpenBao | Adapter, health-checked, proved, and in the data path when configured | Secret references, connector credentials (opt in), backup transit keys |
 | Fractal | Not wired yet | Nothing; declared with no adapter |
@@ -305,7 +305,7 @@ The Engine is still one instance on one durable disk.
 | Managed PostgreSQL | Wired | The `OPTIMAL_STORE=postgres` Engine above |
 | Managed NATS | Adapter and a supervised JetStream client, health-checked and proved | The flows named in `OPTIMAL_NATS_FLOWS` |
 | Managed Valkey | Adapter, health-checked and proved | Shared rate limits and caches across the Engine's processes |
-| Managed Qdrant | Adapter, health-checked and proved | Reached and proved; no Engine feature uses it yet |
+| Managed Qdrant | Wired, serving | A projection of the embeddings, which vector search reads |
 
 ### Managed S3
 
@@ -501,6 +501,7 @@ bin/optimal maintenance conformance --url http://127.0.0.1:4200 --key-file /path
 | `health` | stopped | store diagnostics; exits 1 on a critical finding |
 | `embed_backfill` | stopped | embeds chunks that have no embedding (`--workspace`, `--limit`, `--batch`, `--dry-run`) |
 | `graph_backfill` | stopped | writes the graph edges of contexts and claims (`--workspace`, `--batch`, `--no-claims`) |
+| `qdrant_sync` | stopped | pushes the embeddings to the Qdrant projection and removes its orphans (`--workspace`, `--batch`) |
 | `facts` | stopped | lists or shows Memory Core facts |
 | `claims` | stopped | lists, shows, promotes or rejects Memory Core claims |
 | `conformance` | running | checks a running Engine over HTTP (`--url`, `--key` or `OPTIMAL_ENGINE_API_KEY`) |

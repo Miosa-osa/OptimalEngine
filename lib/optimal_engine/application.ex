@@ -108,6 +108,8 @@ defmodule OptimalEngine.Application do
 
       # ── Core engine (SQLite-backed, must start first) ─────────────────────
       OptimalEngine.Store,
+      # Health, collections and count comparisons of the Qdrant projection.
+      OptimalEngine.Storage.Qdrant.Projection,
       unfinished_imports_child(),
       OptimalEngine.Pipeline.Router,
       OptimalEngine.Pipeline.Indexer,

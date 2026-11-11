@@ -66,6 +66,15 @@ exclude =
       [:duckdb | exclude]
   end
 
+# The Qdrant integration tests run against a real server at
+# OPTIMAL_TEST_QDRANT_URL (docker run -p 6333:6333 qdrant/qdrant) and are
+# skipped without it; every other Qdrant test uses the local stub.
+exclude =
+  case System.get_env("OPTIMAL_TEST_QDRANT_URL") do
+    url when is_binary(url) and url != "" -> exclude
+    _ -> [:qdrant_integration | exclude]
+  end
+
 # The 100 MB Notion import timing runs only when asked for (--only notion_scale).
 ExUnit.configure(exclude: [:notion_scale | exclude])
 
