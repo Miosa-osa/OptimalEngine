@@ -142,8 +142,17 @@ defmodule OptimalEngine.SyncTest do
           &(&1["entity_type"] == "contexts" and &1["entity_id"] == "c-#{ctx.n}")
         )
 
-      assert Enum.map(contexts, & &1["operation"]) == ["create", "update", "delete"]
-      assert Enum.at(contexts, 1)["payload"]["row"]["title"] == "Second"
+      # The ledger holds the three changes in order; the create and the update
+      # of the deleted row were redacted with its delete (`Sync.Redaction`), so
+      # only the delete is served.
+      {:ok, ledger} =
+        Store.raw_query(
+          "SELECT operation, CASE WHEN redacted_at IS NULL THEN 0 ELSE 1 END FROM sync_mutations WHERE entity_type = 'contexts' AND entity_id = ?1 ORDER BY sequence",
+          ["c-#{ctx.n}"]
+        )
+
+      assert ledger == [["create", 1], ["update", 1], ["delete", 0]]
+      assert Enum.map(contexts, & &1["operation"]) == ["delete"]
 
       embedding = Enum.find(page["mutations"], &(&1["entity_type"] == "memory_embeddings"))
       assert Base.decode16!(embedding["payload"]["blobs"]["embedding"]) == blob

@@ -41,6 +41,7 @@ defmodule OptimalEngine.Sync.Capture do
   alias OptimalEngine.Store
   alias OptimalEngine.Sync.Lineage
   alias OptimalEngine.Sync.Postgres, as: PgCapture
+  alias OptimalEngine.Sync.Redaction
 
   # What replicates: workspace knowledge. A peer that holds the `sync` scope may
   # write these tables and no others, so nothing here may grant a capability
@@ -53,7 +54,7 @@ defmodule OptimalEngine.Sync.Capture do
   @replicated ~w(analysis_reports canonical_entities chunk_embeddings chunks citations claims
                  classifications cluster_members clusters contexts data_quality_snapshots decisions
                  derivation_ledger edges entities entity_aliases entity_identifiers entity_lineage
-                 entity_mentions episodes facts generalized_workflows graph_edges intents memories
+                 entity_mentions episodes facts generalized_workflows graph_edges intents ledger_redactions memories
                  memory_association_paths memory_associations memory_consolidation_proposals
                  memory_detail_objects memory_embeddings memory_objects memory_path_feedback
                  memory_path_priors memory_reconstruction_outcomes memory_reconstruction_runs memory_relations
@@ -526,6 +527,9 @@ defmodule OptimalEngine.Sync.Capture do
       max_seq = rows |> List.last() |> hd()
       entries = Enum.map(sealable, &ledger_entry(&1, replica_id))
       {:ok, sealed} = write_ledger(entries, max_seq)
+      # A delete takes the row's earlier changes out of the ledger, for a delete
+      # no erasure redacted in its own transaction (`Sync.Redaction`).
+      :ok = Redaction.redact_sealed(entries)
 
       {:ok, length(rows), sealed}
     end

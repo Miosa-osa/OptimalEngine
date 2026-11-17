@@ -54,8 +54,9 @@ defmodule OptimalEngine.Sync do
   alias OptimalEngine.Storage.Qdrant.Removals, as: QdrantRemovals
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
+  alias OptimalEngine.Store.FullText
   alias OptimalEngine.Store.Migrations
-  alias OptimalEngine.Sync.{Capture, Gate, GateCache, History, Lineage}
+  alias OptimalEngine.Sync.{Capture, Gate, GateCache, History, Lineage, Redaction}
 
   @classes ~w(public internal confidential restricted)
   @page 500
@@ -221,7 +222,7 @@ defmodule OptimalEngine.Sync do
         SELECT sequence, id, device_id, entity_type, entity_id, operation, payload, payload_hash,
                idempotency_key, occurred_at
         FROM sync_mutations
-        WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3
+        WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3 AND redacted_at IS NULL
         ORDER BY sequence LIMIT ?4
         """,
         [tenant_id, workspace_id, since, limit]
@@ -999,6 +1000,12 @@ defmodule OptimalEngine.Sync do
       Gate.held_on_receive?(mutation, gate) ->
         {:skip, :gated, mutation}
 
+      # A change of a row an erasure here took out, made at or before the
+      # version erased: a peer that had not caught up, or a hub relaying one,
+      # would bring the text back.
+      Redaction.erased_version(workspace_id, target_table(table), mutation) ->
+        {:skip, :erased, mutation}
+
       true ->
         plan_row(
           mutation,
@@ -1036,7 +1043,14 @@ defmodule OptimalEngine.Sync do
           |> unless_same_content(mutation)
         end
 
-      {:apply, %{mutation: mutation, columns: columns, conflict: conflict, gate: gate}}
+      step = %{mutation: mutation, columns: columns, conflict: conflict, gate: gate}
+
+      # A redaction request is checked here, before the transaction: what it
+      # names is read from the schema (`Sync.Redaction.request/2`).
+      case redaction_request(table, mutation) do
+        {:ok, request} -> {:apply, Map.put(step, :redaction, request)}
+        {:error, reason} -> {:fail, reason, mutation}
+      end
     else
       {:error, reason} -> {:fail, reason, mutation}
     end
@@ -1273,7 +1287,12 @@ defmodule OptimalEngine.Sync do
               # at the end of the transaction (`record_ledger/4`).
               ledger: [],
               ledger_ids: MapSet.new(),
-              qdrant: []
+              qdrant: [],
+              erased_tables: MapSet.new(),
+              deleted_parents: %{},
+              # The redaction requests applied so far in this batch, by the row
+              # they name (`{table, id} => version`).
+              requests: %{}
             },
             fn
               {:skip, reason, _mutation}, acc ->
@@ -1289,7 +1308,9 @@ defmodule OptimalEngine.Sync do
               {:apply, step}, acc ->
                 case id_state(txn, tenant_id, workspace_id, step.mutation["id"], acc) do
                   :new ->
-                    apply_step(txn, tenant_id, workspace_id, step, acc, foreign_keys)
+                    if erased_in_batch?(acc, step.mutation),
+                      do: count_skip(acc, :erased),
+                      else: apply_step(txn, tenant_id, workspace_id, step, acc, foreign_keys)
 
                   :duplicate ->
                     count_skip(acc, :duplicate)
@@ -1314,7 +1335,18 @@ defmodule OptimalEngine.Sync do
             apply_step(txn, tenant_id, workspace_id, step, acc, :final)
           end)
 
-        record_ledger(txn, tenant_id, workspace_id, Enum.reverse(outcome.ledger))
+        # The append-only rows made from what the batch deleted: their earlier
+        # ledger rows are redacted, and those of this batch still to be written
+        # are written as tombstones. All of it before the ledger lock, which
+        # `record_ledger/4` takes only for its inserts.
+        :ok = erase_linked(txn, workspace_id, outcome.deleted_parents)
+
+        ledger =
+          if map_size(outcome.deleted_parents) == 0,
+            do: outcome.ledger,
+            else: Redaction.tombstone_pending(outcome.ledger, {:parents, outcome.deleted_parents})
+
+        record_ledger(txn, tenant_id, workspace_id, Enum.reverse(ledger))
         {:ok, removals} = record_qdrant_removals(txn, tenant_id, workspace_id, outcome, qdrant?)
         {:ok, _} = Store.txn_execute(txn, "UPDATE sync_identity SET applying = 0 WHERE id = 1", [])
         {:ok, Map.put(outcome, :qdrant_removals, removals)}
@@ -1330,6 +1362,7 @@ defmodule OptimalEngine.Sync do
         Enum.each(outcome.fact_conflicts, &raise_fact_claims(tenant_id, workspace_id, &1))
         if outcome.erased?, do: purge_erased(workspace_id, file_plan)
         QdrantRemovals.enqueue(outcome.qdrant_removals)
+        refresh_full_text(outcome.erased_tables)
 
         {:ok,
          %{
@@ -1421,6 +1454,15 @@ defmodule OptimalEngine.Sync do
       else: acc
   end
 
+  # A peer's forget arrives as a redaction request, not as the forgotten row:
+  # the memory's points go as for a forgotten memory.
+  defp note_qdrant(acc, "ledger_redactions", %{"operation" => op, "payload" => %{"row" => row}})
+       when op in ["create", "update"] and is_map(row) do
+    if row["target_type"] == "memory" and is_binary(row["entity_id"]),
+      do: %{acc | qdrant: [{:memories, "memory_id", row["entity_id"]} | acc.qdrant]},
+      else: acc
+  end
+
   defp note_qdrant(acc, _table, _mutation), do: acc
 
   defp qdrant_deleted("contexts", %{"id" => id}) when is_binary(id),
@@ -1455,7 +1497,43 @@ defmodule OptimalEngine.Sync do
 
   defp note_erased(acc, "contexts", %{"operation" => "delete"}), do: %{acc | erased?: true}
   defp note_erased(acc, "source_packages", %{"operation" => "delete"}), do: %{acc | erased?: true}
+  # A redaction request erased a row's text here: what this Engine cached from
+  # the workspace's text goes, as for a deleted context.
+  defp note_erased(acc, "ledger_redactions", _mutation), do: %{acc | erased?: true}
   defp note_erased(acc, _table, _mutation), do: acc
+
+  # The tables a batch erased rows or text from: a delete's, and the one a
+  # redaction request names. Their full-text indexes are brought up to date
+  # once the batch has committed (`refresh_full_text/1`).
+  defp note_erased_table(acc, "ledger_redactions", %{redaction: %{table: table}}),
+    do: %{acc | erased_tables: MapSet.put(acc.erased_tables, table)}
+
+  defp note_erased_table(acc, table, %{mutation: %{"operation" => "delete"}}),
+    do: %{acc | erased_tables: MapSet.put(acc.erased_tables, table)}
+
+  defp note_erased_table(acc, _table, _step), do: acc
+
+  # On SQLite the FTS5 triggers already dropped the erased text in the apply's
+  # transaction. PostgreSQL's posting lists are brought up to date when they are
+  # read; an erasure applied from a peer brings them up to date now, so they do
+  # not hold the erased terms until the next search. A failure is logged and the
+  # next read refreshes.
+  defp refresh_full_text(tables) do
+    names =
+      for {name, %{table: table}} <- FullText.indexes(), MapSet.member?(tables, table), do: name
+
+    if names != [] do
+      case FullText.refresh(names) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("[Sync] full-text refresh after an erasure: #{inspect(reason)}")
+      end
+    end
+
+    :ok
+  end
 
   # The contexts the batch asks to delete.
   defp erased_context_ids(plans) do
@@ -1563,7 +1641,11 @@ defmodule OptimalEngine.Sync do
       savepoint = "sync_" <> Integer.to_string(System.unique_integer([:positive]))
       {:ok, _} = Store.txn_execute(txn, "SAVEPOINT #{savepoint}", [])
 
-      case write(txn, table, columns, mutation, workspace_id, tenant_id, gate) do
+      written =
+        with :ok <- write(txn, table, columns, mutation, workspace_id, tenant_id, gate),
+             do: redact_applied(txn, table, step, workspace_id, gate)
+
+      case written do
         :ok ->
           {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
 
@@ -1576,6 +1658,9 @@ defmodule OptimalEngine.Sync do
             }
             |> note_erased(table, mutation)
             |> note_qdrant(table, mutation)
+            |> note_erased_table(table, step)
+            |> note_deleted_parent(table, step)
+            |> tombstone_batch(table, step)
 
           if conflict do
             record_conflict(
@@ -1617,6 +1702,139 @@ defmodule OptimalEngine.Sync do
           end
       end
     end
+  end
+
+  defp redaction_request("ledger_redactions", %{"operation" => op} = mutation)
+       when op in ["create", "update"],
+       do: Redaction.request(mutation["payload"]["row"], &target_table/1)
+
+  defp redaction_request(_table, _mutation), do: {:ok, nil}
+
+  # What an applied change takes out of this Engine's ledger
+  # (`OptimalEngine.Sync.Redaction`): a delete, the earlier changes of its row;
+  # a redaction request, this Engine's copies of the changes of the row it
+  # names, and the row's erased columns are set to what the erasure set.
+  defp redact_applied(txn, "ledger_redactions", %{redaction: %{} = request}, workspace_id, gate) do
+    keys = Capture.key_columns(request.columns)
+
+    # A row this Engine holds above the class the sender is cleared for is not
+    # erased by it, as it would not be overwritten or deleted by it.
+    with :ok <-
+           check_existing_labels(
+             txn,
+             request.table,
+             request.columns,
+             true,
+             keys,
+             request.key_row,
+             [{"workspace_id", workspace_id}],
+             gate
+           ),
+         do: Redaction.apply_request(txn, workspace_id, request)
+  end
+
+  # The changes of the row up to the delete leave this Engine's ledger; a
+  # change made here after the delete occurred stands (it is newer, and still
+  # to be pushed).
+  defp redact_applied(
+         txn,
+         table,
+         %{mutation: %{"operation" => "delete"} = mutation},
+         workspace_id,
+         _gate
+       ) do
+    entity = mutation["entity_id"]
+
+    if Capture.replicated?(table) and not String.starts_with?(entity, "row:") do
+      key_row = get_in(mutation, ["payload", "row"]) || %{}
+
+      {:ok, _} =
+        Redaction.redact_entity(txn, workspace_id, table, entity, key_row,
+          through: mutation["occurred_at"]
+        )
+    end
+
+    :ok
+  end
+
+  defp redact_applied(_txn, _table, _step, _workspace_id, _gate), do: :ok
+
+  # An erasure applied in this batch: the batch's changes it takes out that are
+  # still to be written become tombstones (`Redaction.tombstone_pending/2`), so
+  # nothing is redacted twice and nothing waits on the ledger lock for it.
+  defp tombstone_batch(acc, "ledger_redactions", %{redaction: %{} = request}) do
+    key = {request.table, request.entity_id}
+
+    %{
+      acc
+      | ledger: Redaction.tombstone_pending(acc.ledger, {:request, request}),
+        requests: Map.update(acc.requests, key, request.version, &max(&1, request.version))
+    }
+  end
+
+  defp tombstone_batch(acc, table, %{mutation: %{"operation" => "delete"} = mutation}) do
+    entity = mutation["entity_id"]
+
+    if Capture.replicated?(table) and not String.starts_with?(entity, "row:") do
+      erasure = {:delete, table, entity, mutation["occurred_at"]}
+      %{acc | ledger: Redaction.tombstone_pending(acc.ledger, erasure)}
+    else
+      acc
+    end
+  end
+
+  defp tombstone_batch(acc, _table, _step), do: acc
+
+  # A change older than a request applied earlier in this batch for its row.
+  defp erased_in_batch?(%{requests: requests}, _mutation) when map_size(requests) == 0, do: false
+
+  defp erased_in_batch?(acc, %{"operation" => op} = mutation) when op != "delete" do
+    table = target_table(mutation["entity_type"])
+
+    with {rule_table, id} when is_binary(rule_table) <-
+           Redaction.erased_target_of(table, mutation["entity_id"] || ""),
+         version when is_binary(version) <- Map.get(acc.requests, {rule_table, id}),
+         at when is_binary(at) <- mutation["occurred_at"] do
+      at <= version
+    else
+      _ -> false
+    end
+  end
+
+  defp erased_in_batch?(_acc, _mutation), do: false
+
+  # A peer's delete applied over a local change: what the conflict keeps of the
+  # local change is its tombstone, as the ledger keeps it (the row is gone).
+  defp conflict_local_payload(%{"operation" => "delete"} = mutation, payload) do
+    table = target_table(mutation["entity_type"])
+    key_row = get_in(mutation, ["payload", "row"]) || %{}
+    Redaction.tombstone_payload(table, key_row, payload)
+  end
+
+  defp conflict_local_payload(_mutation, payload), do: payload
+
+  # The parents a batch deleted (contexts, chunks, memories), for the
+  # append-only rows made from them (`Sync.Redaction.append_only_links/0`).
+  defp note_deleted_parent(acc, table, %{mutation: %{"operation" => "delete"} = mutation}) do
+    if Map.has_key?(Redaction.append_only_links(), table) do
+      id = get_in(mutation, ["payload", "row", "id"]) || mutation["entity_id"]
+      %{acc | deleted_parents: Map.update(acc.deleted_parents, table, [id], &[id | &1])}
+    else
+      acc
+    end
+  end
+
+  defp note_deleted_parent(acc, _table, _step), do: acc
+
+  # Before the batch commits: the append-only rows the origin deleted with the
+  # parents the batch deleted go here too (their deletes are not replicated:
+  # their ids differ per Engine), and their changes leave this Engine's ledger.
+  defp erase_linked(_txn, _workspace_id, parents) when map_size(parents) == 0, do: :ok
+
+  defp erase_linked(txn, workspace_id, parents) do
+    :ok = Redaction.delete_linked(txn, workspace_id, parents)
+    {:ok, _} = Redaction.redact_linked(txn, workspace_id, parents)
+    :ok
   end
 
   # Of two concurrent changes the newer wins, and when they carry the same time
@@ -1936,8 +2154,8 @@ defmodule OptimalEngine.Sync do
         """
         INSERT OR IGNORE INTO sync_mutations
           (id, tenant_id, workspace_id, device_id, entity_type, entity_id, operation, payload, payload_hash,
-           idempotency_key, occurred_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+           idempotency_key, occurred_at, redacted_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         """,
         [
           mutation["id"],
@@ -1954,7 +2172,10 @@ defmodule OptimalEngine.Sync do
           # (`<replica>:<capture sequence>`), so no applied change can hold one.
           :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower),
           applied_key(mutation["id"]),
-          mutation["occurred_at"]
+          mutation["occurred_at"],
+          # A change an erasure of the same batch took out is written as its
+          # tombstone (`Redaction.tombstone_pending/2`).
+          mutation["redacted_at"]
         ]
       )
   end
@@ -2044,7 +2265,7 @@ defmodule OptimalEngine.Sync do
           mutation["entity_id"],
           local.kind,
           resolution,
-          local.payload,
+          conflict_local_payload(mutation, local.payload),
           Jason.encode!(mutation["payload"]),
           mutation["device_id"],
           Jason.encode!(detail)
@@ -2697,7 +2918,7 @@ defmodule OptimalEngine.Sync do
         SELECT sequence, id, device_id, entity_type, entity_id, operation, payload, payload_hash, idempotency_key, occurred_at
         FROM sync_mutations
         WHERE tenant_id = ?1 AND workspace_id = ?2 AND sequence > ?3 AND device_id != ?4
-          AND entity_type IN (#{replicated})
+          AND entity_type IN (#{replicated}) AND redacted_at IS NULL
         ORDER BY sequence LIMIT ?5
         """,
         [peer.tenant_id, peer.workspace_id, since, peer.peer_replica_id || "", page]

@@ -98,6 +98,29 @@ defmodule OptimalEngine.Storage.NATSErasureTest do
     Enum.map(rows, fn [uri, meta] -> {uri, Jason.decode!(meta)} end)
   end
 
+  test "a row erased while its workspace did not replicate leaves the stream too", ctx do
+    id = "off-#{ctx.n}"
+    insert_context(ctx, id, "erased while off #{ctx.n}")
+    assert {:ok, _} = LedgerPublisher.publish_now(ctx.pub)
+    assert stream_text(ctx.stub) =~ "erased while off #{ctx.n}"
+
+    previous = Application.get_env(:optimal_engine, :nats_ledger_publisher)
+    Application.put_env(:optimal_engine, :nats_ledger_publisher, ctx.pub)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:optimal_engine, :nats_ledger_publisher, previous),
+        else: Application.delete_env(:optimal_engine, :nats_ledger_publisher)
+    end)
+
+    # Replication off: the erasure captures no delete, so no tombstone will ever
+    # go out to purge the row's subject. The erasure purges it itself.
+    {:ok, _} = Store.raw_query("DELETE FROM sync_workspaces WHERE workspace_id = ?1", [ctx.ws])
+    assert {:ok, _} = OptimalEngine.Compliance.DerivedData.erase_contexts(ctx.tenant, [id])
+
+    refute stream_text(ctx.stub) =~ "erased while off #{ctx.n}"
+  end
+
   test "each row has a subject of its own under its workspace", ctx do
     insert_context(ctx, "row-#{ctx.n}", "kept text")
     assert {:ok, _} = LedgerPublisher.publish_now(ctx.pub)
@@ -155,9 +178,9 @@ defmodule OptimalEngine.Storage.NATSErasureTest do
     assert stream_text(ctx.stub) =~ ~s("entity_id":"late-#{ctx.n}")
   end
 
-  # Memory.forget soft-forgets the memory row. The source package and claim its
-  # creation wrote keep their text in the Engine, and so on the stream: NATS
-  # holds what the Engine holds, no more.
+  # Memory.forget soft-forgets the memory row and redacts its changes. The source
+  # package and claim its creation wrote keep their text in the Engine, and so on
+  # the stream: NATS holds what the Engine holds, no more.
   test "a forgotten memory's messages are purged and its tombstone carries no text", ctx do
     {:ok, mem} =
       Memory.create(%{
@@ -181,10 +204,23 @@ defmodule OptimalEngine.Storage.NATSErasureTest do
     assert {:ok, %{purged: purged}} = LedgerPublisher.publish_now(ctx.pub)
     assert purged >= 1
 
-    assert [tombstone] = on_row.()
-    refute tombstone.data =~ "vault code #{ctx.n}"
-    refute tombstone.data =~ "asked to forget #{ctx.n}"
-    assert %{"payload" => %{"row" => %{"is_forgotten" => 1}}} = Jason.decode!(tombstone.data)
+    # The memory's changes left the ledger (`Sync.Redaction`): what goes out is
+    # the redaction request, on its own subject, and the memory's subject is empty.
+    assert on_row.() == []
+
+    assert [request] =
+             Enum.filter(
+               NATSStub.messages(ctx.stub, "OPTIMAL_LEDGER"),
+               &(&1.data =~ ~s("entity_type":"ledger_redactions") and &1.data =~ mem.id)
+             )
+
+    refute request.data =~ "vault code #{ctx.n}"
+    refute request.data =~ "asked to forget #{ctx.n}"
+
+    assert %{"payload" => %{"row" => row}} = Jason.decode!(request.data)
+    assert row["target_type"] == "memory"
+    assert row["entity_id"] == mem.id
+    assert Map.keys(row) -- ~w(id tenant_id workspace_id target_type entity_id reason version) == []
   end
 
   test "an erasure reaches NATS and its report and audit event say what went", ctx do

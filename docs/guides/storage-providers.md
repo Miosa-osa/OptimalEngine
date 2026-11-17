@@ -498,11 +498,13 @@ The stream holds workspace content up to the serve ceiling, so the NATS account 
 
 ### What the Engine forgets leaves the stream
 
-The Engine's own ledger is append-only (see [Erasure And Retention](erasure-and-retention.md)), so the stream cannot be refilled from it naively.
-The publisher keeps the stream to what the Engine still holds instead:
+The Engine redacts erased content out of its own ledger (see [Erasure And Retention](erasure-and-retention.md#the-replication-ledger-peers-and-nats)), and a redacted change is never published, so a stream filled again from the ledger holds no erased text.
+The publisher also keeps the stream itself to what the Engine still holds:
 
 * A forget is a `delete` in the ledger (an erasure, a retention delete, a derived-data removal, any delete) or a `memories` change that sets `is_forgotten` (`Memory.forget/2`).
   Before the forget goes out, every earlier message on the row's subject is purged, and the message that replaces them is a tombstone: a delete carries the row's key only, a forgotten memory its `id` and `is_forgotten` and nothing it said.
+* A redaction request (`ledger_redactions`: a context redacted in place, a forgotten memory) purges every earlier message on the subject of the row it names before the request goes out.
+  Each erasure path flushes the publisher (`LedgerPublisher.flush/1`) after it commits, so this happens before the erasure returns when NATS is reachable.
 * A create or update that a later forget in the ledger covers is never published, so a stream filled again from the ledger (after a loss, or a first start after the forget) holds nothing forgotten either.
 * The purge and the tombstone are two calls, so a publisher stopped between them (a crash, NATS lost mid-pass) leaves the row's messages purged and no tombstone yet. The next pass resumes from the stream's last message, which is before the forget, and sends it again: the purge (nothing left to purge, so the retry is safe) and then the tombstone, with the covered create or update withheld again. The row's content does not come back, and until that pass a subscriber sees neither the row nor its tombstone. This is the same on SQLite and on PostgreSQL.
 * An archived workspace (`Workspace.archive/1`) and the old id of a renamed one (`DataSteward.rename_workspace/3`) have their whole subject tree purged (`<namespace>.ledger.<tenant>.<workspace>.>`), and an archived workspace is no longer published.

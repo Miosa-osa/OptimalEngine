@@ -9,9 +9,9 @@ defmodule OptimalEngine.Memory.ForgetErasureTest do
 
   Every distinctive token of the text is looked for in every table and
   column, the FTS5 index itself included (`OptimalEngine.Test.StoreGrep`).
-  The replication ledger (`sync_mutations`) still holds the text until the
-  ledger redaction lands: that assertion is tagged `:ledger_redaction` and
-  excluded until then.
+  The replication ledger (`sync_mutations`, `sync_capture`) is redacted in
+  the same transaction (`OptimalEngine.Sync.Redaction`): the tests that seal
+  the capture look for the text there too.
   """
 
   use ExUnit.Case, async: false
@@ -20,8 +20,8 @@ defmodule OptimalEngine.Memory.ForgetErasureTest do
   alias OptimalEngine.Sync.Capture
   alias OptimalEngine.Test.StoreGrep
 
-  # The replication ledger keeps every change's row as it was written; it is
-  # rewritten by the ledger redaction, not by this erasure.
+  # Most tests look outside the ledger; those that look in it seal first, so
+  # what the forget redacted is what a peer would be served.
   @ledger ~w(sync_mutations sync_capture)
 
   setup do
@@ -58,7 +58,6 @@ defmodule OptimalEngine.Memory.ForgetErasureTest do
     assert forgotten.content == ""
   end
 
-  @tag :ledger_redaction
   test "after forget no token of the text is in the replication ledger either", ctx do
     doomed = text(ctx, "ledger")
     {:ok, memory} = Memory.create(%{content: doomed, workspace_id: ctx.workspace})
@@ -67,6 +66,129 @@ defmodule OptimalEngine.Memory.ForgetErasureTest do
     {:ok, _} = Capture.seal()
 
     assert StoreGrep.find_all(doomed) == []
+  end
+
+  test "forgetting a version takes every version's text out of the ledger, and peers are told of each",
+       ctx do
+    first = text(ctx, "lfirst")
+    second = text(ctx, "lsecond")
+    third = text(ctx, "lthird")
+
+    {:ok, v1} = Memory.create(%{content: first, workspace_id: ctx.workspace})
+    {:ok, _} = Capture.seal()
+    {:ok, v2} = Memory.update(v1.id, %{content: second})
+    {:ok, v3} = Memory.update(v2.id, %{content: third})
+    {:ok, _} = Capture.seal()
+
+    assert :ok = Memory.forget(v2.id)
+    {:ok, _} = Capture.seal()
+
+    for doomed <- [first, second, third], do: assert(StoreGrep.find_all(doomed) == [])
+
+    requested =
+      Sync.changes(ctx.tenant, ctx.workspace, since: 0, limit: 5_000)["mutations"]
+      |> Enum.filter(&(&1["entity_type"] == "ledger_redactions"))
+      |> Enum.map(& &1["payload"]["row"]["entity_id"])
+      |> Enum.sort()
+
+    assert requested == Enum.sort([v1.id, v2.id, v3.id])
+  end
+
+  test "after a hard delete no token of any version is anywhere, the ledger included", ctx do
+    first = text(ctx, "dfirst")
+    second = text(ctx, "dsecond")
+
+    {:ok, v1} = Memory.create(%{content: first, workspace_id: ctx.workspace})
+    {:ok, _} = Capture.seal()
+    {:ok, v2} = Memory.update(v1.id, %{content: second})
+    {:ok, _} = Capture.seal()
+
+    assert :ok = Memory.delete(v2.id)
+    {:ok, _} = Capture.seal()
+
+    for doomed <- [first, second], do: assert(StoreGrep.find_all(doomed) == [])
+
+    served = Sync.changes(ctx.tenant, ctx.workspace, since: 0, limit: 5_000)["mutations"]
+
+    for id <- [v1.id, v2.id] do
+      assert [%{"operation" => "delete"}] =
+               Enum.filter(served, &(&1["entity_type"] == "memories" and &1["entity_id"] == id))
+    end
+  end
+
+  test "the source chunk, its intent's excerpt and a fact made from the claim leave the ledger",
+       ctx do
+    doomed = text(ctx, "lchunk")
+    chunk = "chunk-ledger-#{ctx.n}"
+
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO chunks (id, tenant_id, workspace_id, signal_id, scale, text) VALUES (?1, ?2, ?3, ?4, 'document', ?5)",
+        [chunk, ctx.tenant, ctx.workspace, "signal-ledger-#{ctx.n}", doomed]
+      )
+
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO intents (tenant_id, workspace_id, chunk_id, intent, confidence, evidence) VALUES (?1, ?2, ?3, 'inform', 0.9, ?4)",
+        [ctx.tenant, ctx.workspace, chunk, "evidence " <> doomed]
+      )
+
+    {:ok, memory} =
+      Memory.create(%{content: doomed, workspace_id: ctx.workspace, source_chunk_id: chunk})
+
+    {:ok, claims} =
+      Store.raw_query(
+        "SELECT id FROM claims WHERE (CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.versioned_memory_id') END) = ?1",
+        [memory.id]
+      )
+
+    assert [[claim] | _] = claims
+
+    {:ok, _} =
+      Store.raw_query(
+        "INSERT INTO facts (id, tenant_id, workspace_id, fact_text, accepted_claim_ids) VALUES (?1, ?2, ?3, ?4, ?5)",
+        [
+          "fact-ledger-#{ctx.n}",
+          ctx.tenant,
+          ctx.workspace,
+          "fact " <> doomed,
+          Jason.encode!([claim])
+        ]
+      )
+
+    {:ok, _} = Capture.seal()
+
+    {:ok, ledger} =
+      Store.raw_query("SELECT entity_type FROM sync_mutations WHERE payload LIKE ?1", [
+        "%" <> doomed <> "%"
+      ])
+
+    held = ledger |> List.flatten() |> MapSet.new()
+    for table <- ~w(chunks intents facts claims memories), do: assert(table in held)
+
+    assert :ok = Memory.forget(memory.id)
+    {:ok, _} = Capture.seal()
+
+    assert StoreGrep.find_all(doomed) == []
+  end
+
+  test "a forget in a workspace whose sync was turned off still empties its old ledger", ctx do
+    doomed = text(ctx, "unsynced")
+    {:ok, memory} = Memory.create(%{content: doomed, workspace_id: ctx.workspace})
+    {:ok, _} = Capture.seal()
+    :ok = Sync.disable(ctx.tenant, ctx.workspace)
+
+    assert :ok = Memory.forget(memory.id)
+    {:ok, _} = Capture.seal()
+
+    assert StoreGrep.find_all(doomed) == []
+
+    {:ok, [[requests]]} =
+      Store.raw_query("SELECT COUNT(*) FROM ledger_redactions WHERE workspace_id = ?1", [
+        ctx.workspace
+      ])
+
+    assert requests == 0
   end
 
   test "a remembered memory's staged copies go too", ctx do

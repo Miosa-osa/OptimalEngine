@@ -46,11 +46,17 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   and the store's background refresh, or the refresh every search makes
   before it reads the index, removes the postings.
 
-  Not covered here: the replication ledger (`sync_mutations`) keeps every
-  change's whole row, and a peer pulling the workspace is served those rows.
-  Redacting it for every erasure path is the ledger redaction's change;
-  `test/memory/memory_forget_erasure_test.exs` asserts it under the
-  `:ledger_redaction` tag, excluded until then.
+  The replication ledger (`OptimalEngine.Sync.Redaction`) is redacted in the
+  same transaction: every change of every version of the chain (and of their
+  embeddings) keeps its place with only the row's key, and, for a workspace
+  that replicates, a `ledger_redactions` request per version tells peers to
+  erase their copies by their own rule; the package, claims, facts, episodes,
+  runs and chunk the erasure deletes (and, for a hard delete, the versions'
+  rows) are redacted as deletes, with the append-only rows made from the chunk
+  or the memories. A workspace that no longer replicates captured none of
+  those deletes: after the commit its ledger is redacted of every row that no
+  longer exists (`Redaction.redact_missing/1`). Then the NATS ledger publisher
+  is flushed, so the erased rows' subjects are purged.
   """
 
   alias OptimalEngine.Memory.Versioned
@@ -59,6 +65,7 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
   alias OptimalEngine.Storage.Qdrant.{Projection, Removals}
   alias OptimalEngine.Store
   alias OptimalEngine.Store.FullText
+  alias OptimalEngine.Sync.Redaction
 
   @timeout 60_000
 
@@ -115,14 +122,25 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
           with {:ok, versions} <- chain(txn, id),
                {:ok, removed} <- erase_all(txn, versions, reason, forget_after),
                {:ok, removed} <- delete_rows(txn, versions, removed, rows),
+               {:ok, redacted} <- redact_ledger(txn, versions, rows),
                {:ok, removals} <- record_removals(txn, versions, qdrant?) do
-            {:ok, %{memories: versions, removed: removed, qdrant_removals: removals}}
+            {:ok,
+             %{
+               memories: versions,
+               removed: Map.put(removed, :ledger_rows_redacted, redacted),
+               qdrant_removals: removals
+             }}
           end
         end,
         @timeout
       )
 
-    with {:ok, %{memories: versions} = done} <- result do
+    with {:ok, %{memories: versions, removed: removed} = done} <- result do
+      workspaces = workspaces(versions)
+      # A workspace that does not replicate captured no delete to redact by:
+      # the tables this erasure deleted from are searched for what is gone.
+      :ok = Redaction.redact_missing(workspaces, Redaction.removed_tables(removed))
+      _ = Redaction.flush_nats(workspaces)
       refresh = if versions == [], do: :ok, else: FullText.refresh(["memories_fts"])
       {:ok, Map.put(done, :refresh, refresh)}
     end
@@ -152,6 +170,40 @@ defmodule OptimalEngine.Memory.Versioned.Erasure do
       {:error, reason} -> {:error, {:memory_erasure_failed, :qdrant_removal, reason}}
     end
   end
+
+  # After the erasing writes, in their transaction. A forget keeps the rows:
+  # every change of each version (the forget's own included) is redacted and
+  # peers are sent a request per version, so they erase by their own rule. The
+  # rows the erasure deleted (and, for a hard delete, the versions) were
+  # captured as deletes: their earlier changes are redacted by those.
+  defp redact_ledger(_txn, [], _rows), do: {:ok, 0}
+
+  defp redact_ledger(txn, versions, rows) do
+    redacted =
+      Enum.reduce(versions, 0, fn memory, acc ->
+        case {rows, memory.workspace_id} do
+          {:keep_rows, ws} when is_binary(ws) ->
+            {:ok, n} =
+              Redaction.redact_rows(txn, ws, "memories", [memory.id],
+                tenant_id: memory.tenant_id || "default",
+                reason: "memory_forget"
+              )
+
+            acc + n
+
+          _ ->
+            acc
+        end
+      end)
+
+    {:ok, deleted} = Redaction.redact_deleted(txn, workspaces(versions))
+    {:ok, redacted + deleted}
+  rescue
+    error -> {:error, {:memory_erasure_failed, :ledger, Exception.message(error)}}
+  end
+
+  defp workspaces(versions),
+    do: versions |> Enum.map(& &1.workspace_id) |> Enum.filter(&is_binary/1) |> Enum.uniq()
 
   defp delete_rows(_txn, _versions, removed, :keep_rows), do: {:ok, removed}
   defp delete_rows(_txn, [], removed, :delete_rows), do: {:ok, removed}

@@ -53,7 +53,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   alias OptimalEngine.Store.FileCache.Maintenance, as: Cache
   alias OptimalEngine.Store.Migrations
   alias OptimalEngine.Store.ReadSnapshot
-  alias OptimalEngine.Sync.Capture
+  alias OptimalEngine.Sync.{Capture, Redaction}
   alias OptimalEngine.Workspace
   alias OptimalEngine.Workspace.Filesystem
 
@@ -1027,6 +1027,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       # their dead letters, are this workspace's content too.
       OptimalEngine.Storage.NATS.IntakeQueue.forget_workspace(tenant_id, workspace_id, "moved")
 
+      # Its messages on the NATS ledger stream go too, as for an archive.
+      forget_in_nats(tenant_id, workspace_id)
+
       {:ok,
        %{
          workspace_id: workspace_id,
@@ -1042,6 +1045,26 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   end
 
   def finalize_move(_tenant_id, _workspace_id, _sha, _target), do: {:error, :target_url_required}
+
+  defp forget_in_nats(tenant_id, workspace_id) do
+    publisher =
+      Application.get_env(
+        :optimal_engine,
+        :nats_ledger_publisher,
+        OptimalEngine.Storage.NATS.LedgerPublisher
+      )
+
+    OptimalEngine.Storage.NATS.LedgerPublisher.forget_workspace(
+      publisher,
+      tenant_id,
+      workspace_id,
+      "moved"
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   defp artifact_plan(workspace_id) do
     case Artifacts.plan(workspace_id) do
@@ -2215,9 +2238,13 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
             acc + n
           end)
 
+        # The workspace's changes leave this Engine's replication ledger with
+        # its rows (`OptimalEngine.Sync.Redaction`).
+        {:ok, _} = Redaction.redact_deleted(txn, [workspace_id])
         {:ok, total}
       end)
 
+    Redaction.redact_missing([workspace_id])
     total
   end
 
