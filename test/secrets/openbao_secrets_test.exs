@@ -39,6 +39,13 @@ defmodule OptimalEngine.Secrets.OpenBaoSecretsTest do
       end)
     end)
 
+    # The sync scheduler runs the peers other tests left, and a peer's key is
+    # sealed with CONNECTOR_KEY: a tick inside a test would read the reference the
+    # test set and add a read the test counts. Held while the test runs.
+    scheduler = Process.whereis(OptimalEngine.Sync.Scheduler)
+    if scheduler, do: :sys.suspend(scheduler, 60_000)
+    on_exit(fn -> if scheduler && Process.alive?(scheduler), do: :sys.resume(scheduler) end)
+
     {:ok, stub} = OpenBaoStub.start()
     on_exit(fn -> OpenBaoStub.stop(stub) end)
     %{stub: stub, hex: Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)}
