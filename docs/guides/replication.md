@@ -295,6 +295,15 @@ That is an opaque id, not the row, and the gate does not scrub it.
 - Rows that already reached a peer before a label or lineage existed stay there.
 A held delete does not reach the peer, so purge them on the peer directly.
 
+### The home decides between concurrent changes
+
+Between two Engines that are equals, the newer of two concurrent changes stands, by the clocks of the Engines that made them.
+A laptop's clock can be wrong, so a workspace with a home lets the home's ledger decide instead: of two concurrent changes, the one that reaches the home later stands.
+
+- An Engine run with `OPTIMAL_SYNC_HOME=true` (a managed cloud Engine) is the home of every workspace it syncs: it takes a pushed change over a concurrent one of its own, since the pushed one arrived later.
+- A peer marked `home` (`POST /api/sync/peers {..., home}`; a relay peer is home unless it says `"home": false`) is this Engine's home: when this Engine pulls a change that is concurrent with one of its own it has not sent, it keeps its own, which reaches the home after the pulled one. When the peer takes no pushes from this Engine (policy `pull` or `none`), the home's change stands.
+- The conflict is recorded with resolution `applied_home_order` or `kept_local_home_order`.
+
 ### Several organizations on one Engine
 
 A laptop Engine can sync workspaces of several organizations, and keeps each organization in a tenant of its own, so their rows, keys and workspaces never mix.

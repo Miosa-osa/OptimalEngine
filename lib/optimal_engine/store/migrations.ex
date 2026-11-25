@@ -155,7 +155,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_sync_history(),
       migration_qdrant_pending_removals(),
       migration_app_data_change_origin(),
-      migration_sync_peer_remote_workspace()
+      migration_sync_peer_remote_workspace(),
+      migration_sync_peer_home()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -865,6 +866,17 @@ defmodule OptimalEngine.Store.Migrations do
        {"sync_peers.remote_workspace_id",
         "ALTER TABLE sync_peers ADD COLUMN remote_workspace_id TEXT"}
      ]}
+  end
+
+  # Whether a peer is the workspace's home: its ledger order decides which of two
+  # concurrent changes stands (OptimalEngine.Sync). A relay peer (the MIOSA
+  # cloud) is added as home; NULL is read as home for a relay URL. Additive. The
+  # version is provisional, like the ones above.
+  @sync_peer_home_version 92
+
+  defp migration_sync_peer_home do
+    {@sync_peer_home_version, "sync peers: whether the peer is the workspace's home",
+     [{"sync_peers.home", "ALTER TABLE sync_peers ADD COLUMN home INTEGER"}]}
   end
 
   defp migration_sync_history do

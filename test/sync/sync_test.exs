@@ -571,6 +571,131 @@ defmodule OptimalEngine.SyncTest do
       assert is_binary(detail["local_occurred_at"])
     end
 
+    # MIO-1103: with a home in the exchange its ledger order decides, not the clocks.
+    # Each test makes the same concurrent pair: a change here after the sender's
+    # base, and an incoming change of the same row.
+    defp concurrent_pair(ctx, label, incoming_at) do
+      id = "home-#{label}-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "Before the sender pulled")
+      seen = local_seq(ctx, "contexts", id)
+
+      {:ok, _} =
+        Store.raw_query("UPDATE contexts SET title = 'Changed here after' WHERE id = ?1", [id])
+
+      edit =
+        mutation(ctx, %{
+          "operation" => "update",
+          "occurred_at" => incoming_at,
+          "payload" => context_row(id, "Changed on the sender", ctx.ws, ctx.tenant)
+        })
+
+      {id, seen, edit}
+    end
+
+    defp as_home(fun) do
+      previous = Application.get_env(:optimal_engine, :sync_home)
+      Application.put_env(:optimal_engine, :sync_home, true)
+
+      try do
+        fun.()
+      after
+        if is_nil(previous),
+          do: Application.delete_env(:optimal_engine, :sync_home),
+          else: Application.put_env(:optimal_engine, :sync_home, previous)
+      end
+    end
+
+    test "the home takes a pushed concurrent change, which reached it later, whatever its clock",
+         ctx do
+      {id, seen, edit} = concurrent_pair(ctx, "push", "2000-01-01T00:00:00.000")
+
+      as_home(fn ->
+        assert {:ok, %{applied: 1, conflicts: 1}} =
+                 Sync.apply_changes(ctx.tenant, ctx.ws, [edit],
+                   base_seq: seen,
+                   base_replica_id: Sync.replica_id()
+                 )
+      end)
+
+      assert title(id) == "Changed on the sender"
+      assert [%{resolution: "applied_home_order"}] = Sync.conflicts(ctx.tenant, ctx.ws)
+    end
+
+    test "an Engine pulling from its home keeps its own unsent change, which reaches the home later",
+         ctx do
+      {id, seen, edit} = concurrent_pair(ctx, "pull", "2999-01-01T00:00:00.000")
+
+      assert {:ok, %{applied: 0, conflicts: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [edit],
+                 direction: :pull,
+                 local_floor: seen,
+                 from_home: true,
+                 peer_takes_pushes: true
+               )
+
+      assert title(id) == "Changed here after"
+      assert [%{resolution: "kept_local_home_order"}] = Sync.conflicts(ctx.tenant, ctx.ws)
+    end
+
+    test "a home that takes no pushes from this Engine stands over its change, whatever the clocks",
+         ctx do
+      {id, seen, edit} = concurrent_pair(ctx, "pullonly", "2000-01-01T00:00:00.000")
+
+      assert {:ok, %{applied: 1, conflicts: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [edit],
+                 direction: :pull,
+                 local_floor: seen,
+                 from_home: true,
+                 peer_takes_pushes: false
+               )
+
+      assert title(id) == "Changed on the sender"
+      assert [%{resolution: "applied_home_order"}] = Sync.conflicts(ctx.tenant, ctx.ws)
+    end
+
+    test "without a home the newer clock still wins", ctx do
+      {id, seen, edit} = concurrent_pair(ctx, "clock", "2000-01-01T00:00:00.000")
+
+      assert {:ok, %{applied: 0, conflicts: 1}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [edit], direction: :pull, local_floor: seen)
+
+      assert title(id) == "Changed here after"
+      assert [%{resolution: "kept_local_newer"}] = Sync.conflicts(ctx.tenant, ctx.ws)
+    end
+
+    test "a relay peer is the home unless it says it is not, and a direct peer only when it says so",
+         ctx do
+      previous = System.get_env("CONNECTOR_KEY")
+      System.put_env("CONNECTOR_KEY", Base.encode16(:crypto.strong_rand_bytes(32)))
+
+      on_exit(fn ->
+        if previous,
+          do: System.put_env("CONNECTOR_KEY", previous),
+          else: System.delete_env("CONNECTOR_KEY")
+      end)
+
+      relay = "relay+https://api.example/api/v1/engines/e1/sync"
+      base = %{"workspace_id" => ctx.ws, "api_key" => "k"}
+
+      assert {:ok, %{home: true}} = Sync.add_peer(ctx.tenant, Map.put(base, "url", relay), "u")
+
+      assert {:ok, %{home: false}} =
+               Sync.add_peer(ctx.tenant, Map.merge(base, %{"url" => relay, "home" => false}), "u")
+
+      assert {:ok, %{home: false}} =
+               Sync.add_peer(ctx.tenant, Map.put(base, "url", "https://peer.example"), "u")
+
+      assert {:ok, %{home: true}} =
+               Sync.add_peer(
+                 ctx.tenant,
+                 Map.merge(base, %{"url" => "https://peer.example", "home" => true}),
+                 "u"
+               )
+
+      assert {:error, :invalid_home} =
+               Sync.add_peer(ctx.tenant, Map.merge(base, %{"url" => relay, "home" => "yes"}), "u")
+    end
+
     test "an edit made after seeing the change here wins even when its clock is older", ctx do
       id = "causal-#{ctx.n}"
       insert_context(ctx.tenant, ctx.ws, id, "Written here, clock ahead")
