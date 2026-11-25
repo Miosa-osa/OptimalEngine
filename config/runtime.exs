@@ -253,6 +253,16 @@ case System.get_env("OPTIMAL_RELEASE_CHANNEL") do
     raise ArgumentError, "OPTIMAL_RELEASE_CHANNEL must be dev, stable, beta, or pinned"
 end
 
+# Sync home: this Engine is the home of every workspace it syncs (a managed cloud
+# Engine). Its ledger order decides which of two concurrent changes stands, not
+# the senders' clocks (OptimalEngine.Sync). Absent or false: not a home.
+case System.get_env("OPTIMAL_SYNC_HOME") do
+  nil -> :ok
+  "true" -> config :optimal_engine, :sync_home, true
+  "false" -> config :optimal_engine, :sync_home, false
+  _ -> raise ArgumentError, "OPTIMAL_SYNC_HOME must be true or false"
+end
+
 # Corpus routing rules (CorpusOrganizer) are deployment data: a YAML or JSON
 # file mapping target workspaces to weighted markers.
 if corpus_rules = System.get_env("OPTIMAL_CORPUS_RULES") do

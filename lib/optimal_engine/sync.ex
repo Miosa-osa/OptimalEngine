@@ -23,7 +23,10 @@ defmodule OptimalEngine.Sync do
     (judged against the sender's `base_seq` on a push, and on a pull against
     this Engine's own ledger sequence at the start of the last complete cycle
     with that peer); the newer change wins, the later device id on a tie, and
-    the conflict is recorded with its kind and why. A change the sender made after
+    the conflict is recorded with its kind and why. With a home in the exchange
+    (an Engine run with `OPTIMAL_SYNC_HOME=true`, and a peer marked home: a relay
+    peer is) the home's ledger order decides instead of the clocks: of two
+    concurrent changes, the one that reaches the home later stands. A change the sender made after
     seeing the other is applied with no clock check: a sender pushes only what
     stands after what it took from the peer, or won against it. A change this
     Engine did not take is not put in its ledger, so nothing forwards it. For
@@ -313,6 +316,26 @@ defmodule OptimalEngine.Sync do
     end
   end
 
+  # How the home's ledger orders two concurrent changes, when a home is in the
+  # exchange; nil means the clock decides, as between two Engines that are not.
+  # Of two concurrent changes the one that reaches the home later stands:
+  #   * the home takes a pushed change over its own (`:arrival`), since it arrived later;
+  #   * an Engine pulling from its home keeps its own unsent change
+  #     (`:keep_unsent_local`), which reaches the home after the one it pulled,
+  #     when the home takes its pushes; when it does not (a pull-only peer) the
+  #     home's change stands (`:home_stands`).
+  defp home_order(:push, _opts), do: if(home_engine?(), do: :arrival)
+
+  defp home_order(:pull, opts) do
+    cond do
+      opts[:from_home] != true -> nil
+      opts[:peer_takes_pushes] == true -> :keep_unsent_local
+      true -> :home_stands
+    end
+  end
+
+  defp home_order(_direction, _opts), do: nil
+
   defp put_base_rejected(result, %{rejected: nil}), do: result
   defp put_base_rejected(result, %{rejected: why}), do: Map.put(result, :base_rejected, why)
 
@@ -329,7 +352,8 @@ defmodule OptimalEngine.Sync do
       floor: nil,
       rejected: nil,
       direction: direction,
-      sender: sender_other_than(opts[:sender], local)
+      sender: sender_other_than(opts[:sender], local),
+      home_order: home_order(direction, opts)
     }
 
     case {opts[:base_seq], opts[:local_floor]} do
@@ -633,6 +657,9 @@ defmodule OptimalEngine.Sync do
       not valid_remote_workspace?(attrs["remote_workspace_id"]) ->
         {:error, :invalid_remote_workspace_id}
 
+      attrs["home"] not in [nil, true, false] ->
+        {:error, :invalid_home}
+
       true ->
         store_peer(tenant_id, attrs, policy, max_class, by)
     end
@@ -660,6 +687,24 @@ defmodule OptimalEngine.Sync do
     do: remote
 
   def remote_workspace(%{workspace_id: workspace}), do: workspace
+
+  # A peer is the workspace's home when it says so, and a relay peer (the MIOSA
+  # cloud) is unless it says it is not.
+  defp home_attr(attrs) do
+    case attrs["home"] do
+      home when is_boolean(home) -> home
+      _unset -> relay?(attrs["url"] || "")
+    end
+  end
+
+  defp relay?(url), do: String.starts_with?(url, "relay+")
+
+  @doc """
+  Whether this Engine is the home of the workspaces it syncs (`OPTIMAL_SYNC_HOME`):
+  a managed cloud Engine, whose ledger order decides between concurrent changes.
+  """
+  @spec home_engine?() :: boolean()
+  def home_engine?, do: Application.get_env(:optimal_engine, :sync_home, false) == true
 
   defp remote_workspace_attr(attrs) do
     case attrs["remote_workspace_id"] do
@@ -1663,7 +1708,7 @@ defmodule OptimalEngine.Sync do
       # not put in the ledger either, so a hub never forwards a change this
       # Engine did not take. A repeat is judged the same way and the conflict
       # is recorded once (its id comes from the mutation).
-      record_conflict(txn, tenant_id, workspace_id, mutation, conflict, "kept_local_newer")
+      record_conflict(txn, tenant_id, workspace_id, mutation, conflict, resolution(conflict, :kept))
       acc = %{acc | conflicts: [mutation["id"] | acc.conflicts]}
 
       if table == "facts",
@@ -1694,7 +1739,7 @@ defmodule OptimalEngine.Sync do
               workspace_id,
               mutation,
               conflict,
-              "applied_remote_newer"
+              resolution(conflict, :applied)
             )
 
             acc = %{acc | conflicts: [mutation["id"] | acc.conflicts]}
@@ -1741,12 +1786,24 @@ defmodule OptimalEngine.Sync do
     end
   end
 
-  # Of two concurrent changes the newer wins, and when they carry the same time
-  # the greater device id does, so both Engines keep the same version.
+  # With a home in the exchange, its ledger order decides (`home_order/2`).
+  # Otherwise the newer of two concurrent changes wins, and when they carry the
+  # same time the greater device id does, so both Engines keep the same version.
+  defp local_wins?(%{home_order: :keep_unsent_local}, _mutation), do: true
+
+  defp local_wins?(%{home_order: order}, _mutation) when order in [:arrival, :home_stands],
+    do: false
+
   defp local_wins?(local_change, mutation),
     do:
       {local_change.occurred_at, local_change.device} >
         {mutation["occurred_at"], mutation["device_id"]}
+
+  # What the conflict record says decided it.
+  defp resolution(%{home_order: order}, :kept) when not is_nil(order), do: "kept_local_home_order"
+  defp resolution(%{home_order: order}, :applied) when not is_nil(order), do: "applied_home_order"
+  defp resolution(_conflict, :kept), do: "kept_local_newer"
+  defp resolution(_conflict, :applied), do: "applied_remote_newer"
 
   # A change to a superseded table (one sealed before this Engine's upgrade,
   # Store.Migrations.superseded_tables/0) is applied to its successor.
@@ -2396,7 +2453,10 @@ defmodule OptimalEngine.Sync do
         nil
 
       {change, base} ->
-        change |> Map.merge(base_detail(base)) |> Map.put(:kind, conflict_kind(table, base))
+        change
+        |> Map.merge(base_detail(base))
+        |> Map.put(:kind, conflict_kind(table, base))
+        |> Map.put(:home_order, base.home_order)
     end
   end
 
@@ -2583,7 +2643,9 @@ defmodule OptimalEngine.Sync do
            apply_changes(peer.tenant_id, peer.workspace_id, mutations,
              max_class: peer.max_class,
              local_floor: pull_floor(peer),
-             direction: :pull
+             direction: :pull,
+             from_home: Map.get(peer, :home, false),
+             peer_takes_pushes: peer.policy in ["both", "push"]
            ) do
       {:ok, _} =
         Store.raw_query(
@@ -3149,12 +3211,12 @@ defmodule OptimalEngine.Sync do
         {:ok, _} =
           Store.raw_query(
             """
-            INSERT INTO sync_peers (tenant_id, workspace_id, url, credential, policy, max_class, last_pulled_seq, label, remote_workspace_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            INSERT INTO sync_peers (tenant_id, workspace_id, url, credential, policy, max_class, last_pulled_seq, label, remote_workspace_id, home)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(tenant_id, workspace_id, url) DO UPDATE SET
               credential = excluded.credential, policy = excluded.policy, max_class = excluded.max_class,
               status = 'active', label = COALESCE(excluded.label, sync_peers.label),
-              remote_workspace_id = excluded.remote_workspace_id
+              remote_workspace_id = excluded.remote_workspace_id, home = excluded.home
             """,
             [
               tenant_id,
@@ -3165,7 +3227,8 @@ defmodule OptimalEngine.Sync do
               max_class,
               attrs["since"] || 0,
               clean_label(attrs["label"]),
-              remote_workspace_attr(attrs)
+              remote_workspace_attr(attrs),
+              if(home_attr(attrs), do: 1, else: 0)
             ]
           )
 
@@ -3196,6 +3259,7 @@ defmodule OptimalEngine.Sync do
            workspace_id: attrs["workspace_id"],
            url: attrs["url"],
            remote_workspace_id: remote_workspace(peer),
+           home: Map.get(peer, :home, home_attr(attrs)),
            label: peer.label,
            policy: policy,
            max_class: max_class
@@ -3322,7 +3386,8 @@ defmodule OptimalEngine.Sync do
   defp peer_sql do
     """
     SELECT tenant_id, workspace_id, url, credential, policy, max_class, peer_replica_id, last_pulled_seq,
-           last_pushed_seq, pulled_local_seq, last_sync_at, status, message, label, remote_workspace_id
+           last_pushed_seq, pulled_local_seq, last_sync_at, status, message, label, remote_workspace_id,
+           home
     FROM sync_peers
     """
   end
@@ -3342,7 +3407,8 @@ defmodule OptimalEngine.Sync do
          status,
          message,
          label,
-         remote_workspace
+         remote_workspace,
+         home
        ]) do
     %{
       id: peer_id(%{tenant_id: tenant, workspace_id: workspace, url: url}),
@@ -3350,6 +3416,7 @@ defmodule OptimalEngine.Sync do
       tenant_id: tenant,
       workspace_id: workspace,
       remote_workspace_id: remote_workspace,
+      home: home == 1 or (is_nil(home) and relay?(url)),
       url: url,
       credential: credential,
       policy: policy,
