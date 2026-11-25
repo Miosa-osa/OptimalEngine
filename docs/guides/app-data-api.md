@@ -319,13 +319,16 @@ Changes of one transaction share a `txn_id`.
 | `GET /changes` | `since` (sequence or `latest`, default 0), `collection`, `limit` (default 100, max 1,000) | 200 `{"changes", "next_since", "latest_seq"}` |
 | `GET /changes/stream` | `since` (default `latest`) or `Last-Event-ID`, `collection`, `idle_timeout` seconds | `text/event-stream` |
 
-A change is `{"seq", "collection", "record_id", "op", "version", "owner", "actor", "data", "txn_id", "at"}` where `op` is `create`, `update`, `delete`, `schema` or `drop` and `data` is the record after the change (null for deletes).
+A change is `{"seq", "collection", "record_id", "op", "version", "owner", "actor", "data", "txn_id", "at", "origin"}` where `op` is `create`, `update`, `delete`, `schema` or `drop` and `data` is the record after the change (null for deletes).
+For a `schema` change, `data` holds the collection's `schema` after it, the `operations` of an alteration, and `migration` when an app migration made it.
+`origin` is the replica a change was made on when this Engine replayed it from a peer, and `null` for a change made here.
 A consumer stores the last `seq` it processed and resumes with `since=<seq>` or the SSE `Last-Event-ID` header.
 The stream sends `id: <seq>` for every change, is woken by commits, polls every 15 seconds as a safety net, and sends keepalive comments; with `idle_timeout` it closes after that many quiet seconds.
 Owner-bound callers see changes of rows they own, rows of collections without an owner field, and schema events; collection-limited keys see only their collections.
 The feed is append-only and kept indefinitely; there is no retention pruning yet.
 Schema backfills (`add_field` with a default) do not emit per-record changes; the `schema` change records the alteration.
 Webhook delivery of data changes is not implemented; consumers poll or stream.
+In a workspace enabled for replication the feed is what replicates: a peer replays each change into its own collections, and a workspace bundle carries the collections and their records ([Replication, App data](replication.md#app-data)).
 
 ### Migrations
 

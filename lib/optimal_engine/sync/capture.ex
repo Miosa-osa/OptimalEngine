@@ -51,8 +51,8 @@ defmodule OptimalEngine.Sync.Capture do
   # Demoting a table from this list drops its unsent ledger rows at the next boot
   # (`Sync.purge_unreplicated_once/0`).
   @replicated ~w(analysis_reports canonical_entities chunk_embeddings chunks citations claims
-                 classifications cluster_members clusters contexts data_quality_snapshots decisions
-                 derivation_ledger edges entities entity_aliases entity_identifiers entity_lineage
+                 classifications cluster_members clusters contexts data_changes data_quality_snapshots
+                 decisions derivation_ledger edges entities entity_aliases entity_identifiers entity_lineage
                  entity_mentions episodes facts generalized_workflows graph_edges intents memories
                  memory_association_paths memory_associations memory_consolidation_proposals
                  memory_detail_objects memory_embeddings memory_objects memory_path_feedback
@@ -79,9 +79,11 @@ defmodule OptimalEngine.Sync.Capture do
   #   exists on one Engine only), mcp_tool_definitions and skill_packages (tools
   #   and skills an agent runs), routing_rules (steers where intake files
   #   documents);
-  # * reaches outside the database: data_collections, data_changes, data_files and
+  # * reaches outside the database: data_collections, data_files and
   #   data_schema_migrations (a collection's `table_name` is interpolated into the
-  #   SQL that serves it), assets and every asset_* table (`storage_path` names a
+  #   SQL that serves it; app data replicates as its change feed, `data_changes`,
+  #   which a receiver replays into collections of its own through
+  #   `OptimalEngine.AppData.Replication`), assets and every asset_* table (`storage_path` names a
   #   file on the Engine's disk or a bucket; asset files do not sync);
   # * decodes into atoms: surfacing_subscriptions;
   # * how this Engine stores data and which models it runs: storage_provider_configs,
@@ -96,7 +98,7 @@ defmodule OptimalEngine.Sync.Capture do
   #   skills, topology_change_requests, resolution_decisions.
   @per_engine ~w(active_memory_pools architectures asset_adapter_runs asset_embedding_refs
                  asset_extractions asset_ocr_spans asset_transcripts asset_visual_observations assets
-                 audit_samples context_packages data_changes data_collections data_files
+                 audit_samples context_packages data_collections data_files
                  data_schema_migrations decomposition_runs evaluation_cases
                  evaluation_runs events export_records link_health_records mcp_tool_definitions
                  model_adapters model_call_operations model_call_runs node_members principal_skills

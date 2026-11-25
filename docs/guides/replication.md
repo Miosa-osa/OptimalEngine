@@ -36,7 +36,7 @@ That stream carries what `GET /api/sync/changes` serves, behind the same data-cl
 
 ## What replicates, and what a peer can write
 
-What replicates is an explicit list of workspace knowledge (`Capture.replicated_tables/0`): contexts, chunks and their embeddings, memories and their associations, claims, facts, decisions, episodes, entities and their aliases, mentions and lineage, citations, classifications, intents, clusters, rhythm notes, open loops, observations, source packages, signal events, edges, nodes and node relationships and types, wiki pages, sessions, workflows and their traces, procedural memory, training examples, derivation records and analysis reports.
+What replicates is an explicit list of workspace knowledge (`Capture.replicated_tables/0`): contexts, chunks and their embeddings, memories and their associations, claims, facts, decisions, episodes, entities and their aliases, mentions and lineage, citations, classifications, intents, clusters, rhythm notes, open loops, observations, source packages, signal events, edges, nodes and node relationships and types, wiki pages, sessions, workflows and their traces, procedural memory, training examples, derivation records and analysis reports, and the app data change feed (`data_changes`, see App data below).
 Every other table is local: it is not captured, not served, not pushed, and a change for it that a peer sends is skipped.
 A table nobody has classified is local too, so a new table stays on its Engine until someone adds it to the list, and `test/sync/sync_test.exs` fails until every table with a `workspace_id` is on the list or classified local.
 `GET /api/sync/tables` (scope `sync`) returns `{replicated, local_only, migration}` from the same lists, so a relay reads it from each Engine instead of keeping a list of its own.
@@ -50,7 +50,7 @@ These stay local, and the reason is the whole decision:
 | `mcp_tool_definitions`, `skill_packages`, `skills`, `routing_rules` | Tools and skills an agent runs, and the rules that steer where intake files documents: a peer must never register or steer them |
 | `storage_provider_configs`, `workspace_storage_policies` | How this Engine stores data: a peer must never repoint storage |
 | `model_call_operations`, `model_adapters` | Which models this Engine runs; an adapter's artifact is a file on the Engine that trained it |
-| `data_collections`, `data_changes`, `data_files`, `data_schema_migrations` | A collection's `table_name` is interpolated into the SQL that serves it |
+| `data_collections`, `data_files`, `data_schema_migrations` | A collection's `table_name` is interpolated into the SQL that serves it; app data replicates as its change feed instead (see App data) |
 | `assets` and every `asset_*` table | `storage_path` names a file on the Engine's disk or a bucket, and asset files do not sync |
 | `surfacing_subscriptions` | Decoded into atoms |
 | `model_call_runs`, `tool_call_runs`, `decomposition_runs`, `training_runs`, `evaluation_runs`, `evaluation_cases`, `context_packages`, `active_memory_pools`, `export_records`, `projection_revisions`, `link_health_records` | What this Engine executed or wrote out, and what is derived from it: destinations are paths on it, and both Engines would write the same object to the same destination |
@@ -419,6 +419,9 @@ Every conflict says why (`GET /api/sync/conflicts`):
 | `peer_replaced` | The peer answered as another replica, or its ledger ended before the cursor; its cursors were reset (resolved at once) |
 | `superseded` | A change of this Engine's that was not pushed because the peer's change to the row came after it in this ledger, so the peer already holds the winner (resolved at once; `detail` has the later change's device and sequence) |
 | `concurrent_change` | The kind rows recorded before kinds existed keep; they mean `concurrent_edit` |
+| `version_conflict` | An app data record change whose base is not the record's version here; the record here is kept (see App data) |
+| `schema_invalid`, `unique_conflict` | An app data record that does not fit the collection here, or holds a unique value another record here holds; not applied |
+| `schema_conflict`, `migration_conflict` | An app data schema change or migration the collection or migration ledger here contradicts; not applied |
 
 For the first three, `detail` holds `mutation_id`, `local_seq` and `local_device` (the local change's ledger sequence and origin), `base_seq` (on a push), `local_floor` (on a pull), `local_occurred_at`, `remote_occurred_at`, and `resolution` (`kept_local_newer` or `applied_remote_newer`).
 `GET /api/sync/status` counts open conflicts in total (`open_conflicts`) and per table (`conflicts_by_table`).
@@ -431,6 +434,33 @@ Engines that sync with each other and with a hub as well, so that one change can
 A replica key is trusted to report what its holder saw: a `base_seq` that passes the checks above (this Engine's replica id, not past the workspace's head) is believed, and a `replica_id` that names this Engine itself is ignored.
 A key that can push can already write every replicated table of the workspace, so a forged base lets it choose which of its own changes are called concurrent, not reach anything else.
 
+## App data
+
+App data (`docs/guides/app-data-api.md`) replicates as its change feed: `data_changes` is captured like any replicated table, and nothing else of app data is.
+A receiver never writes a peer's feed row as it came.
+It replays each change through app data (`OptimalEngine.AppData.Replication`), so its collections have tables of its own, with names it gave them, and every change is checked as a write there is:
+
+- A created collection is created from the schema the peer recorded, checked as a definition is; an alteration runs its operations again from the schema version before it.
+  The schema the replay gives must be the one the peer recorded, or the change is not applied (`schema_diverged`).
+  A collection the receiver already holds under the name with the same schema is taken as the change already applied; one with another schema is a `schema_conflict`.
+- A schema change an app migration made carries the migration whole (app, version, name, checksum, operations).
+  The receiver computes the checksum again from the operations, applies the migration with its row in `data_schema_migrations`, and takes the migration's other changes as applied, so a deploy of the same migrations on the receiver skips them.
+  The same version with another checksum there is a `migration_conflict`.
+- A record change carries the record's version after it and the whole record.
+  Its base is the version before it: a create needs no record with the id, an update and a delete need the record at that version.
+  A base that is not the version here is a `version_conflict`, resolved `kept_local`: the record here stays as it is and the conflict holds both versions (`local.record`, the peer's change, and `detail.base_version`, `detail.local_version`).
+  This is optimistic locking across Engines: no clock decides, and the app or a person resolves the conflict with a new write.
+  A delete of a record that is not here is taken as applied.
+- A record must fit the receiver's copy of the collection: every field known, required fields present, every value of its field's type.
+  One that does not is a `schema_invalid` conflict, resolved `not_applied`, with the errors in `detail.errors`; a unique value another record here holds is a `unique_conflict`.
+  The rest of the page applies.
+
+A change that is not applied is not put in the ledger, so nothing forwards it, and it is recorded once however often it arrives.
+A change that cannot be applied at all (its collection is not on the receiver, a change that is not of the shape the feed records) is an `apply_failed` conflict.
+The receiver's feed records each replayed change with the peer's actor and, in `origin`, the replica it was made on (migration 90); its full-text index is filled as the records are written, and its change feed subscribers are woken.
+Files attached to records do not replicate: their bytes are in the asset store, which does not sync, so a file reaches a replica only in a workspace bundle.
+Changes made before the workspace was enabled are not in the ledger; seed the replica from a bundle (below), which carries the collections and their records.
+
 ## Version safety
 
 Every page carries the sender's replica id, Engine version, and schema migration (the highest migration this Engine has).
@@ -440,5 +470,6 @@ A peer on a different migration pauses with `status: paused_version` and a messa
 
 Enable sync on the source, export a workspace bundle (`docs/guides/scope-and-portability.md`), import it on the new replica, and register the peer with `since` set to the bundle's `ledger_sequence`.
 The replica then pulls only what happened after the snapshot, so a large workspace never resyncs from zero.
+The bundle carries the workspace's app data collections and their records (`app_data/<collection>.jsonl`); the import makes its own collection for each, from the schema the bundle carries, with the source's record ids and versions, so changes pulled after the mark apply on top of them.
 The export seals every captured change, then reads the mark and the rows from one snapshot, so a change written just before the export is in the bundle and is not pulled again, and a change written during it is pulled once.
 `scripts/proof-seed.sh` proves it with two Engines: a synthetic workspace (`SEED_MB`, 2048 for 2 GB) seeds the replica, and the replica pulls exactly the source's ledger entries after the mark.

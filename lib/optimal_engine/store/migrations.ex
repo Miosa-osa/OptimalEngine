@@ -153,7 +153,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_key_grants_backfill(),
       migration_triple_mirror_changes(),
       migration_sync_history(),
-      migration_qdrant_pending_removals()
+      migration_qdrant_pending_removals(),
+      migration_app_data_change_origin()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -833,6 +834,20 @@ defmodule OptimalEngine.Store.Migrations do
         """},
        {"idx_qdrant_pending_removals_created",
         "CREATE INDEX IF NOT EXISTS idx_qdrant_pending_removals_created ON qdrant_pending_removals(created_at, id)"}
+     ]}
+  end
+
+  # The replica a change of app data was made on, for a change this Engine
+  # replayed from a peer (`OptimalEngine.AppData.Replication`); NULL for a change
+  # made here. `actor` names who made it, on whichever Engine. Additive. The
+  # version is provisional, like the ones above.
+  @app_data_change_origin_version 90
+
+  defp migration_app_data_change_origin do
+    {@app_data_change_origin_version,
+     "app data changes: the replica a change replayed from a peer was made on",
+     [
+       {"data_changes.origin_replica", "ALTER TABLE data_changes ADD COLUMN origin_replica TEXT"}
      ]}
   end
 

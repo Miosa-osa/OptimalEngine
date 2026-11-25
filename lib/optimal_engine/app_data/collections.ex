@@ -126,12 +126,18 @@ defmodule OptimalEngine.AppData.Collections do
          {:ok, schema} <- Schema.normalize_definition(definition) do
       Store.transaction(fn txn ->
         with {:ok, c} <- create_in(txn, scope, schema),
-             :ok <- log_schema(txn, scope, c, %{"action" => "create"}) do
+             :ok <- log_schema(txn, scope, c, created_detail(c)) do
           {:ok, view(c)}
         end
       end)
     end
   end
+
+  @doc false
+  # What the change feed records of a created collection: its schema, which a
+  # replica creates its own copy from (`AppData.Replication`).
+  @spec created_detail(t()) :: map()
+  def created_detail(c), do: %{"action" => "create", "schema" => c.schema}
 
   @doc false
   # Creates a collection inside an open transaction. Used by `create/2` and
@@ -409,8 +415,13 @@ defmodule OptimalEngine.AppData.Collections do
   end
 
   @doc false
-  @spec alter_in(term(), Scope.t(), t(), term()) :: {:ok, t()} | {:error, term()}
-  def alter_in(txn, scope, c, operations) when is_list(operations) and operations != [] do
+  # `detail` is added to the change the alteration records (an app migration
+  # names itself there).
+  @spec alter_in(term(), Scope.t(), t(), term(), map()) :: {:ok, t()} | {:error, term()}
+  def alter_in(txn, scope, c, operations, detail \\ %{})
+
+  def alter_in(txn, scope, c, operations, detail)
+      when is_list(operations) and operations != [] do
     result =
       operations
       |> Enum.with_index()
@@ -431,12 +442,21 @@ defmodule OptimalEngine.AppData.Collections do
              [Jason.encode!(altered.schema), version, now, c.id]
            ),
          altered = %{altered | schema_version: version, updated_at: now},
-         :ok <- log_schema(txn, scope, altered, %{"action" => "alter", "operations" => operations}) do
+         :ok <-
+           log_schema(
+             txn,
+             scope,
+             altered,
+             Map.merge(
+               %{"action" => "alter", "operations" => operations, "schema" => altered.schema},
+               detail
+             )
+           ) do
       {:ok, altered}
     end
   end
 
-  def alter_in(_txn, _scope, _c, _operations),
+  def alter_in(_txn, _scope, _c, _operations, _detail),
     do: {:error, {:validation, ["operations must be a non-empty list"]}}
 
   defp alter_op(txn, scope, c, %{"op" => "add_field", "field" => spec}) do
@@ -738,8 +758,9 @@ defmodule OptimalEngine.AppData.Collections do
   end
 
   @doc false
-  @spec drop_in(term(), Scope.t(), String.t(), term()) :: {:ok, t()} | {:error, term()}
-  def drop_in(txn, scope, name, confirm) do
+  # `detail` is added to the change the drop records, as for `alter_in/5`.
+  @spec drop_in(term(), Scope.t(), String.t(), term(), map()) :: {:ok, t()} | {:error, term()}
+  def drop_in(txn, scope, name, confirm, detail \\ %{}) do
     with :ok <-
            if(confirm == name,
              do: :ok,
@@ -757,8 +778,53 @@ defmodule OptimalEngine.AppData.Collections do
              {"DELETE FROM data_embeddings WHERE collection_id = ?", [c.id]},
              {"DELETE FROM data_collections WHERE id = ?", [c.id]}
            ]),
-         :ok <- log_change(txn, scope, c, "drop", nil, nil, nil, %{"action" => "drop"}) do
+         :ok <-
+           log_change(txn, scope, c, "drop", nil, nil, nil, Map.put(detail, "action", "drop")) do
       {:ok, c}
+    end
+  end
+
+  @doc false
+  # Removes collections with their records, tables, files links and
+  # embeddings, and records no change: for a workspace that is going (moved to
+  # another Engine), or for collections an import made and is taking back. All
+  # rows go before any table, so a reference between them is no obstacle; the
+  # caller defers foreign keys to its commit.
+  @spec remove_in(term(), [t()]) :: :ok | {:error, term()}
+  def remove_in(txn, collections) do
+    with :ok <- ddl_all(txn, Enum.map(collections, &~s[DELETE FROM "#{&1.table}"])),
+         :ok <-
+           Enum.reduce_while(collections, :ok, fn c, :ok ->
+             case drop_fts(txn, c.table) do
+               :ok -> {:cont, :ok}
+               error -> {:halt, error}
+             end
+           end),
+         :ok <- ddl_all(txn, Enum.map(collections, &~s[DROP TABLE IF EXISTS "#{&1.table}"])) do
+      SQL.exec_all(
+        txn,
+        Enum.flat_map(collections, fn c ->
+          [
+            {"DELETE FROM data_files WHERE collection_id = ?", [c.id]},
+            {"DELETE FROM data_embeddings WHERE collection_id = ?", [c.id]},
+            {"DELETE FROM data_collections WHERE id = ?", [c.id]}
+          ]
+        end)
+      )
+    end
+  end
+
+  @doc false
+  # The collection with registry id `id`, in the scope's workspace.
+  @spec load_id(:store | term(), Scope.t(), String.t()) :: {:ok, t()} | {:error, term()}
+  def load_id(conn, %Scope{} = scope, id) when is_binary(id) do
+    sql =
+      "SELECT #{@columns} FROM data_collections WHERE tenant_id = ? AND workspace_id = ? AND id = ?"
+
+    case SQL.query(conn, sql, [scope.tenant_id, scope.workspace_id, id]) do
+      {:ok, [row]} -> {:ok, from_row(row)}
+      {:ok, []} -> {:error, {:not_found, "collection_not_found"}}
+      {:error, _} = error -> error
     end
   end
 
@@ -808,8 +874,9 @@ defmodule OptimalEngine.AppData.Collections do
   def log_change(txn, scope, c, op, record_id, version, owner, data, txn_id \\ nil) do
     sql = """
     INSERT INTO data_changes
-      (tenant_id, workspace_id, collection_id, collection, record_id, op, version, owner, actor, data, txn_id, at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (tenant_id, workspace_id, collection_id, collection, record_id, op, version, owner, actor, data, txn_id, at,
+       origin_replica)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
 
     params = [
@@ -824,7 +891,8 @@ defmodule OptimalEngine.AppData.Collections do
       scope.actor,
       data && Jason.encode!(data),
       txn_id,
-      Schema.now()
+      Schema.now(),
+      scope.origin
     ]
 
     case SQL.exec(txn, sql, params) do

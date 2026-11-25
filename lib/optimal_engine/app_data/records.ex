@@ -560,6 +560,19 @@ defmodule OptimalEngine.AppData.Records do
   @spec system_columns() :: String.t()
   def system_columns, do: @system_columns
 
+  @doc false
+  # The column values of a whole record, checked as a create checks them: every
+  # name a field of the collection, every required field present, every value of
+  # its field's type. A replica checks a peer's record with it
+  # (`OptimalEngine.AppData.Replication`).
+  @spec whole_record_values(map(), term()) :: {:ok, [{String.t(), term()}]} | {:error, term()}
+  def whole_record_values(c, data) do
+    with {:ok, data} <- data_map(data),
+         :ok <- known_fields(c, data) do
+      coerce_all(c, data, :create)
+    end
+  end
+
   defp data_map(nil), do: {:ok, %{}}
   defp data_map(%{} = data) when not is_struct(data), do: {:ok, data}
   defp data_map(_data), do: {:error, {:validation, ["data must be an object"]}}
