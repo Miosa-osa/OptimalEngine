@@ -154,7 +154,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_triple_mirror_changes(),
       migration_sync_history(),
       migration_qdrant_pending_removals(),
-      migration_app_data_change_origin()
+      migration_app_data_change_origin(),
+      migration_sync_peer_remote_workspace()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -848,6 +849,21 @@ defmodule OptimalEngine.Store.Migrations do
      "app data changes: the replica a change replayed from a peer was made on",
      [
        {"data_changes.origin_replica", "ALTER TABLE data_changes ADD COLUMN origin_replica TEXT"}
+     ]}
+  end
+
+  # The workspace id a peer knows a workspace by, when it is not this Engine's: a
+  # laptop Engine holds each organization in a tenant of its own, so its
+  # `<tenant>:<slug>` workspace id differs from the cloud Engine's. NULL means the
+  # same id. Additive. The version is provisional, like the ones above.
+  @sync_peer_remote_workspace_version 91
+
+  defp migration_sync_peer_remote_workspace do
+    {@sync_peer_remote_workspace_version,
+     "sync peers: the workspace id the peer knows the workspace by",
+     [
+       {"sync_peers.remote_workspace_id",
+        "ALTER TABLE sync_peers ADD COLUMN remote_workspace_id TEXT"}
      ]}
   end
 

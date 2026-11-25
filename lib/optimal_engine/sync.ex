@@ -630,6 +630,9 @@ defmodule OptimalEngine.Sync do
       not valid_label?(attrs["label"]) ->
         {:error, :invalid_label}
 
+      not valid_remote_workspace?(attrs["remote_workspace_id"]) ->
+        {:error, :invalid_remote_workspace_id}
+
       true ->
         store_peer(tenant_id, attrs, policy, max_class, by)
     end
@@ -644,6 +647,33 @@ defmodule OptimalEngine.Sync do
     digest = :crypto.hash(:sha256, Enum.join([tenant, workspace, url], <<0>>))
     "peer_" <> (digest |> Base.encode16(case: :lower) |> binary_part(0, 16))
   end
+
+  @doc """
+  The workspace id the peer knows the peer's workspace by: `remote_workspace_id`
+  when it was given (a laptop Engine keeps each organization in a tenant of its
+  own, so its workspace ids differ from the cloud Engine's), else this Engine's.
+  Every request to the peer names this id; everything stored here is under the
+  local id.
+  """
+  @spec remote_workspace(map()) :: String.t()
+  def remote_workspace(%{remote_workspace_id: remote}) when is_binary(remote) and remote != "",
+    do: remote
+
+  def remote_workspace(%{workspace_id: workspace}), do: workspace
+
+  defp remote_workspace_attr(attrs) do
+    case attrs["remote_workspace_id"] do
+      remote when is_binary(remote) and remote != "" -> remote
+      _none -> nil
+    end
+  end
+
+  defp valid_remote_workspace?(nil), do: true
+
+  defp valid_remote_workspace?(remote) when is_binary(remote),
+    do: remote != "" and byte_size(remote) <= 256 and String.printable?(remote)
+
+  defp valid_remote_workspace?(_other), do: false
 
   @doc """
   The name of a peer that was given none: `"MIOSA cloud"` for a relay URL,
@@ -2473,8 +2503,8 @@ defmodule OptimalEngine.Sync do
   # `/api/sync/changes`; the relay wraps answers in `{"data": ...}` and refusals
   # in `{"error": {"code", "message"}}`. Nothing here opens a connection to
   # another Engine.
-  defp relay_url(%{url: "relay+" <> base, workspace_id: workspace}, route),
-    do: base <> "/" <> route <> "?" <> URI.encode_query(%{"workspace" => workspace})
+  defp relay_url(%{url: "relay+" <> base} = peer, route),
+    do: base <> "/" <> route <> "?" <> URI.encode_query(%{"workspace" => remote_workspace(peer)})
 
   defp pull_url(%{url: "relay+" <> base}), do: base <> "/pull?"
   defp pull_url(%{url: url}), do: url <> "/api/sync/changes?"
@@ -2537,7 +2567,11 @@ defmodule OptimalEngine.Sync do
   defp pull_pages(peer, key, since, totals, pages_left, deadline) do
     url =
       pull_url(peer) <>
-        URI.encode_query(%{"workspace" => peer.workspace_id, "since" => since, "limit" => @page})
+        URI.encode_query(%{
+          "workspace" => remote_workspace(peer),
+          "since" => since,
+          "limit" => @page
+        })
 
     with {:ok, %{"mutations" => mutations, "cursor" => cursor, "engine" => engine} = page} <-
            request(:get, url, nil, key, 15_000),
@@ -2986,7 +3020,7 @@ defmodule OptimalEngine.Sync do
     # Engine it believed that ledger was, so the other side tells a concurrent
     # edit from one already seen and ignores a sequence from another ledger.
     body = %{
-      "workspace" => peer.workspace_id,
+      "workspace" => remote_workspace(peer),
       "replica_id" => replica_id(),
       "engine" => engine_info(),
       "base_seq" => peer.last_pulled_seq,
@@ -3115,11 +3149,12 @@ defmodule OptimalEngine.Sync do
         {:ok, _} =
           Store.raw_query(
             """
-            INSERT INTO sync_peers (tenant_id, workspace_id, url, credential, policy, max_class, last_pulled_seq, label)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            INSERT INTO sync_peers (tenant_id, workspace_id, url, credential, policy, max_class, last_pulled_seq, label, remote_workspace_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(tenant_id, workspace_id, url) DO UPDATE SET
               credential = excluded.credential, policy = excluded.policy, max_class = excluded.max_class,
-              status = 'active', label = COALESCE(excluded.label, sync_peers.label)
+              status = 'active', label = COALESCE(excluded.label, sync_peers.label),
+              remote_workspace_id = excluded.remote_workspace_id
             """,
             [
               tenant_id,
@@ -3129,7 +3164,8 @@ defmodule OptimalEngine.Sync do
               policy,
               max_class,
               attrs["since"] || 0,
-              clean_label(attrs["label"])
+              clean_label(attrs["label"]),
+              remote_workspace_attr(attrs)
             ]
           )
 
@@ -3159,6 +3195,7 @@ defmodule OptimalEngine.Sync do
            id: peer.id,
            workspace_id: attrs["workspace_id"],
            url: attrs["url"],
+           remote_workspace_id: remote_workspace(peer),
            label: peer.label,
            policy: policy,
            max_class: max_class
@@ -3285,7 +3322,7 @@ defmodule OptimalEngine.Sync do
   defp peer_sql do
     """
     SELECT tenant_id, workspace_id, url, credential, policy, max_class, peer_replica_id, last_pulled_seq,
-           last_pushed_seq, pulled_local_seq, last_sync_at, status, message, label
+           last_pushed_seq, pulled_local_seq, last_sync_at, status, message, label, remote_workspace_id
     FROM sync_peers
     """
   end
@@ -3304,13 +3341,15 @@ defmodule OptimalEngine.Sync do
          at,
          status,
          message,
-         label
+         label,
+         remote_workspace
        ]) do
     %{
       id: peer_id(%{tenant_id: tenant, workspace_id: workspace, url: url}),
       label: label || default_label(url),
       tenant_id: tenant,
       workspace_id: workspace,
+      remote_workspace_id: remote_workspace,
       url: url,
       credential: credential,
       policy: policy,

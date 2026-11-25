@@ -108,7 +108,11 @@ defmodule OptimalEngine.API.SyncAPI do
 
   def add_peer(conn) do
     body = body(conn)
-    attrs = Map.put_new(body, "workspace_id", body["workspace"])
+
+    attrs =
+      body
+      |> Map.put_new("workspace_id", body["workspace"])
+      |> Map.put_new("remote_workspace_id", body["remote_workspace"])
 
     case Sync.add_peer(tenant(conn), attrs, Actor.of(conn, body)) do
       {:ok, peer} -> json(conn, 201, peer)

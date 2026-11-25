@@ -4487,6 +4487,12 @@ defmodule OptimalEngine.API.Router do
   post("/api/bundles/import", do: ScopeAPI.import_bundle(conn))
   get("/api/resolve", do: ScopeAPI.resolve(conn))
 
+  # ── Tenants the operator makes for organizations (OptimalEngine.API.TenantAPI) ──
+  alias OptimalEngine.API.TenantAPI
+
+  post("/api/tenants", do: TenantAPI.create(conn))
+  post("/api/tenants/:tenant_id/keys", do: TenantAPI.mint_key(conn, tenant_id))
+
   # ── Replication (OptimalEngine.API.SyncAPI) ──────────────────────────────
   alias OptimalEngine.API.SyncAPI
 

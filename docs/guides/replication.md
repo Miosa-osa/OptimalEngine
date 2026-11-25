@@ -98,7 +98,7 @@ A blob named for a confined column (`nodes.path`, `contexts.path`, ...) is refus
 | `GET /api/sync/tables` | `sync` | The tables this Engine replicates and the ones it keeps local, with its schema migration |
 | `POST /api/sync/changes {workspace, engine, replica_id, base_seq, base_replica_id, mutations}` | `sync` | Apply a peer's batch; `base_seq` is this Engine's ledger sequence the sender had pulled, `base_replica_id` the replica it believed that ledger was, `replica_id` the sender (see Conflicts); the reply says which base it used (`base`) |
 | `POST /api/sync/enable {workspace, label?}` | admin | Start capturing a workspace; `label` (at most 64 characters) names this Engine and replaces the name it had |
-| `POST /api/sync/peers {workspace, url, api_key, policy, max_class, since?, label?}` | admin | Register a peer; its key is encrypted with `CONNECTOR_KEY`; `label` (at most 64 characters) names it, and a peer without one is named by its URL host (`MIOSA cloud` for a relay) |
+| `POST /api/sync/peers {workspace, url, api_key, policy, max_class, since?, label?, remote_workspace?}` | admin | Register a peer; its key is encrypted with `CONNECTOR_KEY`; `label` (at most 64 characters) names it, and a peer without one is named by its URL host (`MIOSA cloud` for a relay); `remote_workspace` is the id the peer knows the workspace by, when it differs from this Engine's (below) |
 | `POST /api/sync/run` | admin | Run one pull and push cycle now |
 | `GET /api/sync/status?workspace=` | read | Ledger sequence, this Engine's `label`, peers (`id`, `label`, status, cursors, `pulled_local_seq` (the pull floor), pending changes), open conflicts in total (`open_conflicts`) and per table (`conflicts_by_table`) |
 | `GET /api/sync/runs?workspace=&peer_id=&limit=&before=` | read | The workspace's peer cycles, newest first (see Sync history) |
@@ -294,6 +294,19 @@ A dense mesh of links that cycles back on itself is `unresolved`: held from a pe
 That is an opaque id, not the row, and the gate does not scrub it.
 - Rows that already reached a peer before a label or lineage existed stay there.
 A held delete does not reach the peer, so purge them on the peer directly.
+
+### Several organizations on one Engine
+
+A laptop Engine can sync workspaces of several organizations, and keeps each organization in a tenant of its own, so their rows, keys and workspaces never mix.
+The client that connects the laptop (the MIOSA CLI, Business OS) asks the laptop's operator routes for the tenant and a key in it:
+
+| Route | Who | What |
+| --- | --- | --- |
+| `POST /api/tenants {id, name}` | the operator | Creates the tenant (`id` is the organization's id), or answers the one this route made before; `409 tenant_exists` for a tenant made any other way |
+| `POST /api/tenants/:id/keys` (the body of `POST /api/auth/keys`) | the operator | Mints a key in a tenant this route made; `403 tenant_not_created_here` for any other |
+
+The operator is a key of the `default` tenant with scopes `*` over every workspace, or a trusted local caller when authentication is not required.
+A workspace id carries its tenant (`<tenant>:<slug>`), so the laptop's id for a workspace differs from the cloud Engine's; the peer's `remote_workspace` is the cloud's id, which every request to the peer names, while everything stored on the laptop stays under the laptop's id.
 
 ### Syncing through a relay
 

@@ -160,6 +160,7 @@ defmodule OptimalEngine.API.PermissionPlug do
         path == "/api/metrics/prometheus" or
         String.starts_with?(path, "/api/bundles") or
         String.starts_with?(path, "/api/federation/peers") or
+        String.starts_with?(path, "/api/tenants") or
         match?(["api", "analytics", "engine" | _], path_info) or
         workspace_bundle_path?(path_info) or
           String.starts_with?(path, "/api/maintenance/") ->
