@@ -67,6 +67,7 @@ defmodule OptimalEngine.API.SyncAPI do
          :ok <- Sync.compatible(body["engine"] || %{}),
          mutations when is_list(mutations) <- body["mutations"] || {:error, :mutations_required},
          {:ok, base} <- base_opts(body),
+         base = base ++ [peer_migration: get_in(body, ["engine", "migration"])],
          {:ok, result} <- Sync.apply_changes(tenant(conn), workspace_id, mutations, base) do
       json(conn, 200, Map.put(result, :engine, Sync.engine_info()))
     else

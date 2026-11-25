@@ -486,7 +486,11 @@ Changes made before the workspace was enabled are not in the ledger; seed the re
 ## Version safety
 
 Every page carries the sender's replica id, Engine version, and schema migration (the highest migration this Engine has).
-A peer on a different migration pauses with `status: paused_version` and a message until both run the same Engine version, so two Engines that sync are upgraded together: the pause costs nothing but time, and both resume in the first cycle after they match.
+Two Engines one schema apart keep syncing when the migration between them is one an older Engine can sync across (`Store.Migrations.sync_bridgeable?/1`): it changes no replicated table, or only adds a nullable or defaulted column to one.
+The newer Engine says so in its envelope (`bridges`, and `sync_bridges` in `/api/version`), and the older one accepts it.
+The older Engine writes the columns it knows and keeps the rest of each change in its ledger, so a peer it forwards the change to still gets them; the newer Engine leaves a column the older one did not send as it was.
+A laptop can therefore run one Engine release behind its cloud, or one ahead, without pausing.
+Any other difference (two schemas apart, or a step that renames, retypes or drops a replicated column) pauses with `status: paused_version` and a message until both run the same Engine version; the pause costs nothing but time, and both resume in the first cycle after they match.
 
 ## Seeding a replica
 

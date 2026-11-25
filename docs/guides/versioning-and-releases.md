@@ -75,6 +75,7 @@ The application version in `mix.exs` follows Semantic Versioning.
 - Ordinary commits retain their exact Git SHA even when they do not create a release.
 
 Database migrations are append-only and independently ordered.
+A new migration decides whether Engines either side of it keep syncing: add its version to `@sync_bridgeable` in `lib/optimal_engine/store/migrations.ex` when it changes no replicated table or only adds a nullable or defaulted column to one, and leave it out when it renames, retypes or drops a replicated column or changes what a value means.
 Never edit a migration that may already be applied.
 
 Retrieval planners, routers, selection policies, projections, and persisted data contracts own explicit component versions.
