@@ -52,6 +52,7 @@ defmodule OptimalEngine.Sync do
   require Logger
 
   alias OptimalEngine.AppData.Changes, as: AppDataChanges
+  alias OptimalEngine.Authority.CanonicalJSON
   alias OptimalEngine.AppData.Replication, as: AppDataReplication
   alias OptimalEngine.AppData.Semantic, as: AppDataSemantic
   alias OptimalEngine.Compliance.DerivedData
@@ -322,8 +323,14 @@ defmodule OptimalEngine.Sync do
           &plan(&1, tenant_id, workspace_id, local, max_class, base, columns)
         )
 
+      {plans, hold} = hold_large_deletes(tenant_id, workspace_id, plans, opts)
+
       with {:ok, result} <- execute(tenant_id, workspace_id, plans) do
-        {:ok, result |> Map.put(:base, Atom.to_string(base.kind)) |> put_base_rejected(base)}
+        {:ok,
+         result
+         |> Map.put(:base, Atom.to_string(base.kind))
+         |> put_base_rejected(base)
+         |> put_hold(hold)}
       end
     end
   end
@@ -354,6 +361,248 @@ defmodule OptimalEngine.Sync do
     do: migration == engine_info()["migration"] + 1
 
   defp peer_ahead?(_migration), do: false
+
+  # -- held deletes (MIO-1102) -------------------------------------------------
+
+  @default_delete_hold 100
+
+  @doc """
+  How many rows of a workspace one batch from a peer may delete before its
+  deletes are held for an owner (`OPTIMAL_SYNC_DELETE_HOLD`, default
+  #{@default_delete_hold}). A batch at or under it applies as it is.
+  """
+  @spec delete_hold() :: pos_integer()
+  def delete_hold do
+    case Application.get_env(:optimal_engine, :sync_delete_hold) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_delete_hold
+    end
+  end
+
+  # A batch that would delete more rows than the hold allows keeps its deletes in
+  # `sync_holds` and applies the rest; the deletes are not in this Engine's ledger,
+  # so nothing forwards them. `release_hold: true` is an owner's approval.
+  defp hold_large_deletes(tenant_id, workspace_id, plans, opts) do
+    {deletes, _rest} =
+      Enum.split_with(plans, &match?({:apply, %{mutation: %{"operation" => "delete"}}}, &1))
+
+    if opts[:release_hold] == true or length(deletes) <= delete_hold() do
+      {plans, nil}
+    else
+      held = Enum.map(deletes, fn {:apply, step} -> step.mutation end)
+      id = "hold_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+
+      {:ok, _} =
+        Store.raw_query(
+          "INSERT INTO sync_holds (id, tenant_id, workspace_id, deletes, mutations) VALUES (?1, ?2, ?3, ?4, ?5)",
+          [id, tenant_id, workspace_id, length(held), Jason.encode!(held)]
+        )
+
+      Logger.warning(
+        "[Sync] held #{length(held)} deletes for workspace #{workspace_id} for an owner's approval (#{id})"
+      )
+
+      plans =
+        Enum.map(plans, fn
+          {:apply, %{mutation: %{"operation" => "delete"} = mutation}} ->
+            {:skip, :held_for_approval, mutation}
+
+          plan ->
+            plan
+        end)
+
+      {plans, %{id: id, deletes: length(held)}}
+    end
+  end
+
+  defp put_hold(result, nil), do: result
+  defp put_hold(result, hold), do: Map.put(result, :held_for_approval, hold)
+
+  @doc "The holds of a workspace, newest first, without their changes."
+  @spec holds(String.t(), String.t()) :: [map()]
+  def holds(tenant_id, workspace_id) do
+    {:ok, rows} =
+      Store.raw_query(
+        """
+        SELECT id, deletes, status, created_at, decided_by, decided_at, result FROM sync_holds
+        WHERE tenant_id = ?1 AND workspace_id = ?2 ORDER BY created_at DESC, id DESC
+        """,
+        [tenant_id, workspace_id]
+      )
+
+    Enum.map(rows, fn [id, deletes, status, at, by, decided_at, result] ->
+      %{
+        id: id,
+        deletes: deletes,
+        status: status,
+        created_at: at,
+        decided_by: by,
+        decided_at: decided_at,
+        result: decode(result)
+      }
+    end)
+  end
+
+  @doc """
+  An owner's decision on a pending hold: `:approve` applies its deletes (judged
+  like any change, against what this Engine holds now), `:reject` drops them.
+  """
+  @spec decide_hold(String.t(), String.t(), :approve | :reject, String.t()) ::
+          {:ok, map()} | {:error, :not_found | :already_decided | term()}
+  def decide_hold(tenant_id, hold_id, decision, by) when decision in [:approve, :reject] do
+    case Store.raw_query(
+           "SELECT workspace_id, mutations, status FROM sync_holds WHERE tenant_id = ?1 AND id = ?2",
+           [tenant_id, hold_id]
+         ) do
+      {:ok, [[_workspace, _mutations, status]]} when status != "pending" ->
+        {:error, :already_decided}
+
+      {:ok, [[workspace_id, mutations, "pending"]]} ->
+        result =
+          if decision == :approve,
+            do:
+              apply_changes(tenant_id, workspace_id, Jason.decode!(mutations), release_hold: true),
+            else: {:ok, %{applied: 0}}
+
+        with {:ok, outcome} <- result do
+          status = if decision == :approve, do: "approved", else: "rejected"
+          summary = Map.take(outcome, [:applied, :failed, :conflicts, :skipped])
+
+          {:ok, _} =
+            Store.raw_query(
+              """
+              UPDATE sync_holds SET status = ?3, decided_by = ?4,
+                decided_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), result = ?5
+              WHERE tenant_id = ?1 AND id = ?2 AND status = 'pending'
+              """,
+              [tenant_id, hold_id, status, by, Jason.encode!(summary)]
+            )
+
+          {:ok, %{id: hold_id, status: status, result: summary}}
+        end
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
+  # -- undo (MIO-1102) -----------------------------------------------------------
+
+  @doc """
+  Undoes the latest change of a row: the row goes back to what the change before
+  it left, or is removed when the change made it. The undo is written here like
+  any edit, so it is captured and replicates as a change of its own. Refused
+  with `:not_latest` when the row changed again since, and `:not_found` for a
+  change this workspace's ledger does not hold.
+  """
+  @spec undo(String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, :not_found | :not_latest | :not_replicated | term()}
+  def undo(tenant_id, workspace_id, mutation_id) do
+    {:ok, _} = Capture.seal()
+
+    with {:ok, change} <- ledger_change(tenant_id, workspace_id, mutation_id),
+         :ok <- latest_change(tenant_id, workspace_id, change),
+         true <- Capture.replicated?(change.table) || {:error, :not_replicated} do
+      previous = previous_change(tenant_id, workspace_id, change)
+      columns = Capture.columns(target_table(change.table))
+
+      restore =
+        case previous do
+          %{operation: operation, payload: payload} when operation != "delete" ->
+            %{"operation" => "update", "payload" => payload}
+
+          _gone_before ->
+            %{"operation" => "delete", "payload" => change.payload}
+        end
+
+      mutation = Map.merge(%{"entity_type" => change.table, "entity_id" => change.entity}, restore)
+
+      result =
+        Store.transaction(fn txn ->
+          {:ok,
+           write(
+             txn,
+             target_table(change.table),
+             columns,
+             mutation,
+             workspace_id,
+             tenant_id,
+             "restricted"
+           )}
+        end)
+
+      case result do
+        {:ok, :ok} ->
+          {:ok, _} = Capture.seal()
+
+          {:ok,
+           %{
+             undone: mutation_id,
+             operation: restore["operation"],
+             entity_type: change.table,
+             entity_id: change.entity
+           }}
+
+        {:ok, {:error, reason}} ->
+          {:error, reason}
+
+        other ->
+          other
+      end
+    end
+  end
+
+  defp ledger_change(tenant_id, workspace_id, mutation_id) do
+    case Store.raw_query(
+           """
+           SELECT sequence, entity_type, entity_id, operation, payload FROM sync_mutations
+           WHERE tenant_id = ?1 AND workspace_id = ?2 AND id = ?3
+           """,
+           [tenant_id, workspace_id, mutation_id]
+         ) do
+      {:ok, [[sequence, table, entity, operation, payload]]} ->
+        {:ok,
+         %{
+           sequence: sequence,
+           table: table,
+           entity: entity,
+           operation: operation,
+           payload: decode(payload)
+         }}
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
+  defp latest_change(tenant_id, workspace_id, change) do
+    case Store.raw_query(
+           """
+           SELECT 1 FROM sync_mutations
+           WHERE tenant_id = ?1 AND workspace_id = ?2 AND entity_type = ?3 AND entity_id = ?4
+             AND sequence > ?5 LIMIT 1
+           """,
+           [tenant_id, workspace_id, change.table, change.entity, change.sequence]
+         ) do
+      {:ok, []} -> :ok
+      _ -> {:error, :not_latest}
+    end
+  end
+
+  defp previous_change(tenant_id, workspace_id, change) do
+    case Store.raw_query(
+           """
+           SELECT operation, payload FROM sync_mutations
+           WHERE tenant_id = ?1 AND workspace_id = ?2 AND entity_type = ?3 AND entity_id = ?4
+             AND sequence < ?5
+           ORDER BY sequence DESC LIMIT 1
+           """,
+           [tenant_id, workspace_id, change.table, change.entity, change.sequence]
+         ) do
+      {:ok, [[operation, payload]]} -> %{operation: operation, payload: decode(payload)}
+      _ -> nil
+    end
+  end
 
   defp put_base_rejected(result, %{rejected: nil}), do: result
   defp put_base_rejected(result, %{rejected: why}), do: Map.put(result, :base_rejected, why)
@@ -1313,6 +1562,13 @@ defmodule OptimalEngine.Sync do
 
       not valid_payload?(mutation["payload"]) ->
         :invalid_payload
+
+      # A change that names its payload's digest is the change it says it is: one
+      # altered on the way (a relay, a proxy) is refused. A sender from before
+      # digests names none.
+      is_binary(mutation["payload_digest"]) and
+          mutation["payload_digest"] != CanonicalJSON.hash(mutation["payload"]) ->
+        :payload_digest_mismatch
 
       # A column holds a number, text or nothing. A list or an object cannot
       # be bound to a statement, and would end the whole batch with an error.
@@ -3210,6 +3466,8 @@ defmodule OptimalEngine.Sync do
   end
 
   defp to_mutation([seq, id, device, type, entity, op, payload, hash, key, at]) do
+    payload = decode(payload)
+
     %{
       "sequence" => seq,
       "id" => id,
@@ -3217,8 +3475,12 @@ defmodule OptimalEngine.Sync do
       "entity_type" => type,
       "entity_id" => entity,
       "operation" => op,
-      "payload" => decode(payload),
+      "payload" => payload,
       "payload_hash" => hash,
+      # The hash of the payload's canonical form (RFC 8785), which the receiver
+      # checks: `payload_hash` is of this Engine's stored text, whose key order
+      # a decode and encode does not keep.
+      "payload_digest" => CanonicalJSON.hash(payload),
       "idempotency_key" => key,
       "occurred_at" => at
     }

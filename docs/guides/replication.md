@@ -295,6 +295,31 @@ That is an opaque id, not the row, and the gate does not scrub it.
 - Rows that already reached a peer before a label or lineage existed stay there.
 A held delete does not reach the peer, so purge them on the peer directly.
 
+### Large deletes wait for an owner
+
+A batch from a peer that would delete more rows of a workspace than `OPTIMAL_SYNC_DELETE_HOLD` (default 100) keeps its deletes for an owner, and the rest of the batch applies.
+The held deletes are not in this Engine's ledger, so nothing forwards them; the batch's reply names the hold (`held_for_approval: {id, deletes}`).
+
+| Route | Scope | What |
+| --- | --- | --- |
+| `GET /api/sync/holds?workspace=` | read | The workspace's holds, newest first, with their status and result |
+| `POST /api/sync/holds/:id/approve` | admin | Applies the held deletes, judged like any change against what this Engine holds now |
+| `POST /api/sync/holds/:id/reject` | admin | Drops them; the rows stay |
+
+A decided hold answers `409 hold_already_decided`.
+
+### Payload digests
+
+Every change an Engine serves names `payload_digest`, the SHA-256 of its payload's canonical form (RFC 8785).
+A receiver refuses a change whose payload does not match its digest (`payload_digest_mismatch`), so a change altered on the way (a relay, a proxy) is not applied; the rest of its batch is.
+A change from an Engine that predates digests names none and is judged as before.
+
+### Undoing a change
+
+`POST /api/sync/undo {workspace, mutation_id}` (admin) undoes the latest change of a row: the row goes back to what the change before it left, or is removed when the change made it.
+The undo is written like any edit, so it is captured and replicates as a change of its own.
+A change the row has had since answers `409 change_not_latest`; undo that one first.
+
 ### The home decides between concurrent changes
 
 Between two Engines that are equals, the newer of two concurrent changes stands, by the clocks of the Engines that made them.

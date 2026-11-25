@@ -156,7 +156,8 @@ defmodule OptimalEngine.Store.Migrations do
       migration_qdrant_pending_removals(),
       migration_app_data_change_origin(),
       migration_sync_peer_remote_workspace(),
-      migration_sync_peer_home()
+      migration_sync_peer_home(),
+      migration_sync_holds()
     ]
 
     # A failing-migration test release appends one migration that fails on
@@ -194,7 +195,7 @@ defmodule OptimalEngine.Store.Migrations do
   # column the older one did not send as it was. A migration that renames,
   # retypes or drops a replicated column, or changes what a value means, is not
   # listed: Engines on either side of it pause until both run it.
-  @sync_bridgeable [91, 92]
+  @sync_bridgeable [91, 92, 93]
 
   @doc "Whether two Engines either side of migration `version` can still sync."
   @spec sync_bridgeable?(integer()) :: boolean()
@@ -890,6 +891,35 @@ defmodule OptimalEngine.Store.Migrations do
   defp migration_sync_peer_home do
     {@sync_peer_home_version, "sync peers: whether the peer is the workspace's home",
      [{"sync_peers.home", "ALTER TABLE sync_peers ADD COLUMN home INTEGER"}]}
+  end
+
+  # A batch from a peer that would delete more rows of a workspace than the hold
+  # allows keeps its deletes here until an owner approves or rejects them
+  # (OptimalEngine.Sync). The rest of the batch applies. Local to this Engine.
+  # The version is provisional, like the ones above.
+  @sync_holds_version 93
+
+  defp migration_sync_holds do
+    {@sync_holds_version, "sync holds: large deletes from a peer kept for an owner's approval",
+     [
+       {"sync_holds",
+        """
+        CREATE TABLE IF NOT EXISTS sync_holds (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          deletes INTEGER NOT NULL,
+          mutations TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+          decided_by TEXT,
+          decided_at TEXT,
+          result TEXT
+        )
+        """},
+       {"idx_sync_holds_workspace",
+        "CREATE INDEX IF NOT EXISTS idx_sync_holds_workspace ON sync_holds(tenant_id, workspace_id, status)"}
+     ]}
   end
 
   defp migration_sync_history do

@@ -8,6 +8,8 @@ defmodule OptimalEngine.API.SyncAPI do
   | `GET /api/sync/tables` (the replicated and local tables of this Engine) | sync |
   | `POST /api/sync/changes` (apply a batch from a peer, with its `base_seq` and `base_replica_id`) | sync |
   | `POST /api/sync/enable`, `POST /api/sync/peers`, `POST /api/sync/run`, `POST /api/sync/conflicts/:id/resolve` | admin |
+  | `GET /api/sync/holds?workspace=` (held deletes) | read |
+  | `POST /api/sync/holds/:id/approve`, `POST /api/sync/holds/:id/reject`, `POST /api/sync/undo` | admin |
   | `GET /api/sync/status?workspace=`, `GET /api/sync/conflicts?workspace=` | read |
   | `GET /api/sync/runs?workspace=&peer_id=&limit=&before=` | read |
   | `GET /api/sync/ledger?workspace=&limit=&before=&table=&origin=` | read |
@@ -122,6 +124,44 @@ defmodule OptimalEngine.API.SyncAPI do
   end
 
   def run(conn), do: json(conn, 200, %{results: Enum.map(Sync.run_all(), &plain/1)})
+
+  @doc "`GET /api/sync/holds?workspace=`: the workspace's held deletes, newest first."
+  def holds(conn) do
+    conn = fetch_query_params(conn)
+
+    case conn.query_params["workspace"] do
+      nil -> error(conn, 400, "workspace is required")
+      workspace_id -> json(conn, 200, %{holds: Sync.holds(tenant(conn), workspace_id)})
+    end
+  end
+
+  @doc "`POST /api/sync/undo {workspace, mutation_id}`: undoes the latest change of a row."
+  def undo(conn) do
+    body = body(conn)
+
+    case {body["workspace"] || body["workspace_id"], body["mutation_id"]} do
+      {workspace, id} when is_binary(workspace) and is_binary(id) ->
+        case Sync.undo(tenant(conn), workspace, id) do
+          {:ok, undone} -> json(conn, 200, undone)
+          {:error, :not_found} -> error(conn, 404, :change_not_found)
+          {:error, :not_latest} -> error(conn, 409, :change_not_latest)
+          {:error, reason} -> error(conn, 422, reason)
+        end
+
+      _ ->
+        error(conn, 400, "workspace and mutation_id are required")
+    end
+  end
+
+  @doc "`POST /api/sync/holds/:id/approve` and `/reject`: an owner's decision on held deletes."
+  def decide_hold(conn, hold_id, decision) do
+    case Sync.decide_hold(tenant(conn), hold_id, decision, Actor.of(conn, body(conn))) do
+      {:ok, decided} -> json(conn, 200, decided)
+      {:error, :not_found} -> error(conn, 404, :hold_not_found)
+      {:error, :already_decided} -> error(conn, 409, :hold_already_decided)
+      {:error, reason} -> error(conn, 422, reason)
+    end
+  end
 
   def status(conn) do
     conn = fetch_query_params(conn)

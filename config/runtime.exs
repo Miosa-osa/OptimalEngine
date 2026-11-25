@@ -263,6 +263,15 @@ case System.get_env("OPTIMAL_SYNC_HOME") do
   _ -> raise ArgumentError, "OPTIMAL_SYNC_HOME must be true or false"
 end
 
+# Sync delete hold: a batch from a peer that would delete more rows of a
+# workspace than this keeps its deletes for an owner's approval (OptimalEngine.Sync).
+if hold = System.get_env("OPTIMAL_SYNC_DELETE_HOLD") do
+  case Integer.parse(hold) do
+    {n, ""} when n > 0 -> config :optimal_engine, :sync_delete_hold, n
+    _ -> raise ArgumentError, "OPTIMAL_SYNC_DELETE_HOLD must be a positive integer"
+  end
+end
+
 # Corpus routing rules (CorpusOrganizer) are deployment data: a YAML or JSON
 # file mapping target workspaces to weighted markers.
 if corpus_rules = System.get_env("OPTIMAL_CORPUS_RULES") do

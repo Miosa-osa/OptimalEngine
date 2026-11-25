@@ -12,6 +12,7 @@ defmodule OptimalEngine.SyncTest do
 
   import ExUnit.CaptureLog
 
+  alias OptimalEngine.Authority.CanonicalJSON
   alias OptimalEngine.{Store, Sync, Workspace}
   alias OptimalEngine.Portability.WorkspaceBundle
   alias OptimalEngine.Sync.Capture
@@ -923,6 +924,150 @@ defmodule OptimalEngine.SyncTest do
 
       assert {:ok, %{applied: 0, failed: [%{reason: :unknown_columns}]}} =
                Sync.apply_changes(ctx.tenant, ctx.ws, [mutation(ctx, %{"payload" => row})])
+    end
+  end
+
+  # MIO-1102: a change is the change it says it is, a large delete waits for an
+  # owner, and a change can be undone.
+  describe "payload digests" do
+    test "a change whose payload does not match its digest is refused; a matching one applies",
+         ctx do
+      row = context_row("digest-#{ctx.n}", "Sent as it is", ctx.ws, ctx.tenant)
+      good = mutation(ctx, %{"payload" => row, "payload_digest" => CanonicalJSON.hash(row)})
+
+      altered =
+        mutation(ctx, %{
+          "payload" => put_in(row, ["row", "title"], "Altered on the way"),
+          "payload_digest" => CanonicalJSON.hash(row)
+        })
+
+      assert {:ok, %{applied: 1, failed: [%{reason: :payload_digest_mismatch}]}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [good, altered])
+
+      assert title("digest-#{ctx.n}") == "Sent as it is"
+    end
+
+    test "every change this Engine serves names its payload's digest", ctx do
+      insert_context(ctx.tenant, ctx.ws, "served-#{ctx.n}", "Served")
+      %{"mutations" => [served | _]} = Sync.changes(ctx.tenant, ctx.ws)
+      assert served["payload_digest"] == CanonicalJSON.hash(served["payload"])
+    end
+  end
+
+  describe "held deletes" do
+    defp with_hold(limit, fun) do
+      previous = Application.get_env(:optimal_engine, :sync_delete_hold)
+      Application.put_env(:optimal_engine, :sync_delete_hold, limit)
+
+      try do
+        fun.()
+      after
+        if is_nil(previous),
+          do: Application.delete_env(:optimal_engine, :sync_delete_hold),
+          else: Application.put_env(:optimal_engine, :sync_delete_hold, previous)
+      end
+    end
+
+    defp delete_batch(ctx, label, count) do
+      for i <- 1..count do
+        id = "#{label}-#{i}-#{ctx.n}"
+        insert_context(ctx.tenant, ctx.ws, id, "Kept until approved")
+
+        # Later than the row made here, so the clock does not keep the row.
+        mutation(ctx, %{
+          "operation" => "delete",
+          "occurred_at" => "2999-01-01T00:00:00.000",
+          "entity_id" => id,
+          "payload" => %{"row" => %{"id" => id}, "blobs" => %{}}
+        })
+      end
+    end
+
+    defp exists?(id),
+      do: match?({:ok, [_]}, Store.raw_query("SELECT 1 FROM contexts WHERE id = ?1", [id]))
+
+    test "more deletes than the hold allows wait for an owner; the rest of the batch applies",
+         ctx do
+      deletes = delete_batch(ctx, "held", 3)
+
+      create =
+        mutation(ctx, %{"payload" => context_row("new-#{ctx.n}", "Arrives", ctx.ws, ctx.tenant)})
+
+      assert {:ok, %{applied: 1, held_for_approval: %{id: hold_id, deletes: 3}}} =
+               with_hold(2, fn -> Sync.apply_changes(ctx.tenant, ctx.ws, [create | deletes]) end)
+
+      assert title("new-#{ctx.n}") == "Arrives"
+      assert Enum.all?(deletes, &exists?(&1["entity_id"]))
+      assert [%{id: ^hold_id, status: "pending", deletes: 3}] = Sync.holds(ctx.tenant, ctx.ws)
+
+      assert {:ok, %{status: "approved"}} = Sync.decide_hold(ctx.tenant, hold_id, :approve, "owner")
+      refute Enum.any?(deletes, &exists?(&1["entity_id"]))
+      assert {:error, :already_decided} = Sync.decide_hold(ctx.tenant, hold_id, :reject, "owner")
+    end
+
+    test "rejected deletes are dropped and the rows stay", ctx do
+      deletes = delete_batch(ctx, "rejected", 3)
+
+      {:ok, %{held_for_approval: %{id: hold_id}}} =
+        with_hold(2, fn -> Sync.apply_changes(ctx.tenant, ctx.ws, deletes) end)
+
+      assert {:ok, %{status: "rejected"}} = Sync.decide_hold(ctx.tenant, hold_id, :reject, "owner")
+      assert Enum.all?(deletes, &exists?(&1["entity_id"]))
+      assert {:error, :not_found} = Sync.decide_hold(ctx.tenant, "hold_missing", :approve, "owner")
+    end
+
+    test "deletes at or under the hold apply as before", ctx do
+      deletes = delete_batch(ctx, "under", 2)
+
+      assert {:ok, %{applied: 2} = result} =
+               with_hold(2, fn -> Sync.apply_changes(ctx.tenant, ctx.ws, deletes) end)
+
+      refute Map.has_key?(result, :held_for_approval)
+    end
+  end
+
+  describe "undo" do
+    defp latest_mutation(ctx, id) do
+      {:ok, _} = Capture.seal()
+
+      {:ok, [[mutation_id]]} =
+        Store.raw_query(
+          "SELECT id FROM sync_mutations WHERE workspace_id = ?1 AND entity_type = 'contexts' AND entity_id = ?2 ORDER BY sequence DESC LIMIT 1",
+          [ctx.ws, id]
+        )
+
+      mutation_id
+    end
+
+    test "an edit is undone to what the row held before it, and the undo is a change of its own",
+         ctx do
+      id = "undo-edit-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "First title")
+      {:ok, _} = Store.raw_query("UPDATE contexts SET title = 'Second title' WHERE id = ?1", [id])
+      edit = latest_mutation(ctx, id)
+
+      assert {:ok, %{undone: ^edit, operation: "update"}} = Sync.undo(ctx.tenant, ctx.ws, edit)
+      assert title(id) == "First title"
+      refute latest_mutation(ctx, id) == edit
+    end
+
+    test "a create is undone by removing the row; an older change is not undone over a newer one",
+         ctx do
+      id = "undo-create-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, id, "Made here")
+      create = latest_mutation(ctx, id)
+      {:ok, _} = Store.raw_query("UPDATE contexts SET title = 'Then edited' WHERE id = ?1", [id])
+
+      assert {:error, :not_latest} = Sync.undo(ctx.tenant, ctx.ws, create)
+
+      other = "undo-only-#{ctx.n}"
+      insert_context(ctx.tenant, ctx.ws, other, "Only a create")
+
+      assert {:ok, %{operation: "delete"}} =
+               Sync.undo(ctx.tenant, ctx.ws, latest_mutation(ctx, other))
+
+      assert {:ok, []} = Store.raw_query("SELECT 1 FROM contexts WHERE id = ?1", [other])
+      assert {:error, :not_found} = Sync.undo(ctx.tenant, ctx.ws, "mut_missing")
     end
   end
 
