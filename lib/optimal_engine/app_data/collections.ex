@@ -800,7 +800,7 @@ defmodule OptimalEngine.AppData.Collections do
                error -> {:halt, error}
              end
            end),
-         :ok <- ddl_all(txn, Enum.map(collections, &~s[DROP TABLE IF EXISTS "#{&1.table}"])) do
+         :ok <- ddl_all(txn, drop_tables(collections)) do
       SQL.exec_all(
         txn,
         Enum.flat_map(collections, fn c ->
@@ -812,6 +812,25 @@ defmodule OptimalEngine.AppData.Collections do
         end)
       )
     end
+  end
+
+  # PostgreSQL refuses to drop, one statement at a time, a table that another
+  # table's foreign key names, and refuses to drop a table whose deferred key
+  # checks (from the deletes above) are still pending. So the pending checks
+  # run first, one DROP names every table (tables that only reference each
+  # other go together; one a table outside the set names is still refused),
+  # and the caller's deferred checks resume. SQLite drops one table per
+  # statement and checks keys at commit.
+  defp drop_tables([]), do: []
+
+  defp drop_tables(collections) do
+    if postgres?(),
+      do: [
+        "SET CONSTRAINTS ALL IMMEDIATE",
+        ~s[DROP TABLE IF EXISTS ] <> Enum.map_join(collections, ", ", &~s["#{&1.table}"]),
+        "SET CONSTRAINTS ALL DEFERRED"
+      ],
+      else: Enum.map(collections, &~s[DROP TABLE IF EXISTS "#{&1.table}"])
   end
 
   @doc false
