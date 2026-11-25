@@ -1546,7 +1546,7 @@ defmodule OptimalEngine.SyncTest do
     test "tables that grant a capability, name a path or an identifier, or decode into atoms are skipped",
          ctx do
       tables =
-        ~w(data_collections data_changes data_files data_schema_migrations assets
+        ~w(data_collections data_files data_schema_migrations assets
            asset_adapter_runs asset_extractions asset_transcripts surfacing_subscriptions
            mcp_tool_definitions skill_packages skills model_call_operations model_adapters
            storage_provider_configs workspace_storage_policies workspace_members node_members

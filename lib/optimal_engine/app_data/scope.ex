@@ -15,6 +15,9 @@ defmodule OptimalEngine.AppData.Scope do
   * `admin` - may change schemas and write rows owned by someone else.
     Trusted local callers and keys holding `*` or `data:admin` are admins.
   * `keyed` - the caller authenticated with an API key.
+  * `origin` - the replica a change was made on, when this Engine replays a
+    peer's change (`OptimalEngine.AppData.Replication`); `nil` for a change
+    made here. Recorded on the change with the actor.
   """
 
   @operations ~w(read create update delete)
@@ -26,7 +29,8 @@ defmodule OptimalEngine.AppData.Scope do
             collections: :all,
             operations: :all,
             admin: true,
-            keyed: false
+            keyed: false,
+            origin: nil
 
   @type t :: %__MODULE__{
           tenant_id: String.t(),
@@ -36,7 +40,8 @@ defmodule OptimalEngine.AppData.Scope do
           collections: :all | [String.t()],
           operations: :all | [String.t()],
           admin: boolean(),
-          keyed: boolean()
+          keyed: boolean(),
+          origin: String.t() | nil
         }
 
   @doc "Operations a data key may be limited to."

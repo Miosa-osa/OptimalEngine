@@ -46,6 +46,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
   require Logger
 
+  alias OptimalEngine.AppData.{Collections, Schema, Scope}
   alias OptimalEngine.Authority.CanonicalJSON
   alias OptimalEngine.Compliance.Artifacts
   alias OptimalEngine.Store
@@ -82,6 +83,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # the import has one, names the same token.
   @import_token "import_token"
   @batch_rows 1_000
+  # The table of an app data collection (`AppData.Collections.create_in/3`).
+  @app_data_table ~r/\Aappdata_[0-9a-f]{16}\z/
+  @collections "data_collections"
   @snapshot_attempts 20
   @stale_staging_seconds 7_200
 
@@ -114,13 +118,17 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         observed(observe, {:phase, :sealing})
         started = System.monotonic_time(:millisecond)
 
-        with {:ok, {mark, tables}} <- snapshot_tables(tenant_id, workspace_id, staging, observe) do
+        with {:ok, {mark, tables, app_data}} <-
+               snapshot_tables(tenant_id, workspace_id, staging, observe) do
           read = System.monotonic_time(:millisecond)
           observed(observe, {:phase, :files})
           files = export_files(workspace_id, staging)
           copied = System.monotonic_time(:millisecond)
           observed(observe, {:phase, :packing})
-          result = write_bundle(tenant_id, workspace, mark, tables, files, staging, path)
+
+          result =
+            write_bundle(tenant_id, workspace, mark, {tables, app_data}, files, staging, path)
+
           packed = System.monotonic_time(:millisecond)
 
           # Where a large export spends its time: reading the rows, copying the
@@ -156,7 +164,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     :ok
   end
 
-  defp write_bundle(tenant_id, workspace, mark, tables, files, staging, path) do
+  defp write_bundle(tenant_id, workspace, mark, {tables, app_data}, files, staging, path) do
     manifest =
       %{
         "format" => @format,
@@ -174,6 +182,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           "metadata" => workspace.metadata
         },
         "tables" => tables,
+        "app_data" => app_data,
         "files" => files,
         "ledger_sequence" => mark
       }
@@ -201,7 +210,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
           if pending_captures(snap, workspace_id) == 0 do
             observed(observe, {:phase, :reading})
             mark = ledger_mark(snap, tenant_id, workspace_id)
-            {:ok, {mark, export_tables(snap, tenant_id, workspace_id, staging, observe)}}
+            tables = export_tables(snap, tenant_id, workspace_id, staging, observe)
+            app_data = export_app_data(snap, tenant_id, workspace_id, staging, observe)
+            {:ok, {mark, tables, app_data}}
           else
             :captures_pending
           end
@@ -296,13 +307,15 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
            :ok <- observed(observe, {:phase, :planning}),
            {:ok, plan} <- plan(manifest, tenant_id, opts),
            :ok <- consume(path, opts),
-           {:ok, counts, file_count} <- write_planned(manifest, staging, plan, observe, opts) do
+           {:ok, {counts, app_data}, file_count} <-
+             write_planned(manifest, staging, plan, observe, opts) do
         {:ok,
          %{
            workspace_id: plan.workspace_id,
            tenant_id: tenant_id,
            mode: plan.mode,
            rows: counts,
+           app_data: app_data,
            files: file_count,
            bundle_sha256: manifest["bundle_sha256"],
            ledger_sequence: manifest["ledger_sequence"],
@@ -703,6 +716,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       when is_binary(table) and is_binary(column) ->
         {:ok, table}
 
+      {:ok, %{"table" => @collections, "collection" => id}} when is_binary(id) ->
+        {:ok, @collections}
+
       _ ->
         :error
     end
@@ -716,12 +732,18 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
       {:ok, io} ->
         try do
           {refused, _scopes} =
-            Enum.reduce(batches, {0, %{}}, fn {table, offset, size}, {refused, scopes} ->
-              {scope, scopes} = discard_scope(scopes, table, tenant_id, workspace_id)
+            Enum.reduce(batches, {0, %{}}, fn
+              {@collections, offset, size}, {refused, scopes} ->
+                if discard_collection(io, {offset, size}, {tenant_id, workspace_id}),
+                  do: {refused, scopes},
+                  else: {refused + 1, scopes}
 
-              if discard_batch(io, table, offset, size, scope),
-                do: {refused, scopes},
-                else: {refused + 1, scopes}
+              {table, offset, size}, {refused, scopes} ->
+                {scope, scopes} = discard_scope(scopes, table, tenant_id, workspace_id)
+
+                if discard_batch(io, table, offset, size, scope),
+                  do: {refused, scopes},
+                  else: {refused + 1, scopes}
             end)
 
           refused
@@ -773,6 +795,32 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
               {:error, _} = error -> {:halt, error}
             end
           end)
+        end)
+      )
+    else
+      _ -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  # A collection the import made goes with its records and its table. True when
+  # it is gone.
+  defp discard_collection(io, {offset, size}, {tenant_id, workspace_id}) do
+    scope = Scope.new(tenant_id: tenant_id, workspace_id: workspace_id)
+
+    with {:ok, data} <- :file.pread(io, offset, size),
+         {:ok, %{"collection" => id}} <- Jason.decode(data) do
+      match?(
+        {:ok, _},
+        Store.transaction(fn txn ->
+          {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
+
+          case Collections.load_id(txn, scope, id) do
+            {:ok, c} -> with :ok <- Collections.remove_in(txn, [c]), do: {:ok, :removed}
+            {:error, {:not_found, _}} -> {:ok, :gone}
+            error -> error
+          end
         end)
       )
     else
@@ -1222,8 +1270,18 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # read from the snapshot a page at a time and each page is written and
   # hashed before the next is read, so a large workspace is never held in
   # memory.
-  defp write_table(reader, staging, table, columns, where, params) do
-    file = Path.join([staging, "tables", table <> ".jsonl"])
+  defp write_table(reader, staging, table, columns, where, params),
+    do:
+      write_jsonl(
+        reader,
+        Path.join([staging, "tables", table <> ".jsonl"]),
+        table,
+        columns,
+        where,
+        params
+      )
+
+  defp write_jsonl(reader, file, table, columns, where, params) do
     names = Enum.map(columns, &elem(&1, 0))
 
     {rows, hash} =
@@ -1279,6 +1337,50 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # the rows read and the table.
   defp page_read(table, rows),
     do: :telemetry.execute([:optimal_engine, :bundle, :export_page], %{rows: rows}, %{table: table})
+
+  # ---------------------------------------------------------------------------
+  # App data
+  #
+  # A collection's records live in a table of its own, named by the Engine that
+  # made it (`AppData.Collections`), so they travel as `app_data/<collection>.jsonl`
+  # beside the tables, and the import makes its own collection, from the schema
+  # `tables/data_collections.jsonl` carries, before it writes them. The table a
+  # bundle names for a collection is never used: it would be interpolated into
+  # SQL.
+
+  defp export_app_data(snap, tenant_id, workspace_id, staging, observe) do
+    File.mkdir_p!(Path.join(staging, "app_data"))
+
+    for {name, table, columns} <- app_data_tables(snap, tenant_id, workspace_id) do
+      file = Path.join([staging, "app_data", name <> ".jsonl"])
+
+      {snap, observe}
+      |> write_jsonl(file, table, columns, "1 = 1", [])
+      |> Map.delete("name")
+      |> Map.put("collection", name)
+    end
+  end
+
+  defp app_data_sources(snap, tenant_id, workspace_id) do
+    for {_name, table, columns} <- app_data_tables(snap, tenant_id, workspace_id),
+        do: {table, columns, "1 = 1", []}
+  end
+
+  # The collections of the workspace in the snapshot, with their tables'
+  # columns. A table name this Engine did not give a collection is skipped.
+  defp app_data_tables(snap, tenant_id, workspace_id) do
+    {:ok, rows} =
+      ReadSnapshot.query(
+        snap,
+        "SELECT name, table_name FROM data_collections WHERE tenant_id = ?1 AND workspace_id = ?2 ORDER BY name",
+        [tenant_id, workspace_id]
+      )
+
+    for [name, table] <- rows,
+        Regex.match?(@app_data_table, table),
+        Schema.identifier?(name),
+        do: {name, table, columns(table)}
+  end
 
   defp export_files(workspace_id, staging) do
     target = Path.join(staging, "files")
@@ -1353,6 +1455,8 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
 
     rows =
       ReadSnapshot.run(fn snap ->
+        sources = sources ++ app_data_sources(snap, tenant_id, workspace_id)
+
         Enum.reduce_while(sources, 0, fn source, total ->
           case source_bytes(snap, source) do
             {:ok, bytes} -> {:cont, total + bytes}
@@ -1418,16 +1522,35 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   # creates or merges into, and add principals to the importing tenant (every
   # principals row is written with that tenant, and an id the Engine already has
   # keeps its existing row).
-  defp permitted(%{"tables" => tables}) when is_list(tables) do
+  defp permitted(%{"tables" => tables} = manifest) when is_list(tables) do
     allowed = exportable_tables()
 
     refused =
       for table <- tables, name = table_name(table), name not in allowed, do: name
 
-    if refused == [], do: :ok, else: {:error, {:table_not_allowed, Enum.sort(refused)}}
+    cond do
+      refused != [] -> {:error, {:table_not_allowed, Enum.sort(refused)}}
+      not app_data_entries?(manifest) -> {:error, :manifest_unreadable}
+      true -> :ok
+    end
   end
 
   defp permitted(_manifest), do: {:error, :manifest_unreadable}
+
+  # A collection's name is the name of its file in the bundle, so it must be one
+  # a collection can have, and named once.
+  defp app_data_entries?(manifest) do
+    case Map.get(manifest, "app_data", []) do
+      entries when is_list(entries) ->
+        names = for %{"collection" => name} <- entries, Schema.identifier?(name), do: name
+        length(names) == length(entries) and Enum.uniq(names) == names
+
+      _ ->
+        false
+    end
+  end
+
+  defp app_data_entries(manifest), do: Map.get(manifest, "app_data", [])
 
   defp table_name(%{"name" => name}) when is_binary(name), do: name
   defp table_name(_table), do: "(unnamed)"
@@ -1446,6 +1569,14 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         )
       end)
 
+    app_data_ok =
+      Enum.all?(app_data_entries(manifest), fn entry ->
+        same_sha256?(
+          file_sha256(Path.join([staging, "app_data", entry["collection"] <> ".jsonl"])),
+          entry["sha256"]
+        )
+      end)
+
     files_ok =
       Enum.all?(manifest["files"], fn file ->
         same_sha256?(file_sha256(Path.join([staging, "files", file["path"]])), file["sha256"])
@@ -1454,6 +1585,7 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
     cond do
       claimed != recomputed -> {:error, :manifest_checksum_mismatch}
       not table_ok -> {:error, :table_checksum_mismatch}
+      not app_data_ok -> {:error, :table_checksum_mismatch}
       not files_ok -> {:error, :file_checksum_mismatch}
       true -> :ok
     end
@@ -1673,7 +1805,9 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
   defp write_rows(manifest, staging, plan, opts) do
     insert = if plan.mode == :merge, do: "INSERT OR IGNORE", else: "INSERT"
     batch_rows = opts |> Keyword.get(:batch_rows, @batch_rows) |> max(1)
-    names = Enum.map(manifest["tables"], & &1["name"])
+    # Collections are made by the import itself (import_app_data/5), never
+    # written as the bundle has them.
+    names = for %{"name" => name} <- manifest["tables"], name != @collections, do: name
 
     # Schema reads go through the Store process, so they happen before any
     # transaction (which runs inside that process).
@@ -1722,10 +1856,324 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         end)
       end
 
+    result =
+      with {:ok, counts} <- result,
+           {:ok, app_data} <- import_app_data(manifest, staging, plan, batch_rows, log) do
+        {:ok, {counts, app_data}}
+      end
+
     # A marked import is taken back through its mark (settle/1).
     with {:error, _} = error <- result do
       if plan.mode == :create and is_nil(plan[:mark]), do: undo_import(plan, opts[:written_log])
       error
+    end
+  end
+
+  # The bundle's collections, made in the target workspace in reference order
+  # (each from the schema the bundle carries, checked as a definition is,
+  # `Schema.restore/2`, with its own table), then their records. A collection
+  # the merge target already holds is used when its schema is the bundle's and
+  # refuses the import otherwise. The rows of the change feed and of the files a
+  # bundle carries name the source's collection ids: they are pointed at the
+  # target's. Returns the records written per collection.
+  defp import_app_data(manifest, staging, plan, batch_rows, log) do
+    scope =
+      Scope.new(tenant_id: plan.tenant_id, workspace_id: plan.workspace_id, actor: "bundle:import")
+
+    entries = Map.new(app_data_entries(manifest), &{&1["collection"], &1})
+
+    with {:ok, rows} <- bundled_collections(manifest, staging),
+         {:ok, made} <- make_collections(parents_first_collections(rows), scope, plan.mode, log),
+         {:ok, counts} <- write_records(made, entries, staging, plan.mode, batch_rows),
+         :ok <- repoint_collection_ids(made, plan) do
+      {:ok, counts}
+    else
+      {:error, reason} -> {:error, {:import_failed, @collections, reason}}
+    end
+  end
+
+  defp bundled_collections(manifest, staging) do
+    if Enum.any?(manifest["tables"], &(&1["name"] == @collections)) do
+      rows =
+        Path.join([staging, "tables", @collections <> ".jsonl"])
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+
+      if Enum.all?(rows, &bundled_collection?/1),
+        do: {:ok, rows},
+        else: {:error, :invalid_collection}
+    else
+      {:ok, []}
+    end
+  end
+
+  defp bundled_collection?(%{"id" => id, "name" => name, "schema" => schema} = row),
+    do:
+      is_binary(id) and Schema.identifier?(name) and is_binary(schema) and
+        (is_nil(row["schema_version"]) or
+           (is_integer(row["schema_version"]) and row["schema_version"] > 0))
+
+  defp bundled_collection?(_row), do: false
+
+  # A collection that references another comes after it; one in a cycle keeps
+  # its place (its create then names a collection not made yet and is refused).
+  defp parents_first_collections(rows) do
+    names = MapSet.new(rows, & &1["name"])
+
+    deps =
+      Map.new(rows, fn row ->
+        refs =
+          case Jason.decode(row["schema"]) do
+            {:ok, %{"fields" => fields}} when is_list(fields) ->
+              for %{"type" => "reference", "references" => target} <- fields,
+                  target != row["name"],
+                  MapSet.member?(names, target),
+                  do: target
+
+            _ ->
+              []
+          end
+
+        {row["name"], refs}
+      end)
+
+    order_collections(rows, deps, MapSet.new(), [])
+  end
+
+  defp order_collections([], _deps, _placed, acc), do: Enum.reverse(acc)
+
+  defp order_collections(pending, deps, placed, acc) do
+    case Enum.split_with(pending, fn row ->
+           Enum.all?(deps[row["name"]], &MapSet.member?(placed, &1))
+         end) do
+      {[], stuck} ->
+        Enum.reverse(acc) ++ stuck
+
+      {ready, rest} ->
+        placed = Enum.reduce(ready, placed, &MapSet.put(&2, &1["name"]))
+        order_collections(rest, deps, placed, Enum.reverse(ready) ++ acc)
+    end
+  end
+
+  defp make_collections(rows, scope, mode, log) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, made} ->
+      case make_collection(row, scope, mode, log) do
+        {:ok, c} -> {:cont, {:ok, [{row["id"], c} | made]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, made} -> {:ok, Enum.reverse(made)}
+      error -> error
+    end
+  end
+
+  defp make_collection(row, scope, mode, log) do
+    name = row["name"]
+
+    with {:ok, schema} <- Jason.decode(row["schema"]),
+         {:ok, restored} <- Schema.restore(name, schema) do
+      case Collections.load(:store, scope, name) do
+        {:ok, c} when mode == :merge ->
+          if Map.delete(restored, "name") == Jason.decode!(Jason.encode!(c.schema)),
+            do: {:ok, c},
+            else: {:error, {:collection_schema_differs, name}}
+
+        {:ok, _c} ->
+          {:error, {:collection_exists, name}}
+
+        {:error, {:not_found, _}} ->
+          create_bundled_collection(row, scope, restored, log)
+
+        error ->
+          error
+      end
+    end
+  end
+
+  # The collection and the line of the written log that names it commit
+  # together, as a batch of rows does (write_batch/5): a failed or cut-off
+  # import takes it back with its records (discard_collection/3).
+  defp create_bundled_collection(row, scope, schema, log) do
+    size = log_size(log)
+    version = row["schema_version"] || 1
+
+    result =
+      Store.transaction(fn txn ->
+        with {:ok, c} <- Collections.create_in(txn, scope, schema),
+             {:ok, 1} <-
+               Store.txn_execute(
+                 txn,
+                 "UPDATE data_collections SET schema_version = ?1, created_by = ?2, created_at = COALESCE(?3, created_at), updated_at = COALESCE(?4, updated_at) WHERE id = ?5",
+                 [
+                   version,
+                   text_or_nil(row["created_by"]),
+                   text_or_nil(row["created_at"]),
+                   text_or_nil(row["updated_at"]),
+                   c.id
+                 ]
+               ),
+             :ok <- log_batch(log, @collections, %{"collection" => c.id}) do
+          {:ok, %{c | schema_version: version}}
+        end
+      end)
+
+    with {:error, _} <- result, do: rewind_log(log, size)
+    result
+  end
+
+  defp text_or_nil(value) when is_binary(value), do: value
+  defp text_or_nil(_value), do: nil
+
+  @record_columns ~w(id _version _created_at _updated_at _created_by _updated_by)
+
+  defp write_records(made, entries, staging, mode, batch_rows) do
+    Enum.reduce_while(made, {:ok, %{}}, fn {_source_id, c}, {:ok, counts} ->
+      case Map.fetch(entries, c.name) do
+        {:ok, _entry} ->
+          file = Path.join([staging, "app_data", c.name <> ".jsonl"])
+
+          case write_collection_records(c, file, mode, batch_rows) do
+            {:ok, n} -> {:cont, {:ok, Map.put(counts, c.name, n)}}
+            error -> {:halt, error}
+          end
+
+        :error ->
+          {:cont, {:ok, counts}}
+      end
+    end)
+  end
+
+  # Records are written with their references empty, then the references are
+  # set: a record may point at one that comes after it in the file (or in a
+  # later batch), and every batch commits with its foreign keys checked. A merge
+  # keeps the records the target holds, and sets references only on the ones it
+  # wrote.
+  defp write_collection_records(c, file, mode, batch_rows) do
+    fields = Enum.map(c.schema["fields"], &("f_" <> &1["name"]))
+    known = MapSet.new(@record_columns ++ fields)
+
+    references =
+      for %{"type" => "reference", "name" => name} <- c.schema["fields"], do: "f_" <> name
+
+    verb = if mode == :merge, do: "INSERT OR IGNORE", else: "INSERT"
+
+    rows =
+      file
+      |> File.stream!()
+      |> Stream.map(&(&1 |> Jason.decode!() |> Map.delete("_rowid")))
+
+    with :ok <- known_record_columns(rows, known, c.name),
+         {:ok, {count, written}} <- insert_records(c, rows, references, verb, batch_rows),
+         :ok <- set_references(c, rows, references, written, batch_rows) do
+      {:ok, count}
+    end
+  end
+
+  defp known_record_columns(rows, known, name) do
+    if Enum.all?(rows, fn row -> Enum.all?(Map.keys(row), &MapSet.member?(known, &1)) end),
+      do: :ok,
+      else: {:error, {:unknown_columns, name}}
+  end
+
+  defp insert_records(c, rows, references, verb, batch_rows) do
+    blank = Map.new(references, &{&1, nil})
+
+    rows
+    |> Stream.chunk_every(batch_rows)
+    |> Enum.reduce_while({:ok, {0, MapSet.new()}}, fn batch, {:ok, {count, written}} ->
+      result =
+        Store.transaction(fn txn ->
+          {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
+
+          Enum.reduce_while(batch, {:ok, {count, written}}, fn row, {:ok, {n, ids}} ->
+            row = Map.merge(row, Map.take(blank, Map.keys(row)))
+            names = Map.keys(row)
+            marks = names |> Enum.with_index(1) |> Enum.map_join(", ", fn {_, i} -> "?#{i}" end)
+
+            case Store.txn_execute(
+                   txn,
+                   "#{verb} INTO #{quote_name(c.table)} (#{Enum.map_join(names, ", ", &quote_name/1)}) VALUES (#{marks})",
+                   Enum.map(names, &decode_value(row[&1]))
+                 ) do
+              {:ok, 0} ->
+                {:cont, {:ok, {n, ids}}}
+
+              {:ok, _} ->
+                {:cont,
+                 {:ok, {n + 1, if(references == [], do: ids, else: MapSet.put(ids, row["id"]))}}}
+
+              {:error, _} = error ->
+                {:halt, error}
+            end
+          end)
+        end)
+
+      case result do
+        {:ok, acc} -> {:cont, {:ok, acc}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp set_references(_c, _rows, [], _written, _batch_rows), do: :ok
+
+  defp set_references(c, rows, references, written, batch_rows) do
+    sets =
+      references
+      |> Enum.with_index(1)
+      |> Enum.map_join(", ", fn {col, i} -> "#{quote_name(col)} = ?#{i}" end)
+
+    sql = "UPDATE #{quote_name(c.table)} SET #{sets} WHERE id = ?#{length(references) + 1}"
+
+    rows
+    |> Stream.filter(
+      &(MapSet.member?(written, &1["id"]) and Enum.any?(references, fn col -> &1[col] != nil end))
+    )
+    |> Stream.chunk_every(batch_rows)
+    |> Enum.reduce_while(:ok, fn batch, :ok ->
+      result =
+        Store.transaction(fn txn ->
+          {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
+
+          Enum.reduce_while(batch, {:ok, :set}, fn row, ok ->
+            case Store.txn_execute(txn, sql, Enum.map(references, &row[&1]) ++ [row["id"]]) do
+              {:ok, _} -> {:cont, ok}
+              {:error, _} = error -> {:halt, error}
+            end
+          end)
+        end)
+
+      case result do
+        {:ok, _} -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp repoint_collection_ids(made, plan) do
+    statements =
+      for {source_id, c} <- made,
+          source_id != c.id,
+          table <- ~w(data_changes data_files) do
+        {"UPDATE #{table} SET collection_id = ?1 WHERE tenant_id = ?2 AND workspace_id = ?3 AND collection_id = ?4",
+         [c.id, plan.tenant_id, plan.workspace_id, source_id]}
+      end
+
+    if statements == [] do
+      :ok
+    else
+      result =
+        Store.transaction(fn txn ->
+          Enum.reduce_while(statements, {:ok, :repointed}, fn {sql, params}, ok ->
+            case Store.txn_execute(txn, sql, params) do
+              {:ok, _} -> {:cont, ok}
+              {:error, _} = error -> {:halt, error}
+            end
+          end)
+        end)
+
+      with {:ok, _} <- result, do: :ok
     end
   end
 
@@ -2208,6 +2656,11 @@ defmodule OptimalEngine.Portability.WorkspaceBundle do
         # SERIALIZABLE; the rows are the workspace's own.
         :ok = Store.txn_read_committed(txn)
         {:ok, _} = Store.txn_execute(txn, "PRAGMA defer_foreign_keys = ON", [])
+
+        # Collections have tables of their own, which go with the workspace.
+        scope = Scope.new(tenant_id: tenant_id, workspace_id: workspace_id)
+        {:ok, collections} = Collections.load_all(txn, scope)
+        :ok = Collections.remove_in(txn, collections)
 
         total =
           Enum.reduce(child_statements ++ scoped_statements, 0, fn {sql, params}, acc ->

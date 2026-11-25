@@ -124,6 +124,53 @@ defmodule OptimalEngine.AppData.Schema do
 
   def normalize_definition(_body), do: invalid("collection definition must be an object")
 
+  @doc """
+  Checks a schema another Engine stored (a replicated change, a workspace
+  bundle) as `normalize_definition/1` checks a definition, and returns it with
+  its name. Normalizing a stored schema again does not give it back (its
+  derived indexes would be declared twice), so the schema is accepted when its
+  fields, owner field and search normalize to themselves and every index is one
+  `add_index/2` accepts on them: every name in it is then one a definition could
+  have given.
+  """
+  @spec restore(term(), term()) :: {:ok, map()} | {:error, {:validation, [String.t()]}}
+  def restore(name, %{"fields" => fields, "indexes" => indexes} = schema)
+      when is_list(fields) and is_list(indexes) do
+    stored = Map.take(schema, ~w(fields indexes owner_field search))
+
+    with {:ok, base} <-
+           normalize_definition(%{
+             "name" => name,
+             "fields" => fields,
+             "owner_field" => schema["owner_field"],
+             "search" => schema["search"] || %{}
+           }),
+         :ok <-
+           check(
+             Map.drop(base, ["name", "indexes"]) == Map.delete(stored, "indexes"),
+             "stored schema does not normalize to itself"
+           ),
+         {:ok, rebuilt} <- add_stored_indexes(base, indexes -- base["indexes"]),
+         :ok <-
+           check(
+             MapSet.new(rebuilt["indexes"]) == MapSet.new(indexes),
+             "stored indexes do not match the fields"
+           ) do
+      {:ok, Map.put(stored, "name", name)}
+    end
+  end
+
+  def restore(_name, _schema), do: invalid("a stored schema needs fields and indexes")
+
+  defp add_stored_indexes(schema, indexes) do
+    Enum.reduce_while(indexes, {:ok, schema}, fn index, {:ok, acc} ->
+      case add_index(acc, index) do
+        {:ok, acc} -> {:cont, {:ok, acc}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
   @doc "Validates one field definition (also used by `add_field`)."
   @spec normalize_field(term()) :: {:ok, map()} | {:error, {:validation, [String.t()]}}
   def normalize_field(%{} = spec) do

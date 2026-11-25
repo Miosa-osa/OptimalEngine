@@ -86,6 +86,30 @@ defmodule OptimalEngine.AppData.Migrations do
     end)
   end
 
+  @doc false
+  # Applies one migration a peer applied, inside the open transaction of the
+  # change that carried it: `{:ok, version}` when it is applied, or was already,
+  # with the same checksum. The checksum is the peer's claim, so it is computed
+  # again from the operations.
+  @spec replay(term(), Scope.t(), term()) :: {:ok, pos_integer()} | {:error, term()}
+  def replay(txn, %Scope{} = scope, %{"app" => app, "version" => version, "operations" => ops} = m)
+      when is_integer(version) and version > 0 and is_list(ops) and ops != [] do
+    with :ok <- valid_app(app),
+         true <-
+           m["checksum"] == checksum(ops) ||
+             {:error, {:validation, ["migration checksum does not match its operations"]}} do
+      apply_one(txn, scope, app, %{
+        "version" => version,
+        "name" => to_string(m["name"] || "v#{version}"),
+        "operations" => ops,
+        "checksum" => m["checksum"]
+      })
+    end
+  end
+
+  def replay(_txn, _scope, _migration),
+    do: {:error, {:validation, ["a migration needs app, a positive version and operations"]}}
+
   # The ledger is re-read inside the transaction, so a deploy racing another
   # one for the same version finds it applied and skips it.
   defp apply_one(txn, scope, app, %{"checksum" => expected} = m) do
@@ -113,7 +137,7 @@ defmodule OptimalEngine.AppData.Migrations do
       m["operations"]
       |> Enum.with_index()
       |> Enum.reduce_while(:ok, fn {op, index}, :ok ->
-        case operation(txn, scope, op) do
+        case operation(txn, scope, op, %{"migration" => replicated(app, m)}) do
           :ok -> {:cont, :ok}
           {:error, reason} -> {:halt, {:error, {:operation_failed, index, reason}}}
         end
@@ -139,33 +163,53 @@ defmodule OptimalEngine.AppData.Migrations do
     end
   end
 
-  defp operation(txn, scope, %{"op" => "create_collection", "collection" => definition}) do
+  # Every change a migration's operations record names the migration whole, so
+  # a replica applies it as a migration, with its ledger row, and not as the
+  # separate schema changes it made (`OptimalEngine.AppData.Replication`).
+  defp replicated(app, m),
+    do: Map.put(Map.take(m, ~w(version name checksum operations)), "app", app)
+
+  defp operation(txn, scope, %{"op" => "create_collection", "collection" => definition}, detail) do
     with {:ok, schema} <- Schema.normalize_definition(definition),
          {:ok, c} <- Collections.create_in(txn, scope, schema),
          :ok <-
-           Collections.log_change(txn, scope, c, "schema", nil, nil, nil, %{
-             "action" => "create",
-             "schema_version" => 1
-           }) do
+           Collections.log_change(
+             txn,
+             scope,
+             c,
+             "schema",
+             nil,
+             nil,
+             nil,
+             c
+             |> Collections.created_detail()
+             |> Map.merge(detail)
+             |> Map.put("schema_version", 1)
+           ) do
       :ok
     end
   end
 
-  defp operation(txn, scope, %{"op" => "alter_collection", "name" => name, "operations" => ops}) do
+  defp operation(
+         txn,
+         scope,
+         %{"op" => "alter_collection", "name" => name, "operations" => ops},
+         detail
+       ) do
     with {:ok, c} <- Collections.load(txn, scope, name),
-         {:ok, _c} <- Collections.alter_in(txn, scope, c, ops) do
+         {:ok, _c} <- Collections.alter_in(txn, scope, c, ops, detail) do
       :ok
     end
   end
 
-  defp operation(txn, scope, %{"op" => "drop_collection", "name" => name} = op) do
-    case Collections.drop_in(txn, scope, name, op["confirm"]) do
+  defp operation(txn, scope, %{"op" => "drop_collection", "name" => name} = op, detail) do
+    case Collections.drop_in(txn, scope, name, op["confirm"], detail) do
       {:ok, _} -> :ok
       error -> error
     end
   end
 
-  defp operation(_txn, _scope, op) do
+  defp operation(_txn, _scope, op, _detail) do
     {:error, {:validation, ["unknown migration operation #{inspect(op["op"] || op)}"]}}
   end
 

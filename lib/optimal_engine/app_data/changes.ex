@@ -32,7 +32,7 @@ defmodule OptimalEngine.AppData.Changes do
          {:ok, limit} <- limit(opts["limit"]),
          {:ok, {filter_sql, filter_params}} <- visibility(scope, opts["collection"]) do
       sql = """
-      SELECT seq, collection, record_id, op, version, owner, actor, data, txn_id, at
+      SELECT seq, collection, record_id, op, version, owner, actor, data, txn_id, at, origin_replica
       FROM data_changes
       WHERE tenant_id = ? AND workspace_id = ? AND seq > ? AND #{filter_sql}
       ORDER BY seq
@@ -149,7 +149,7 @@ defmodule OptimalEngine.AppData.Changes do
     end
   end
 
-  defp to_change([seq, collection, record_id, op, version, owner, actor, data, txn_id, at]) do
+  defp to_change([seq, collection, record_id, op, version, owner, actor, data, txn_id, at, origin]) do
     %{
       "seq" => seq,
       "collection" => collection,
@@ -160,7 +160,8 @@ defmodule OptimalEngine.AppData.Changes do
       "actor" => actor,
       "data" => data && Jason.decode!(data),
       "txn_id" => txn_id,
-      "at" => at
+      "at" => at,
+      "origin" => origin
     }
   end
 end

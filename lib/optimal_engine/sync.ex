@@ -45,6 +45,9 @@ defmodule OptimalEngine.Sync do
 
   require Logger
 
+  alias OptimalEngine.AppData.Changes, as: AppDataChanges
+  alias OptimalEngine.AppData.Replication, as: AppDataReplication
+  alias OptimalEngine.AppData.Semantic, as: AppDataSemantic
   alias OptimalEngine.Compliance.DerivedData
   alias OptimalEngine.Connectors.{Credential, HTTP}
   alias OptimalEngine.LogUrl
@@ -69,6 +72,8 @@ defmodule OptimalEngine.Sync do
   @version_unreported "the relay did not report the other Engine's schema version; sync pauses until it does"
   # The longest label a peer or this Engine may have.
   @label_max 64
+  # The app data change feed, which replicates as changes to replay.
+  @app_data_changes "data_changes"
 
   # -- identity and enablement -------------------------------------------------
 
@@ -1021,6 +1026,7 @@ defmodule OptimalEngine.Sync do
     with :ok <- known_columns(columns, names),
          :ok <- supported_operation(append_only, mutation["operation"]),
          :ok <- known_signal_values(table, mutation),
+         :ok <- app_data_change(table, mutation),
          {:ok, mutation} <- confine_paths(table, mutation) do
       mutation = with_row_key(mutation, columns, append_only, tenant_id, workspace_id)
 
@@ -1036,11 +1042,18 @@ defmodule OptimalEngine.Sync do
           |> unless_same_content(mutation)
         end
 
-      {:apply, %{mutation: mutation, columns: columns, conflict: conflict, gate: gate}}
+      {:apply,
+       %{mutation: mutation, columns: columns, conflict: conflict, gate: gate, local: local}}
     else
       {:error, reason} -> {:fail, reason, mutation}
     end
   end
+
+  # An app data change is the change feed's row, replayed through app data
+  # (`AppData.Replication`), never written as it came: only its shape is checked
+  # here, and only the inserts the feed records are taken.
+  defp app_data_change(@app_data_changes, mutation), do: AppDataReplication.check(mutation)
+  defp app_data_change(_table, _mutation), do: :ok
 
   # A document's or chunk's mode, signal type and format are read back as atoms
   # from fixed sets. A value in none of them is not a signal this Engine wrote,
@@ -1273,7 +1286,10 @@ defmodule OptimalEngine.Sync do
               # at the end of the transaction (`record_ledger/4`).
               ledger: [],
               ledger_ids: MapSet.new(),
-              qdrant: []
+              qdrant: [],
+              # What the app data changes applied wrote, newest first, for the
+              # search index once the batch has committed.
+              app_data: []
             },
             fn
               {:skip, reason, _mutation}, acc ->
@@ -1328,6 +1344,7 @@ defmodule OptimalEngine.Sync do
         if outcome.applied > 0 or outcome.conflicts != [], do: GateCache.clear()
         log_held(outcome.held)
         Enum.each(outcome.fact_conflicts, &raise_fact_claims(tenant_id, workspace_id, &1))
+        if outcome.app_data != [], do: app_data_written(tenant_id, workspace_id, outcome.app_data)
         if outcome.erased?, do: purge_erased(workspace_id, file_plan)
         QdrantRemovals.enqueue(outcome.qdrant_removals)
 
@@ -1538,6 +1555,69 @@ defmodule OptimalEngine.Sync do
     end
   end
 
+  # An app data change is replayed through app data. One it does not take (the
+  # record does not fit this Engine's collection, or its base is not the version
+  # here) is a conflict that leaves the record as it is, and is not put in the
+  # ledger, so nothing forwards it.
+  defp apply_step(
+         txn,
+         tenant_id,
+         workspace_id,
+         %{mutation: %{"entity_type" => @app_data_changes} = mutation} = step,
+         acc,
+         foreign_keys
+       ) do
+    savepoint = "sync_" <> Integer.to_string(System.unique_integer([:positive]))
+    {:ok, _} = Store.txn_execute(txn, "SAVEPOINT #{savepoint}", [])
+
+    case AppDataReplication.apply(txn, tenant_id, workspace_id, mutation) do
+      {:applied, written} ->
+        {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
+
+        %{
+          acc
+          | applied: acc.applied + 1,
+            ledger: [mutation | acc.ledger],
+            ledger_ids: MapSet.put(acc.ledger_ids, mutation["id"]),
+            app_data: Enum.reverse(written) ++ acc.app_data
+        }
+
+      {:conflict, kind, local, detail} ->
+        {:ok, _} = Store.txn_execute(txn, "ROLLBACK TO #{savepoint}", [])
+        {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
+
+        resolution = if local, do: "kept_local", else: "not_applied"
+
+        local_change = %{
+          kind: kind,
+          sequence: nil,
+          device: step.local,
+          base_seq: nil,
+          local_floor: nil,
+          occurred_at: local && local["record"]["updated_at"],
+          payload: local && Jason.encode!(local),
+          detail: detail
+        }
+
+        keyed = Map.put(mutation, "entity_id", AppDataReplication.entity_key(mutation))
+        record_conflict(txn, tenant_id, workspace_id, keyed, local_change, resolution)
+        %{acc | conflicts: [mutation["id"] | acc.conflicts]}
+
+      {:error, reason} ->
+        {:ok, _} = Store.txn_execute(txn, "ROLLBACK TO #{savepoint}", [])
+        {:ok, _} = Store.txn_execute(txn, "RELEASE #{savepoint}", [])
+
+        if foreign_keys == :immediate and foreign_key_failure?(reason) do
+          %{acc | retry: [step | acc.retry]}
+        else
+          keyed = Map.put(mutation, "entity_id", AppDataReplication.entity_key(mutation))
+          record_failure(txn, tenant_id, workspace_id, keyed, reason)
+          reason = if is_atom(reason), do: reason, else: inspect(reason)
+          %{acc | failed: [%{id: mutation["id"], reason: reason} | acc.failed]}
+        end
+    end
+  end
+
   defp apply_step(
          txn,
          tenant_id,
@@ -1616,6 +1696,18 @@ defmodule OptimalEngine.Sync do
               %{acc | failed: [%{id: mutation["id"], reason: reason} | acc.failed]}
           end
       end
+    end
+  end
+
+  # The records an apply wrote go to the search index, and the workspace's
+  # change feed subscribers are woken, as after a write here.
+  defp app_data_written(tenant_id, workspace_id, written) do
+    AppDataSemantic.index_written(Enum.reverse(written))
+    scope = OptimalEngine.AppData.Scope.new(tenant_id: tenant_id, workspace_id: workspace_id)
+
+    case AppDataChanges.latest_seq(scope) do
+      {:ok, seq} -> AppDataChanges.notify(tenant_id, workspace_id, seq)
+      _ -> :ok
     end
   end
 
@@ -2018,6 +2110,10 @@ defmodule OptimalEngine.Sync do
       "remote_occurred_at" => mutation["occurred_at"],
       "resolution" => resolution
     }
+
+    # A change replayed through app data says what it was judged by: the
+    # versions, or the errors of the record (`AppData.Replication`).
+    detail = Map.merge(detail, Map.get(local, :detail, %{}))
 
     id =
       "sc_" <>
