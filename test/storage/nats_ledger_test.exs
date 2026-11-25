@@ -328,6 +328,9 @@ defmodule OptimalEngine.Storage.NATSLedgerTest do
       Process.exit(pid, :kill)
       assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 5_000
       assert eventually(fn -> is_pid(Process.whereis(name)) and Process.whereis(name) != pid end)
+      # The name is registered before init/1 runs, and init/1 is what counts the
+      # failure: wait for it before the next kill and before reading the health.
+      _ = :sys.get_state(name)
     end
 
     assert {:degraded, failures, _error} = LedgerPublisher.health(name)
