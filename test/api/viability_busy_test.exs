@@ -25,24 +25,24 @@ defmodule OptimalEngine.API.ViabilityBusyTest do
     end)
   end
 
-  # Stalls the Store for `ms`: no statement is answered until it ends.
-  defp hold_store(ms), do: OptimalEngine.Test.StoreStall.hold(ms)
+  # Stalls the Store: no statement is answered until `StoreStall.release/1`.
+  defp hold_store, do: OptimalEngine.Test.StoreStall.hold()
 
   defp classification(query),
     do: ViabilityAPI.classification(conn(:get, "/api/signals/classification?" <> query))
 
   test "the reclassifier answers busy, not an exit, while the Store is held" do
-    task = hold_store(1_500)
+    task = hold_store()
 
     assert {:error, :busy} = Reclassifier.distribution("busy-ws", tenant_id: "default")
     assert {:error, :busy} = Reclassifier.plan("busy-ws", tenant_id: "default")
 
-    assert {:ok, :released} = Task.await(task, 10_000)
+    assert {:ok, :released} = OptimalEngine.Test.StoreStall.release(task)
     assert {:ok, %{}} = Reclassifier.distribution("busy-ws", tenant_id: "default")
   end
 
   test "the route answers 503 with Retry-After while the Store is held, with and without a plan" do
-    task = hold_store(2_500)
+    task = hold_store()
 
     for query <- ["workspace=busy-ws", "workspace=busy-ws&plan=true"] do
       response = classification(query)
@@ -52,7 +52,7 @@ defmodule OptimalEngine.API.ViabilityBusyTest do
       assert %{"error" => "busy"} = Jason.decode!(response.resp_body)
     end
 
-    assert {:ok, :released} = Task.await(task, 10_000)
+    assert {:ok, :released} = OptimalEngine.Test.StoreStall.release(task)
     assert classification("workspace=busy-ws").status == 200
   end
 
