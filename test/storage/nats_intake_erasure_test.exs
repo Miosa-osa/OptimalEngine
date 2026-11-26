@@ -152,9 +152,12 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
 
   # Two queued for the doomed workspace's connector and one dead-lettered,
   # one queued for the other workspace's.
+  # Its queues only fill the stream: they take no recorded removal, so the removal
+  # under test is the only one (a queue's own sweep, run when it comes up, could
+  # otherwise take part of it on a slow runner).
   defp fill(ctx) do
     failing = fn _signal, _scope -> raise "intake exploded" end
-    dead = queue(ctx, ingest: failing, dead_letter_after: 1, retry_ms: 10)
+    dead = queue(ctx, ingest: failing, dead_letter_after: 1, retry_ms: 10, purge_sweep: false)
 
     assert {:ok, 0} =
              PullScheduler.intake_sink(queue: dead).([signal(ctx, "gone", 0)], scope(ctx, ctx.ws))
@@ -164,7 +167,7 @@ defmodule OptimalEngine.Storage.NATSIntakeErasureTest do
              IntakeQueue.status(dead).dead_lettered == 1
            end)
 
-    q = queue(ctx)
+    q = queue(ctx, purge_sweep: false)
     gone = for i <- 1..2, do: signal(ctx, "gone", i)
     assert {:ok, 0} = PullScheduler.intake_sink(queue: q).(gone, scope(ctx, ctx.ws))
 

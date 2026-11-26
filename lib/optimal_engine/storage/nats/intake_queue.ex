@@ -550,7 +550,11 @@ defmodule OptimalEngine.Storage.NATS.IntakeQueue do
   @impl WorkQueue
   def periodic_ms(context), do: Map.get(context, :purge_retry_ms, 60_000)
 
+  # `purge_sweep: false` (tests) starts a queue that does not take recorded removals:
+  # one started only to fill the stream would otherwise race the removal under test.
   @impl WorkQueue
+  def on_provisioned(_server, %{purge_sweep: false}), do: :ok
+
   def on_provisioned(_server, context) do
     with {:ok, namespace} <- namespace(Map.to_list(Map.take(context, [:namespace]))) do
       process_requests(Map.get(context, :connection, default_conn()), namespace)
