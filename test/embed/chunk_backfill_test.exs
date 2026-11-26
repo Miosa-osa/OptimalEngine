@@ -98,6 +98,12 @@ defmodule OptimalEngine.Embed.ChunkBackfillTest do
   end
 
   test "a window reads the workspace through its (workspace_id, id) index", ctx do
+    # With a test's few rows the primary key and the workspace index cost about the same, and
+    # the plan followed whatever statistics the rest of the suite left. Other workspaces' chunks
+    # and fresh statistics make the workspace filter as selective as it is in production.
+    for i <- 1..200, do: chunk!(ctx.tenant, ctx.other, "#{ctx.prefix}-o#{i}", "Other note #{i}")
+    OptimalEngine.Test.IndexReads.analyze!(["chunks"])
+
     for {sql, params} <- ChunkBackfill.window_statements(ctx.ws) do
       OptimalEngine.Test.IndexReads.assert_uses_index(
         sql,

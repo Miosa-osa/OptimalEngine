@@ -11,6 +11,27 @@ defmodule OptimalEngine.Test.IndexReads do
 
   alias OptimalEngine.Store
 
+  @doc """
+  Takes fresh planner statistics for `tables` on PostgreSQL (a no-op on SQLite). With a
+  test's few rows two indexes can cost the same; a test that gives a table a realistic spread
+  of rows analyzes it so the planner sees that spread, not what the rest of the suite left.
+  """
+  def analyze!(tables) do
+    if Store.selected?(OptimalEngine.Store.Postgres) do
+      {:ok, _} =
+        Store.transaction(fn txn ->
+          for table <- tables do
+            {:ok, _} =
+              OptimalEngine.Store.Postgres.txn_execute_native(txn, "ANALYZE " <> table, [])
+          end
+
+          {:ok, :analyzed}
+        end)
+    end
+
+    :ok
+  end
+
   @doc "The plan of `sql` on the Engine's store, one line per step."
   def plan(sql, params \\ []) do
     if Store.selected?(OptimalEngine.Store.Postgres) do
