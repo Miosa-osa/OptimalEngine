@@ -145,23 +145,28 @@ defmodule OptimalEngine.Storage.BackupScheduleTest do
     assert status.last_job.status == "completed"
   end
 
+  # Each backup here is a real one of the whole store (on PostgreSQL, a snapshot of every table into
+  # SQLite and an integrity check), so the test is slow by its nature: on a loaded runner the four it
+  # takes need more than the default minute (#269).
+  @tag timeout: 180_000
   test "pruning keeps the newest offsite copies and a few local ones, never a hand-made backup",
        %{stub: stub} do
     {:ok, manual_target} = Backup.resolve_target("manual-before-schedule.db")
     {:ok, manual} = Backup.create(manual_target, offsite: true)
     assert manual.offsite.status == "shipped"
 
-    for n <- 0..3 do
+    # Three slots are every case: one loses both copies, one keeps only its offsite copy, one keeps both.
+    for n <- 0..2 do
       {:ok, _} = Schedule.schedule(now: slot_time(n), interval_ms: @hour)
       assert [%{outcome: :completed}] = Schedule.drain(keep: 2, keep_local: 1)
     end
 
     rows = scheduled_rows()
-    assert length(rows) == 4
-    [oldest, older, newer, newest] = rows
+    assert length(rows) == 3
+    [oldest, newer, newest] = rows
 
-    # The two newest keep their offsite copies; the older two lost theirs.
-    assert Enum.map(rows, & &1.offsite) == [0, 0, 1, 1]
+    # The two newest keep their offsite copies; the oldest lost its.
+    assert Enum.map(rows, & &1.offsite) == [0, 1, 1]
 
     assert S3Stub.object_keys(stub.agent) ==
              Enum.sort([
@@ -171,15 +176,16 @@ defmodule OptimalEngine.Storage.BackupScheduleTest do
              ])
 
     # Only the newest local copy remains on disk.
-    assert Enum.map(rows, &File.regular?(&1.path)) == [false, false, false, true]
+    assert Enum.map(rows, &File.regular?(&1.path)) == [false, false, true]
 
     # A backup with no copy left anywhere is marked pruned; one still offsite is not.
     assert oldest.status == "pruned"
-    assert older.status == "pruned"
     assert newer.status == "completed"
     assert newest.status == "completed"
     assert oldest.metadata["offsite_pruned_at"]
     assert oldest.metadata["local_pruned_at"]
+    refute newer.metadata["offsite_pruned_at"]
+    assert newer.metadata["local_pruned_at"]
 
     # The hand-made backup is untouched.
     assert File.regular?(manual.target)
