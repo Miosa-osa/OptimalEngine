@@ -24,22 +24,22 @@ defmodule OptimalEngine.Retrieval.SearchBusyTest do
     end)
   end
 
-  # Stalls the Store for `ms`: no statement is answered until it ends.
-  defp hold_store(ms), do: OptimalEngine.Test.StoreStall.hold(ms)
+  # Stalls the Store: no statement is answered until `StoreStall.release/1`.
+  defp hold_store, do: OptimalEngine.Test.StoreStall.hold()
 
   test "a search while the Store is busy answers busy, and the search process lives on" do
     pid = Process.whereis(Search)
-    task = hold_store(1_500)
+    task = hold_store()
 
     assert {:error, :busy} = Search.search("anything at all")
     assert Process.whereis(Search) == pid
 
-    assert {:ok, :released} = Task.await(task, 10_000)
+    assert {:ok, :released} = OptimalEngine.Test.StoreStall.release(task)
     assert {:ok, _results} = Search.search("anything at all")
   end
 
   test "the search route answers 503 with Retry-After while the Store is busy" do
-    task = hold_store(1_500)
+    task = hold_store()
 
     # Workspace authorization reads the Store before the search runs. A call
     # to SQLite's store exits when it is not answered in time, and the error
@@ -60,7 +60,7 @@ defmodule OptimalEngine.Retrieval.SearchBusyTest do
     assert {"retry-after", "1"} in headers
     assert %{"error" => "busy"} = Jason.decode!(body)
 
-    assert {:ok, :released} = Task.await(task, 10_000)
+    assert {:ok, :released} = OptimalEngine.Test.StoreStall.release(task)
 
     assert conn(:get, "/api/search?q=anything") |> Router.call(Router.init([])) |> Map.get(:status) ==
              200

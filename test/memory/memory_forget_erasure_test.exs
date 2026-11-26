@@ -262,7 +262,7 @@ defmodule OptimalEngine.Memory.ForgetErasureTest do
 
     # The posting lists held by another session: the refresh cannot run.
     held =
-      OptimalEngine.Test.StoreStall.hold_tables(~w(optimal_fts_postings optimal_fts_docs), 2_000)
+      OptimalEngine.Test.StoreStall.hold_tables(~w(optimal_fts_postings optimal_fts_docs))
 
     assert {:error, {:memory_erasure_failed, :fts_refresh, _}} = Memory.forget(memory.id)
 
@@ -279,7 +279,7 @@ defmodule OptimalEngine.Memory.ForgetErasureTest do
 
     assert queued > 0
 
-    assert {:ok, :released} = Task.await(held, 10_000)
+    assert {:ok, :released} = OptimalEngine.Test.StoreStall.release(held)
     Application.put_env(:optimal_engine, :store_call_timeout_ms, previous || 15_000)
 
     # The store's background refresh (its timer), not the test, takes the queue.

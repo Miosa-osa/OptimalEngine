@@ -501,16 +501,16 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
       end)
     end
 
-    # Stalls the Store for `ms`: no statement is answered until it ends.
-    defp hold_store(ms), do: OptimalEngine.Test.StoreStall.hold(ms)
+    # Stalls the Store: no statement is answered until `StoreStall.release/1`.
+    defp hold_store, do: OptimalEngine.Test.StoreStall.hold()
 
     test "status and cancel answer busy, and a job that is not there is still not found", ctx do
       {:ok, view, :queued} = BundleJobs.submit_export(ctx.tenant, ctx.ws, %{})
 
-      task = hold_store(1_500)
+      task = hold_store()
       assert {:error, :busy} = BundleJobs.status(ctx.tenant, view.job_id)
       assert {:error, :busy} = BundleJobs.cancel(ctx.tenant, view.job_id)
-      assert {:ok, :released} = Task.await(task, 10_000)
+      assert {:ok, :released} = OptimalEngine.Test.StoreStall.release(task)
 
       assert {:error, :not_found} = BundleJobs.status(ctx.tenant, "job_missing")
       assert {:error, :not_found} = BundleJobs.cancel(ctx.tenant, "job_missing")
@@ -522,7 +522,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
       {:ok, view, :queued} = BundleJobs.submit_export(ctx.tenant, ctx.ws, %{})
       base = conn(:get, "/") |> assign(:current_tenant, ctx.tenant)
 
-      task = hold_store(1_500)
+      task = hold_store()
 
       for answer <- [
             BundleJobsAPI.status(base, view.job_id),
@@ -533,7 +533,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
         assert decode(answer)["error"] == "busy"
       end
 
-      assert {:ok, :released} = Task.await(task, 10_000)
+      assert {:ok, :released} = OptimalEngine.Test.StoreStall.release(task)
 
       assert BundleJobsAPI.status(base, "job_missing").status == 404
       assert BundleJobsAPI.cancel(base, "job_missing").status == 404
@@ -545,7 +545,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
 
       with_auth(fn ->
         key = admin_key(ctx.tenant)
-        task = hold_store(1_500)
+        task = hold_store()
 
         # The key is read from the Store before the handler runs, so the request
         # may fail there; the error handler answers 503 either way and re-raises.
@@ -569,7 +569,7 @@ defmodule OptimalEngine.Portability.BundleJobsTest do
           assert %{"error" => "busy"} = Jason.decode!(body)
         end
 
-        assert {:ok, :released} = Task.await(task, 10_000)
+        assert {:ok, :released} = OptimalEngine.Test.StoreStall.release(task)
         assert call(:get, "/api/bundles/jobs/" <> view.job_id, key).status == 200
         assert call(:get, "/api/bundles/jobs/job_missing", key).status == 404
       end)

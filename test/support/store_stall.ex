@@ -23,19 +23,24 @@ defmodule OptimalEngine.Test.StoreStall do
   @acquire_ms 30_000
   @try_lock_ms 200
 
+  # A hold the test never releases ends here and answers `:never_released`, so a
+  # forgotten `release/1` fails the test instead of hanging it.
+  @max_hold_ms 60_000
+
   @doc """
-  Stalls the store for `ms` from a task of its own and returns once it is
-  stalled; the task answers `{:ok, :released}` when the store answers again.
+  Stalls the store from a task of its own and returns once it is stalled. The
+  store stays stalled until `release/1`: a fixed window lets a slow caller (one
+  queued behind a reconnecting pool connection) reach the store after it is
+  answering again, and pass or fail by timing alone.
   """
-  def hold(ms) do
+  def hold do
     parent = self()
 
     task =
       Task.async(fn ->
         stalled(fn ->
           send(parent, {__MODULE__, :holding})
-          Process.sleep(ms)
-          {:ok, :released}
+          until_released()
         end)
       end)
 
@@ -46,12 +51,25 @@ defmodule OptimalEngine.Test.StoreStall do
     end
   end
 
+  @doc "Ends a stall from `hold/0` or `hold_tables/1`; answers `{:ok, :released}`."
+  def release(%Task{pid: pid} = task) do
+    send(pid, {__MODULE__, :release})
+    Task.await(task, 10_000)
+  end
+
+  defp until_released do
+    receive do
+      {__MODULE__, :release} -> {:ok, :released}
+    after
+      @max_hold_ms -> :never_released
+    end
+  end
+
   @doc """
   On PostgreSQL, holds `tables` in ACCESS EXCLUSIVE mode from a connection of
-  its own for `ms`, and returns once they are held; the task answers
-  `{:ok, :released}` when they are let go.
+  its own until `release/1`, and returns once they are held.
   """
-  def hold_tables(tables, ms) do
+  def hold_tables(tables) do
     parent = self()
 
     task =
@@ -63,8 +81,7 @@ defmodule OptimalEngine.Test.StoreStall do
           list = Enum.map_join(tables, ", ", &~s("#{&1}"))
           Postgrex.query!(conn, "LOCK TABLE #{list} IN ACCESS EXCLUSIVE MODE", [], timeout: 60_000)
           send(parent, {__MODULE__, :holding})
-          Process.sleep(ms)
-          {:ok, :released}
+          until_released()
         after
           _ = Postgrex.query(conn, "ROLLBACK", [])
           GenServer.stop(conn)

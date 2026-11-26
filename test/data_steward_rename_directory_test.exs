@@ -339,14 +339,14 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
           else: Application.delete_env(:optimal_engine, :store_call_timeout_ms)
       end)
 
-      task = hold_store(1_500)
+      task = hold_store()
 
       assert {:ok, [%{action: :needs_attention}]} = DataSteward.recover_interrupted_renames()
 
       assert File.exists?(Path.join(ctx.root, "#{ctx.new}/nodes/sales/signals/deal.md"))
       assert length(notes(ctx)) == 1
 
-      assert {:ok, :released} = Task.await(task, 10_000)
+      assert {:ok, :released} = OptimalEngine.Test.StoreStall.release(task)
       assert {:ok, [%{action: :moved_back}]} = DataSteward.recover_interrupted_renames()
     end
 
@@ -533,8 +533,8 @@ defmodule OptimalEngine.DataStewardRenameDirectoryTest do
     workspace
   end
 
-  # Stalls the Store for `ms`: no statement is answered until it ends.
-  defp hold_store(ms), do: OptimalEngine.Test.StoreStall.hold(ms)
+  # Stalls the Store: no statement is answered until `StoreStall.release/1`.
+  defp hold_store, do: OptimalEngine.Test.StoreStall.hold()
 
   defp note!(ctx, source, target, tenant \\ "default") do
     dir = Path.join(ctx.root, ".optimal-rename")
