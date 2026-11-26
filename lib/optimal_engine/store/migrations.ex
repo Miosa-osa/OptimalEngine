@@ -187,6 +187,19 @@ defmodule OptimalEngine.Store.Migrations do
   @spec superseded_tables() :: %{String.t() => String.t()}
   def superseded_tables, do: %{"edges" => "graph_edges"}
 
+  # The migrations an Engine one schema behind can sync across (MIO-1100): each
+  # changes no replicated table, or only adds a nullable or defaulted column to
+  # one. Across such a step the older Engine writes the columns it knows and
+  # keeps the rest of each change in its ledger, and the newer Engine leaves a
+  # column the older one did not send as it was. A migration that renames,
+  # retypes or drops a replicated column, or changes what a value means, is not
+  # listed: Engines on either side of it pause until both run it.
+  @sync_bridgeable [91, 92]
+
+  @doc "Whether two Engines either side of migration `version` can still sync."
+  @spec sync_bridgeable?(integer()) :: boolean()
+  def sync_bridgeable?(version), do: version in @sync_bridgeable
+
   @doc """
   How many rows of a workspace a superseded table still holds, 0 when the
   table is absent. Nothing reads those rows; the count tells whether an

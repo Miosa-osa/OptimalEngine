@@ -869,6 +869,63 @@ defmodule OptimalEngine.SyncTest do
     end
   end
 
+  # MIO-1100: Engines one schema apart keep syncing across a step an older Engine
+  # can sync across, instead of pausing on any difference.
+  describe "one schema apart" do
+    test "a peer one schema behind or one ahead that names this one is compatible; others pause" do
+      local = Sync.engine_info()["migration"]
+      assert OptimalEngine.Store.Migrations.sync_bridgeable?(local)
+      assert Sync.engine_info()["bridges"] == [local - 1]
+
+      assert :ok = Sync.compatible(%{"migration" => local})
+      assert :ok = Sync.compatible(%{"migration" => local - 1})
+      assert :ok = Sync.compatible(%{"migration" => local + 1, "bridges" => [local]})
+      assert :ok = Sync.compatible(%{"migration" => local + 1, "sync_bridges" => [local]})
+
+      for engine <- [
+            %{"migration" => local + 1},
+            %{"migration" => local + 1, "bridges" => [local - 1]},
+            %{"migration" => local - 2},
+            %{"migration" => local + 2, "bridges" => [local + 1]}
+          ] do
+        assert {:error, {:version_mismatch, _}} = Sync.compatible(engine)
+      end
+    end
+
+    test "a row from an Engine one schema ahead is written without the columns this one lacks, which stay in the ledger",
+         ctx do
+      local = Sync.engine_info()["migration"]
+      id = "ahead-#{ctx.n}"
+      row = context_row(id, "From a newer schema", ctx.ws, ctx.tenant)
+      row = put_in(row, ["row", "column_added_later"], "kept")
+      change = mutation(ctx, %{"payload" => row})
+
+      assert {:ok, %{applied: 1, failed: []}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [change], peer_migration: local + 1)
+
+      assert title(id) == "From a newer schema"
+
+      assert {:ok, [[payload]]} =
+               Store.raw_query("SELECT payload FROM sync_mutations WHERE id = ?1", [change["id"]])
+
+      assert Jason.decode!(payload)["row"]["column_added_later"] == "kept"
+    end
+
+    test "the same row from an Engine on this schema is still refused", ctx do
+      id = "same-#{ctx.n}"
+
+      row =
+        put_in(
+          context_row(id, "Same schema", ctx.ws, ctx.tenant),
+          ["row", "column_added_later"],
+          "x"
+        )
+
+      assert {:ok, %{applied: 0, failed: [%{reason: :unknown_columns}]}} =
+               Sync.apply_changes(ctx.tenant, ctx.ws, [mutation(ctx, %{"payload" => row})])
+    end
+  end
+
   describe "what a peer may write" do
     # The table is named by the sender, so a peer holding only the `sync` scope
     # could otherwise write credentials, roles or API keys into this Engine.

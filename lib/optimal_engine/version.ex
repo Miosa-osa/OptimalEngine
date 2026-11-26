@@ -99,6 +99,9 @@ defmodule OptimalEngine.Version do
       build_timestamp: @build_timestamp,
       api_version: "v1",
       expected_migration: expected_migration(),
+      # The older schemas this Engine syncs with (`OptimalEngine.Sync.compatible/1`),
+      # so a relay can tell a client before anything moves.
+      sync_bridges: sync_bridges(),
       components: %{
         evidence_plan: EvidencePlan.version(),
         profile_router: ProfileRouter.version(),
@@ -106,6 +109,14 @@ defmodule OptimalEngine.Version do
         associative_projection: AssociativeProjection.version()
       }
     }
+  end
+
+  defp sync_bridges do
+    migration = expected_migration()
+
+    if OptimalEngine.Store.Migrations.sync_bridgeable?(migration),
+      do: [migration - 1],
+      else: []
   end
 
   @spec application_version() :: String.t()

@@ -40,8 +40,11 @@ defmodule OptimalEngine.Sync do
     never written, and the rest of its page still applies. Every applied row
     is stamped with the target tenant and workspace, and a row whose key
     already exists in another tenant or workspace is refused.
-  * Version safety: a peer with a different schema migration pauses with a
-    clear message until both run the same version.
+  * Version safety: a peer one schema behind or ahead syncs on when the step
+    between is one an older Engine can sync across
+    (`Store.Migrations.sync_bridgeable?/1`): the older one writes the columns
+    it knows and keeps the rest of each change in its ledger. Any other
+    difference pauses with a clear message until both run the same version.
   * Seeding: a new replica imports a workspace bundle exported after sync
     was enabled, then pulls from the bundle's `ledger_sequence`.
   """
@@ -199,10 +202,19 @@ defmodule OptimalEngine.Sync do
   @doc "Identity and schema version, sent with every change page."
   @spec engine_info() :: map()
   def engine_info do
+    migration = OptimalEngine.Store.Migrations.all() |> Enum.map(&elem(&1, 0)) |> Enum.max()
+
     %{
       "replica_id" => replica_id(),
       "version" => Application.spec(:optimal_engine, :vsn) |> to_string(),
-      "migration" => OptimalEngine.Store.Migrations.all() |> Enum.map(&elem(&1, 0)) |> Enum.max()
+      "migration" => migration,
+      # The older schemas this Engine syncs with: the one before it, when the
+      # step between is one an older Engine can sync across.
+      "bridges" =>
+        if(OptimalEngine.Store.Migrations.sync_bridgeable?(migration),
+          do: [migration - 1],
+          else: []
+        )
     }
   end
 
@@ -336,6 +348,13 @@ defmodule OptimalEngine.Sync do
 
   defp home_order(_direction, _opts), do: nil
 
+  # A sender one schema ahead across a step this Engine can sync with (it was
+  # let through `compatible/1`).
+  defp peer_ahead?(migration) when is_integer(migration),
+    do: migration == engine_info()["migration"] + 1
+
+  defp peer_ahead?(_migration), do: false
+
   defp put_base_rejected(result, %{rejected: nil}), do: result
   defp put_base_rejected(result, %{rejected: why}), do: Map.put(result, :base_rejected, why)
 
@@ -353,7 +372,8 @@ defmodule OptimalEngine.Sync do
       rejected: nil,
       direction: direction,
       sender: sender_other_than(opts[:sender], local),
-      home_order: home_order(direction, opts)
+      home_order: home_order(direction, opts),
+      peer_ahead: peer_ahead?(opts[:peer_migration])
     }
 
     case {opts[:base_seq], opts[:local_floor]} do
@@ -1098,7 +1118,7 @@ defmodule OptimalEngine.Sync do
     payload = mutation["payload"]
     names = Map.keys(payload["row"]) ++ Map.keys(payload["blobs"] || %{})
 
-    with :ok <- known_columns(columns, names),
+    with :ok <- known_columns(columns, names, base),
          :ok <- supported_operation(append_only, mutation["operation"]),
          :ok <- known_signal_values(table, mutation),
          :ok <- app_data_change(table, mutation),
@@ -1182,7 +1202,13 @@ defmodule OptimalEngine.Sync do
 
   # Every name the payload carries, a blob's as well as a row column's, must be
   # a column of the table: a name is quoted into the statement that writes it.
-  defp known_columns([], _names), do: {:error, :unknown_table}
+  defp known_columns([], _names, _base), do: {:error, :unknown_table}
+
+  # From an Engine one schema ahead a row can carry columns added after this
+  # Engine's schema: they are left out of the write (`drop_unknown_columns/2`),
+  # so no unknown name is ever quoted into a statement, and kept in the ledger.
+  defp known_columns(_columns, _names, %{peer_ahead: true}), do: :ok
+  defp known_columns(columns, names, _base), do: known_columns(columns, names)
 
   defp known_columns(columns, names) do
     known = MapSet.new(columns, & &1.name)
@@ -1842,6 +1868,7 @@ defmodule OptimalEngine.Sync do
         end)
       )
       |> Map.merge(Map.new(scope))
+      |> drop_unknown_columns(columns)
 
     with :ok <- check_keys(keyed?, delete?, keys, row),
          :ok <- check_scope(txn, table, keyed? and guard != [], keys, row, guard),
@@ -1851,6 +1878,14 @@ defmodule OptimalEngine.Sync do
          {:ok, _} <- Store.txn_execute(txn, sql, params) do
       :ok
     end
+  end
+
+  # A change from an Engine one schema ahead can name columns this one does not
+  # have: they are not written here, and they stay in the change this Engine keeps
+  # in its ledger, so a peer it forwards the change to still gets them.
+  defp drop_unknown_columns(row, columns) do
+    names = MapSet.new(columns, & &1.name)
+    Map.filter(row, fn {name, _value} -> MapSet.member?(names, name) end)
   end
 
   # The gate also applies to the row a change would overwrite or delete: a delete
@@ -2645,7 +2680,8 @@ defmodule OptimalEngine.Sync do
              local_floor: pull_floor(peer),
              direction: :pull,
              from_home: Map.get(peer, :home, false),
-             peer_takes_pushes: peer.policy in ["both", "push"]
+             peer_takes_pushes: peer.policy in ["both", "push"],
+             peer_migration: engine["migration"]
            ) do
       {:ok, _} =
         Store.raw_query(
@@ -3192,16 +3228,36 @@ defmodule OptimalEngine.Sync do
   def compatible(%{"migration" => migration} = engine) do
     local = engine_info()["migration"]
 
-    if migration == local,
-      do: :ok,
-      else:
+    cond do
+      migration == local ->
+        :ok
+
+      # One schema behind this Engine, across a step it can sync across.
+      migration == local - 1 and OptimalEngine.Store.Migrations.sync_bridgeable?(local) ->
+        :ok
+
+      # One schema ahead, and the peer says it syncs with this one.
+      migration == local + 1 and local in peer_bridges(engine) ->
+        :ok
+
+      true ->
         {:error,
          {:version_mismatch,
-          "peer #{engine["replica_id"]} runs schema #{migration}, this Engine runs #{local}; sync pauses until both run the same Engine version"}}
+          "peer #{engine["replica_id"]} runs schema #{migration}, this Engine runs #{local}; sync pauses until both run the same Engine version, or versions one schema apart across a step they can sync across"}}
+    end
   end
 
   def compatible(_engine),
     do: {:error, {:version_mismatch, "peer did not report its schema version"}}
+
+  # The older schemas a peer syncs with: `bridges` in its engine envelope, or
+  # `sync_bridges` as `/api/version` names them (a relay passes that on).
+  defp peer_bridges(engine) do
+    case engine["bridges"] || engine["sync_bridges"] do
+      bridges when is_list(bridges) -> bridges
+      _none -> []
+    end
+  end
 
   defp headers(key), do: [{"authorization", "Bearer " <> key}, {"x-optimal-replica", replica_id()}]
 
