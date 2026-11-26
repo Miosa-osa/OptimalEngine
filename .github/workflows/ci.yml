@@ -165,13 +165,21 @@ jobs:
   # the whole suite runs with the Engine on PostgreSQL, so the two stores stay
   # at parity and code paths only the PostgreSQL store takes (full-text search
   # on posting lists, app data DDL, ...) are tested.
+  # The suite on PostgreSQL is mostly tests that run one at a time (about 18 of its
+  # 19 minutes), so it runs in four parts on four runners, each with its own server.
   test-postgres-store:
-    name: test-postgres-store
+    name: test-postgres-store (${{ matrix.partition }}/4)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
+
     env:
       MIX_ENV: test
+      MIX_TEST_PARTITION: ${{ matrix.partition }}
       OPTIMAL_STORE: postgres
       OPTIMAL_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/optimal_test
       OPTIMAL_POSTGRES_SCHEMA: oe_ci_store
@@ -231,7 +239,7 @@ jobs:
       # PostgreSQL. Tests of SQLite itself are tagged :sqlite_store and left
       # out (test/test_helper.exs); each names its PostgreSQL counterpart.
       - name: Run the suite on the PostgreSQL store
-        run: mix test --warnings-as-errors
+        run: mix test --warnings-as-errors --partitions 4
 
   mcp:
     name: mcp server (build and test)
