@@ -37,6 +37,7 @@ bin/optimal close "what changed and how verified"
 | --- | --- | --- |
 | `OPTIMAL_ENGINE_API_URL` | `http://localhost:4200` | CLI API target. |
 | `OPTIMAL_ENGINE_API_KEY` | empty | Bearer token for wrapper/client HTTP calls; supplying it does not configure server authentication. |
+| `OPTIMAL_SYNC_HOME` | `false` | Literal `true` makes this Engine the home of every workspace it syncs (a managed cloud Engine): of two concurrent changes, the one that reaches it later stands, whatever the senders' clocks. Other values than `true` and `false` fail startup configuration. |
 | `OPTIMAL_AUTH_REQUIRED` | configured auth setting, normally false | Literal `true` requires HTTP credentials; literal `false` enables trusted local mode; other values fail startup configuration. |
 | `OPTIMAL_API_ENABLED` | disabled outside development startup | Literal `true` enables the configured API listener; development launcher/config also enables it. |
 | `OPTIMAL_API_PORT` | `4200` | Port for an environment-enabled HTTP listener. |
@@ -269,7 +270,7 @@ They should not connect to the owner's private engine unless explicitly configur
 
 ## Compatibility And API Grants
 
-The current source contract is application `0.3.14`, contract schema `1`, API `v1`, and migration `91`.
+The current source contract is application `0.3.14`, contract schema `1`, API `v1`, and migration `92`.
 The tracked [engine-contract.json](engine-contract.json) lists capabilities; [release identity](docs/guides/versioning-and-releases.md) explains the running build's SHA and version response.
 A checkout pin does not attest a separately running HTTP process.
 
